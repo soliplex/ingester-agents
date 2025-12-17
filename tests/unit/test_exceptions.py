@@ -11,8 +11,8 @@ from soliplex.agents.scm import UnexpectedResponseError
 
 def test_scm_exception():
     """Test SCMException can be raised with custom message."""
-    with pytest.raises(SCMException, match="Custom error message"):
-        raise SCMException("Custom error message")
+    with pytest.raises(SCMException, match="Custom"):
+        raise SCMException("Custom")  
 
 
 def test_scm_exception_inheritance():

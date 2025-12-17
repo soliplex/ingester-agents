@@ -1,6 +1,5 @@
 """Tests for soliplex.agents.scm.github module."""
 
-from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import patch
 
@@ -183,8 +182,9 @@ async def test_get_file_content_empty_content(github_provider):
 @pytest.mark.asyncio
 async def test_get_blob(github_provider, mock_response):
     """Test get_blob fetches blob content from API."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     rec = {"sha": "abc123"}
     session = MagicMock()
@@ -216,8 +216,9 @@ async def test_list_issues(github_provider, mock_response, sample_issue):
 @pytest.mark.asyncio
 async def test_list_repo_files(github_provider, mock_response, mock_settings):
     """Test list_repo_files integration."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     api_response = [
         {"name": "file1.md", "type": "file", "url": "https://api.github.com/file1"},
@@ -260,8 +261,9 @@ async def test_inheritance_from_base(github_provider):
 @pytest.mark.asyncio
 async def test_paginate_integration(github_provider, mock_response):
     """Test paginate works correctly with GitHub."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     page1_data = [{"id": 1, "name": "item1"}]
 
@@ -286,8 +288,9 @@ async def test_paginate_integration(github_provider, mock_response):
 @pytest.mark.asyncio
 async def test_get_data_from_url_with_empty_content(github_provider, mock_response):
     """Test get_data_from_url properly handles files with empty content via get_file_content."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     file_record = {
         "name": "large_file.md",

@@ -1,7 +1,5 @@
 """Tests for soliplex.agents.scm.gitea module."""
 
-from typing import Any
-from unittest.mock import AsyncMock
 from unittest.mock import patch
 
 import pytest
@@ -95,8 +93,9 @@ async def test_list_issues(gitea_provider, mock_response, sample_issue):
 @pytest.mark.asyncio
 async def test_list_repo_files(gitea_provider, mock_response, mock_settings):
     """Test list_repo_files integration."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     api_response = [
         {"name": "file1.md", "type": "file", "url": "https://gitea.example.com/file1"},
@@ -154,8 +153,9 @@ async def test_inheritance_from_base(gitea_provider):
 @pytest.mark.asyncio
 async def test_paginate_integration(gitea_provider, mock_response):
     """Test paginate works correctly with Gitea."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     page1_data = [{"id": 1, "name": "item1"}]
 

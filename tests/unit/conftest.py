@@ -10,8 +10,6 @@ os.environ.setdefault("GH_TOKEN", "test_gh_token")
 os.environ.setdefault("GH_OWNER", "test_gh_owner")
 os.environ.setdefault("ENDPOINT_URL", "http://localhost:8000/api/v1")
 
-import json
-from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 

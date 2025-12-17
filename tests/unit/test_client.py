@@ -1,7 +1,5 @@
 """Tests for soliplex.agents.client module."""
 
-import json
-from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -30,7 +28,6 @@ def test_build_url(mock_settings):
 async def test_post_request_success(mock_settings, mock_response):
     """Test _post_request with successful response."""
     from tests.unit.conftest import create_async_context_manager
-    from unittest.mock import MagicMock
 
     response_data = {"batch_id": 123}
     mock_resp = mock_response(201, response_data)
@@ -53,7 +50,6 @@ async def test_post_request_success(mock_settings, mock_response):
 async def test_post_request_error_in_response(mock_settings, mock_response):
     """Test _post_request raises ValueError when response contains error."""
     from tests.unit.conftest import create_async_context_manager
-    from unittest.mock import MagicMock
 
     response_data = {"error": "Something went wrong"}
     mock_resp = mock_response(400, response_data)
@@ -73,7 +69,6 @@ async def test_post_request_error_in_response(mock_settings, mock_response):
 async def test_post_request_unexpected_status(mock_settings, mock_response):
     """Test _post_request raises UnexpectedResponseError for wrong status."""
     from tests.unit.conftest import create_async_context_manager
-    from unittest.mock import MagicMock
 
     response_data = {"message": "unexpected"}
     mock_resp = mock_response(500, response_data)
@@ -136,7 +131,6 @@ async def test_do_start_workflows_with_optional_params(mock_settings):
 async def test_check_status(mock_settings, mock_response):
     """Test check_status returns files needing processing."""
     from tests.unit.conftest import create_async_context_manager
-    from unittest.mock import MagicMock
 
     file_info = [
         {"uri": "file1.md", "sha256": "hash1"},
@@ -169,7 +163,6 @@ async def test_check_status(mock_settings, mock_response):
 async def test_check_status_empty(mock_settings, mock_response):
     """Test check_status with no files needing processing."""
     from tests.unit.conftest import create_async_context_manager
-    from unittest.mock import MagicMock
 
     file_info = [{"uri": "file1.md", "sha256": "hash1"}]
     response_data = {"file1.md": {"status": "processed"}}
@@ -190,7 +183,6 @@ async def test_check_status_empty(mock_settings, mock_response):
 async def test_do_ingest_success_with_bytes(mock_settings, mock_response):
     """Test do_ingest with successful ingestion using bytes."""
     from tests.unit.conftest import create_async_context_manager
-    from unittest.mock import MagicMock
 
     mock_resp = mock_response(201, {"document_id": 789})
 
@@ -215,7 +207,6 @@ async def test_do_ingest_success_with_bytes(mock_settings, mock_response):
 async def test_do_ingest_success_with_string(mock_settings, mock_response):
     """Test do_ingest with successful ingestion using string."""
     from tests.unit.conftest import create_async_context_manager
-    from unittest.mock import MagicMock
 
     mock_resp = mock_response(201, {"document_id": 789})
 
@@ -240,7 +231,6 @@ async def test_do_ingest_success_with_string(mock_settings, mock_response):
 async def test_do_ingest_failure(mock_settings, mock_response):
     """Test do_ingest with failed ingestion."""
     from tests.unit.conftest import create_async_context_manager
-    from unittest.mock import MagicMock
 
     mock_resp = mock_response(400, {"error": "Invalid document"})
 
@@ -265,7 +255,6 @@ async def test_do_ingest_failure(mock_settings, mock_response):
 async def test_do_ingest_exception(mock_settings):
     """Test do_ingest handles exceptions gracefully."""
     from tests.unit.conftest import create_async_context_manager
-    from unittest.mock import MagicMock
 
     with patch("soliplex.agents.client.get_session") as mock_get_session:
         mock_session = MagicMock()

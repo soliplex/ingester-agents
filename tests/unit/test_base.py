@@ -1,6 +1,5 @@
 """Tests for soliplex.agents.scm.base module."""
 
-import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import patch
@@ -74,8 +73,9 @@ def test_build_url_strips_slashes(provider):
 @pytest.mark.asyncio
 async def test_paginate_single_page(provider, mock_response, mock_settings):
     """Test paginate with single page of results."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     page1_data = [{"id": 1, "name": "item1"}]
 
@@ -100,8 +100,9 @@ async def test_paginate_single_page(provider, mock_response, mock_settings):
 @pytest.mark.asyncio
 async def test_paginate_multiple_pages(provider, mock_response, mock_settings):
     """Test paginate with multiple pages of results."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     page1_data = [{"id": 1}, {"id": 2}]
     page2_data = [{"id": 3}]
@@ -128,8 +129,9 @@ async def test_paginate_multiple_pages(provider, mock_response, mock_settings):
 @pytest.mark.asyncio
 async def test_paginate_404_error(provider, mock_response, mock_settings):
     """Test paginate raises SCMException on 404."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     with patch.object(provider, "get_session") as mock_get_session:
         mock_session = MagicMock()
@@ -147,8 +149,9 @@ async def test_paginate_404_error(provider, mock_response, mock_settings):
 @pytest.mark.asyncio
 async def test_paginate_api_error_with_errors_field(provider, mock_response, mock_settings):
     """Test paginate raises SCMException when response has errors field."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     with patch.object(provider, "get_session") as mock_get_session:
         mock_session = MagicMock()
@@ -167,8 +170,9 @@ async def test_paginate_api_error_with_errors_field(provider, mock_response, moc
 @pytest.mark.asyncio
 async def test_paginate_non_200_status(provider, mock_response, mock_settings):
     """Test paginate raises APIFetchError on non-200 status."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     with patch.object(provider, "get_session") as mock_get_session:
         mock_session = MagicMock()
@@ -186,8 +190,9 @@ async def test_paginate_non_200_status(provider, mock_response, mock_settings):
 @pytest.mark.asyncio
 async def test_paginate_with_process_response(provider, mock_response, mock_settings):
     """Test paginate with custom response processor."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     page1_data = {"items": [{"id": 1}, {"id": 2}]}
 
@@ -279,8 +284,9 @@ async def test_get_file_content_default(provider):
 @pytest.mark.asyncio
 async def test_get_data_from_url_single_file(provider, mock_response, sample_file_record):
     """Test get_data_from_url with single file."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     mock_session = MagicMock()
     mock_resp = mock_response(200, sample_file_record)
@@ -298,8 +304,9 @@ async def test_get_data_from_url_single_file(provider, mock_response, sample_fil
 @pytest.mark.asyncio
 async def test_get_data_from_url_single_file_without_owner_repo(provider, mock_response, sample_file_record):
     """Test get_data_from_url with single file without owner/repo parameters."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     mock_session = MagicMock()
     mock_resp = mock_response(200, sample_file_record)
@@ -315,8 +322,9 @@ async def test_get_data_from_url_single_file_without_owner_repo(provider, mock_r
 @pytest.mark.asyncio
 async def test_get_data_from_url_directory(provider, mock_response, sample_file_record):
     """Test get_data_from_url with directory."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     dir_response = [
         {"name": "file1.md", "url": "https://api.example.com/file1", "type": "file"},
@@ -344,8 +352,9 @@ async def test_get_data_from_url_directory(provider, mock_response, sample_file_
 @pytest.mark.asyncio
 async def test_get_data_from_url_directory_with_recursion(provider, mock_response, sample_file_record):
     """Test get_data_from_url with directory that requires recursion."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     dir_response = [
         {"name": "file1.md", "url": "https://api.example.com/file1", "type": "file"},
@@ -396,8 +405,9 @@ async def test_get_data_from_url_error(provider, mock_response):
 @pytest.mark.asyncio
 async def test_list_repo_files(provider, mock_response, mock_settings, sample_file_record):
     """Test list_repo_files."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     api_response = [
         {"name": "file1.md", "type": "file", "url": "https://api.example.com/file1"},
@@ -429,8 +439,9 @@ async def test_list_repo_files(provider, mock_response, mock_settings, sample_fi
 @pytest.mark.asyncio
 async def test_iter_repo_files(provider, mock_response, mock_settings, sample_file_record):
     """Test iter_repo_files yields files."""
-    from tests.unit.conftest import create_async_context_manager
     from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
 
     api_response = [
         {"name": "file1.md", "type": "file", "url": "https://api.example.com/file1"},
