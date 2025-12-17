@@ -1,0 +1,21 @@
+name: Notify Slack on New issue
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack notification when new issue is opened
+        env:
+          SLACK_NOTIFY_URL: ${{ secrets.SLACK_NOTIFY_URL }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          curl -X POST \
+            --data-urlencode \
+            "payload={\"channel\": \"#soliplex\", \"username\": \"soliplex\", \"text\": \":bell: New issue by *${ISSUE_AUTHOR}*:\n*${ISSUE_TITLE}*\n${ISSUE_URL}\", \"icon_emoji\": \":ghost:\"}" \
+            "$SLACK_NOTIFY_URL"

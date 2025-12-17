@@ -1,0 +1,21 @@
+name: Notify Slack on New PR
+
+on:
+  pull_request:
+    types: [opened]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack notification when new PR is opened
+        env:
+          SLACK_NOTIFY_URL: ${{ secrets.SLACK_NOTIFY_URL }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          curl -X POST \
+            --data-urlencode \
+            "payload={\"channel\": \"#soliplex\", \"username\": \"soliplex\", \"text\": \":bell: New Pull Request by *${PR_AUTHOR}*:\n*${PR_TITLE}*\n${PR_URL}\", \"icon_emoji\": \":ghost:\"}" \
+            "$SLACK_NOTIFY_URL"
