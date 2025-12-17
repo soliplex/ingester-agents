@@ -81,3 +81,4 @@ venv.bak/
 /lancedb
 /haiku.db
 /file-store
+/.claude

@@ -123,8 +123,7 @@ async def check_status(file_info: list[dict[str, Any]], source: str) -> list[dic
     """
     # fill in uri if path provided
     for x in file_info:
-        if "uri" not in x:
-            x["uri"] = x["path"]
+        x["uri"] = x.get("path", x.get("uri"))
 
     status_dict = {x["uri"]: x["sha256"] for x in file_info}
     uri_to_file = {x["uri"]: x for x in file_info}
