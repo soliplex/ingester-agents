@@ -1,6 +1,6 @@
 # Soliplex Agents
 
-Agents for ingesting documents into the [Soliplex Ingester](https://github.com/enfoldsystems/soliplex-ingester) system. This package provides tools to collect, validate, and ingest documents from multiple sources including local filesystems and source code management platforms (GitHub, Gitea).
+Agents for ingesting documents into the [Soliplex Ingester](https://github.com/enfoldsystems/soliplex-ingester) system. This package provides tools to collect, validate, and ingest documents from multiple sources including local filesystems, and source code management platforms (GitHub, Gitea). 
 
 ## Features
 
