@@ -5,10 +5,10 @@ from typing import Any
 
 import aiohttp
 
+from soliplex.agents.config import settings
 from soliplex.agents.scm import GitHubAPIError
 from soliplex.agents.scm import SCMException
 from soliplex.agents.scm.base import BaseSCMProvider
-from soliplex.agents.scm.lib.config import settings
 
 logger = logging.getLogger(__name__)
 

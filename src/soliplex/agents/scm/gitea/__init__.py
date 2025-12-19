@@ -3,8 +3,8 @@
 import logging
 from typing import Any
 
+from soliplex.agents.config import settings
 from soliplex.agents.scm.base import BaseSCMProvider
-from soliplex.agents.scm.lib.config import settings
 
 logger = logging.getLogger(__name__)
 

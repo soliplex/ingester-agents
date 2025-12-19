@@ -10,9 +10,10 @@ import aiofiles.os as aos
 
 from soliplex.agents import ValidationError
 from soliplex.agents import client
+from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
-IGNORE_EXTENSIONS = ["png", "jpg", "md", "txt", "json", "csv", "zip"]
+
 MIME_OVERRIDES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",  # noqa: E501
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",  # noqa: E501
@@ -60,10 +61,12 @@ async def read_config(config_path: str) -> list[dict]:
 
 async def build_config(source_dir) -> list[dict]:
     paths = await recursive_listdir(Path(source_dir))
+    allowed_extensions = settings.extensions
     config = []
     for path in paths:
         ext = path.name.split(".")[-1]
-        if ext in IGNORE_EXTENSIONS:
+        if ext not in allowed_extensions and not path.is_dir():
+            logger.info(f"skipping {path}")
             continue
         adj_path = path.relative_to(Path(source_dir))
         mime_type = mimetypes.guess_type(str(adj_path))[0]
@@ -153,6 +156,7 @@ async def load_inventory(
             source,
             source,
         )
+    logger.info(f"using batch {batch_id} for {source}")
     errors = []
     for row in to_process:
         meta = row["metadata"].copy()

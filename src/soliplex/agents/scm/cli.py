@@ -3,9 +3,9 @@ import logging
 
 import typer
 
+from ..config import SCM
+from ..config import settings
 from . import app as app
-from .lib.config import SCM
-from .lib.config import settings
 
 logger = logging.getLogger(__name__)
 

@@ -5,8 +5,8 @@ from typing import Any
 
 import aiohttp
 
+from .config import settings
 from .scm import UnexpectedResponseError
-from .scm.lib.config import settings
 
 """
 Client for interacting with Soliplex Ingester API.

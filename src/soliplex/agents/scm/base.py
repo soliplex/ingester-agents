@@ -13,9 +13,9 @@ from typing import Any
 
 import aiohttp
 
+from soliplex.agents.config import settings
 from soliplex.agents.scm import APIFetchError
 from soliplex.agents.scm import SCMException
-from soliplex.agents.scm.lib.config import settings
 from soliplex.agents.scm.lib.utils import compute_file_hash
 from soliplex.agents.scm.lib.utils import decode_base64_if_needed
 from soliplex.agents.scm.lib.utils import flatten_list

@@ -9,11 +9,11 @@ class SCM(str, enum.Enum):
 
 
 class Settings(BaseSettings):
-    gitea_url: str | None
-    gitea_token: str | None
+    gitea_url: str | None = None
+    gitea_token: str | None = None
     gitea_owner: str | None = "admin"
-    gh_token: str | None
-    gh_owner: str | None = ""
+    gh_token: str | None = None
+    gh_owner: str | None = None
     extensions: list[str] = ["md", "pdf", "doc", "docx"]
     log_level: str = "INFO"
     endpoint_url: str = "http://localhost:8000/api/v1"
