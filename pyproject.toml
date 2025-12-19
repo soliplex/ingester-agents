@@ -36,6 +36,19 @@ module-name = "soliplex.agents"
 [project.scripts]
 si-agent = "soliplex.agents.cli:cli"
 
+[tool.pytest_env]
+GITEA_TOKEN="test_gitea_token"
+GITEA_OWNER="test_owner"
+GITEA_URL="http://localhost:3000/api/v1"
+GH_TOKEN="test_gh_token"
+GH_OWNER="test_owner"
+LOG_LEVEL="INFO"
+INGESTER_URL="http://localhost:8000/ingest_document"
+
+
+
+
+
 [tool.pytest.ini_options]
 pythonpath = "."
 python_files = "test_*.py"

@@ -1,6 +1,6 @@
 # Soliplex Agents
 
-Agents for ingesting documents into the [Soliplex Ingester](https://github.com/enfoldsystems/soliplex-ingester) system. This package provides tools to collect, validate, and ingest documents from multiple sources including local filesystems, and source code management platforms (GitHub, Gitea). 
+Agents for ingesting documents into the [Soliplex Ingester](https://github.com/soliplex/ingester) system. This package provides tools to collect, validate, and ingest documents from multiple sources including local filesystems, and source code management platforms (GitHub, Gitea).
 
 ## Features
 
@@ -19,6 +19,8 @@ Agents for ingesting documents into the [Soliplex Ingester](https://github.com/e
   - Status checking to avoid re-ingesting unchanged files
 
 ## Installation
+
+Before using these tools, a working version of [Soliplex Ingester](https://github.com/soliplex/ingester) must be available.  The url will need to be configured in the enviroment variables to function.
 
 ### Using uv (Recommended)
 
@@ -91,7 +93,7 @@ This creates an `inventory.json` file containing metadata for all discovered fil
 Check if files in the inventory are supported:
 
 ```bash
-si-agent fs validate /path/to/inventory.json
+si-agent fs validate-config /path/to/inventory.json
 ```
 
 #### 3. Check Status
@@ -183,6 +185,7 @@ si-agent scm load-inventory gitea my-repo --owner admin
 si-agent scm load-inventory github my-repo --owner my-user --resume-batch 456
 ```
 
+
 ## How It Works
 
 ### Document Ingestion Flow
@@ -220,14 +223,34 @@ For SCM sources, issues (including their comments) are rendered as Markdown docu
 
 ## Examples
 
+As an example, the soliplex [documentation](https://github.com/soliplex/soliplex/tree/main/docs)) can be loaded using both the filesystem and via git.
+
+
 ### Example 1: Ingest Local Documents
 
 ```bash
-# Set up environment
+git clone https://github.com/soliplex/soliplex.git
+
+
+# Set up environment, check ingester configuration for details
 export ENDPOINT_URL=http://localhost:8000/api/v1
 
 # Create inventory and ingest
-si-agent fs run-inventory /home/user/documents company-docs
+uv run  si-agent fs build-config <path-to-checkout>soliplex/docs
+#you may see messages about ignored files
+
+#if you want to update the inventory.json file, do it here
+
+uv run  si-agent fs validate-config <path-to-checkout>soliplex/docs/inventory.json
+#if there are errors, fix them now
+
+uv run  si-agent fs run-inventory <path-to-checkout>soliplex/docs soliplex-docs
+
+#check that documents are in the ingester: (your batch id may be different)
+curl -X 'GET' \
+  'http://127.0.0.1:8000/api/v1/document/?batch_id=1' \
+  -H 'accept: application/json'
+
 ```
 
 ### Example 2: Ingest GitHub Repository
@@ -239,7 +262,13 @@ export GH_TOKEN=ghp_your_token_here
 export GH_OWNER=mycompany
 
 # Ingest repository
-si-agent scm load-inventory github engineering-handbook --owner mycompany
+si-agent scm load-inventory github soliplex --owner soliplex
+
+#check that documents are in the ingester: (your batch id may be different)
+curl -X 'GET' \
+  'http://127.0.0.1:8000/api/v1/document/?batch_id=2' \
+  -H 'accept: application/json'
+
 ```
 
 ### Example 3: Batch Processing with Workflows

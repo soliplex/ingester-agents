@@ -1,38 +1,10 @@
 """Shared pytest fixtures for unit tests."""
 
-import os
-
-# Set environment variables before any imports
-os.environ.setdefault("GITEA_URL", "https://gitea.example.com/api/v1")
-os.environ.setdefault("GITEA_TOKEN", "test_gitea_token")
-os.environ.setdefault("GITEA_OWNER", "test_owner")
-os.environ.setdefault("GH_TOKEN", "test_gh_token")
-os.environ.setdefault("GH_OWNER", "test_gh_owner")
-os.environ.setdefault("ENDPOINT_URL", "http://localhost:8000/api/v1")
-
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
-
-
-@pytest.fixture
-def mock_settings(monkeypatch):
-    """Mock settings for testing."""
-    mock_settings = MagicMock()
-    mock_settings.gitea_url = "https://gitea.example.com/api/v1"
-    mock_settings.gitea_token = "test_gitea_token"
-    mock_settings.gitea_owner = "test_owner"
-    mock_settings.gh_token = "test_gh_token"
-    mock_settings.gh_owner = "test_gh_owner"
-    mock_settings.extensions = ["md", "pdf"]
-    mock_settings.endpoint_url = "http://localhost:8000/api/v1"
-
-    monkeypatch.setattr("soliplex.agents.scm.lib.config.settings", mock_settings)
-    monkeypatch.setattr("soliplex.agents.client.settings", mock_settings)
-
-    return mock_settings
 
 
 def create_async_context_manager(return_value):
@@ -46,6 +18,7 @@ def create_async_context_manager(return_value):
 @pytest.fixture
 def mock_response():
     """Create a mock aiohttp response."""
+
     def _mock_response(status: int = 200, json_data: dict | list | None = None, text_data: str | None = None):
         response = AsyncMock(spec=aiohttp.ClientResponse)
         response.status = status
@@ -69,6 +42,7 @@ def mock_response():
 @pytest.fixture
 def mock_session(mock_response):
     """Create a mock aiohttp session."""
+
     def _mock_session(responses: list[tuple[int, dict | list | None]] | None = None):
         session = AsyncMock(spec=aiohttp.ClientSession)
 

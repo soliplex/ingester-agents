@@ -14,7 +14,7 @@ INVENTORY_FILE = "inventory.json"
 cli = typer.Typer(no_args_is_help=True)
 
 
-@cli.command("validate")
+@cli.command("validate-config")
 def validate(path: str):
     asyncio.run(app.validate_config(path))
 
@@ -22,7 +22,8 @@ def validate(path: str):
 @cli.command("build-config")
 def build_config(path: str):
     cfg_file = _build_config(path)
-    print(f"created {cfg_file}")
+    cfg_data = json.load(open(cfg_file))
+    print(f"created {cfg_file} with {len(cfg_data)} files")
 
 
 def _build_config(path: str):
@@ -76,6 +77,8 @@ def run(
             logger.error(error)
     else:
         logger.info("Load successful.No errors found.")
+        for k, v in res.items():
+            print(f"{k}: {v}")
 
 
 if __name__ == "__main__":

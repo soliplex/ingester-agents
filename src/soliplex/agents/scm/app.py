@@ -4,11 +4,11 @@ import logging
 from soliplex.agents.scm.base import BaseSCMProvider
 
 from .. import client
+from ..config import SCM
+from ..config import settings
 from . import gitea
 from . import github
 from .lib import templates
-from .lib.config import SCM
-from .lib.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ async def load_inventory(
             source,
             source,
         )
+    logger.info(f"batch_id={batch_id}")
     errors = []
     for row in to_process:
         meta = row["metadata"].copy()

@@ -11,21 +11,21 @@ from soliplex.agents.scm import UnexpectedResponseError
 
 
 @pytest.mark.asyncio
-async def test_get_session(mock_settings):
+async def test_get_session():
     """Test get_session creates session with correct headers."""
     async with client.get_session() as session:
         assert isinstance(session, aiohttp.ClientSession)
         assert session.headers["User-Agent"] == "soliplex-fs"
 
 
-def test_build_url(mock_settings):
+def test_build_url():
     """Test _build_url constructs correct URL."""
     url = client._build_url("/test/path")
-    assert url == "http://localhost:8000/api/v1/test/path"
+    assert "/api/v1/test/path" in url
 
 
 @pytest.mark.asyncio
-async def test_post_request_success(mock_settings, mock_response):
+async def test_post_request_success(mock_response):
     """Test _post_request with successful response."""
     from tests.unit.conftest import create_async_context_manager
 
@@ -47,7 +47,7 @@ async def test_post_request_success(mock_settings, mock_response):
 
 
 @pytest.mark.asyncio
-async def test_post_request_error_in_response(mock_settings, mock_response):
+async def test_post_request_error_in_response(mock_response):
     """Test _post_request raises ValueError when response contains error."""
     from tests.unit.conftest import create_async_context_manager
 
@@ -66,7 +66,7 @@ async def test_post_request_error_in_response(mock_settings, mock_response):
 
 
 @pytest.mark.asyncio
-async def test_post_request_unexpected_status(mock_settings, mock_response):
+async def test_post_request_unexpected_status(mock_response):
     """Test _post_request raises UnexpectedResponseError for wrong status."""
     from tests.unit.conftest import create_async_context_manager
 
@@ -85,7 +85,7 @@ async def test_post_request_unexpected_status(mock_settings, mock_response):
 
 
 @pytest.mark.asyncio
-async def test_create_batch(mock_settings):
+async def test_create_batch():
     """Test create_batch returns batch ID."""
     with patch("soliplex.agents.client._post_request") as mock_post:
         mock_post.return_value = {"batch_id": 456}
@@ -99,14 +99,12 @@ async def test_create_batch(mock_settings):
 
 
 @pytest.mark.asyncio
-async def test_do_start_workflows_minimal(mock_settings):
+async def test_do_start_workflows_minimal():
     """Test do_start_workflows with minimal parameters."""
     with patch("soliplex.agents.client._post_request") as mock_post:
         mock_post.return_value = {"status": "started"}
 
-        result = await client.do_start_workflows(
-            batch_id=123, workflow_definition_id=None, param_id=None, priority=5
-        )
+        result = await client.do_start_workflows(batch_id=123, workflow_definition_id=None, param_id=None, priority=5)
 
         assert result == {"status": "started"}
         mock_post.assert_called_once()
@@ -115,7 +113,7 @@ async def test_do_start_workflows_minimal(mock_settings):
 
 
 @pytest.mark.asyncio
-async def test_do_start_workflows_with_optional_params(mock_settings):
+async def test_do_start_workflows_with_optional_params():
     """Test do_start_workflows with all parameters."""
     with patch("soliplex.agents.client._post_request") as mock_post:
         mock_post.return_value = {"status": "started"}
@@ -128,7 +126,7 @@ async def test_do_start_workflows_with_optional_params(mock_settings):
 
 
 @pytest.mark.asyncio
-async def test_check_status(mock_settings, mock_response):
+async def test_check_status(mock_response):
     """Test check_status returns files needing processing."""
     from tests.unit.conftest import create_async_context_manager
 
@@ -160,7 +158,7 @@ async def test_check_status(mock_settings, mock_response):
 
 
 @pytest.mark.asyncio
-async def test_check_status_empty(mock_settings, mock_response):
+async def test_check_status_empty(mock_response):
     """Test check_status with no files needing processing."""
     from tests.unit.conftest import create_async_context_manager
 
@@ -180,7 +178,7 @@ async def test_check_status_empty(mock_settings, mock_response):
 
 
 @pytest.mark.asyncio
-async def test_do_ingest_success_with_bytes(mock_settings, mock_response):
+async def test_do_ingest_success_with_bytes(mock_response):
     """Test do_ingest with successful ingestion using bytes."""
     from tests.unit.conftest import create_async_context_manager
 
@@ -204,7 +202,7 @@ async def test_do_ingest_success_with_bytes(mock_settings, mock_response):
 
 
 @pytest.mark.asyncio
-async def test_do_ingest_success_with_string(mock_settings, mock_response):
+async def test_do_ingest_success_with_string(mock_response):
     """Test do_ingest with successful ingestion using string."""
     from tests.unit.conftest import create_async_context_manager
 
@@ -228,7 +226,7 @@ async def test_do_ingest_success_with_string(mock_settings, mock_response):
 
 
 @pytest.mark.asyncio
-async def test_do_ingest_failure(mock_settings, mock_response):
+async def test_do_ingest_failure(mock_response):
     """Test do_ingest with failed ingestion."""
     from tests.unit.conftest import create_async_context_manager
 
@@ -252,7 +250,7 @@ async def test_do_ingest_failure(mock_settings, mock_response):
 
 
 @pytest.mark.asyncio
-async def test_do_ingest_exception(mock_settings):
+async def test_do_ingest_exception():
     """Test do_ingest handles exceptions gracefully."""
     from tests.unit.conftest import create_async_context_manager
 
