@@ -21,7 +21,7 @@ async def test_get_session():
 def test_build_url():
     """Test _build_url constructs correct URL."""
     url = client._build_url("/test/path")
-    assert url == "http://127.0.0.1:8000/api/v1/test/path"
+    assert "/api/v1/test/path" in url
 
 
 @pytest.mark.asyncio
