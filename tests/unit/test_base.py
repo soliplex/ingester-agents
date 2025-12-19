@@ -71,7 +71,7 @@ def test_build_url_strips_slashes(provider):
 
 
 @pytest.mark.asyncio
-async def test_paginate_single_page(provider, mock_response, mock_settings):
+async def test_paginate_single_page(provider, mock_response):
     """Test paginate with single page of results."""
     from unittest.mock import MagicMock
 
@@ -98,7 +98,7 @@ async def test_paginate_single_page(provider, mock_response, mock_settings):
 
 
 @pytest.mark.asyncio
-async def test_paginate_multiple_pages(provider, mock_response, mock_settings):
+async def test_paginate_multiple_pages(provider, mock_response):
     """Test paginate with multiple pages of results."""
     from unittest.mock import MagicMock
 
@@ -127,7 +127,7 @@ async def test_paginate_multiple_pages(provider, mock_response, mock_settings):
 
 
 @pytest.mark.asyncio
-async def test_paginate_404_error(provider, mock_response, mock_settings):
+async def test_paginate_404_error(provider, mock_response):
     """Test paginate raises SCMException on 404."""
     from unittest.mock import MagicMock
 
@@ -147,7 +147,7 @@ async def test_paginate_404_error(provider, mock_response, mock_settings):
 
 
 @pytest.mark.asyncio
-async def test_paginate_api_error_with_errors_field(provider, mock_response, mock_settings):
+async def test_paginate_api_error_with_errors_field(provider, mock_response):
     """Test paginate raises SCMException when response has errors field."""
     from unittest.mock import MagicMock
 
@@ -168,7 +168,7 @@ async def test_paginate_api_error_with_errors_field(provider, mock_response, moc
 
 
 @pytest.mark.asyncio
-async def test_paginate_non_200_status(provider, mock_response, mock_settings):
+async def test_paginate_non_200_status(provider, mock_response):
     """Test paginate raises APIFetchError on non-200 status."""
     from unittest.mock import MagicMock
 
@@ -188,7 +188,7 @@ async def test_paginate_non_200_status(provider, mock_response, mock_settings):
 
 
 @pytest.mark.asyncio
-async def test_paginate_with_process_response(provider, mock_response, mock_settings):
+async def test_paginate_with_process_response(provider, mock_response):
     """Test paginate with custom response processor."""
     from unittest.mock import MagicMock
 
@@ -217,7 +217,7 @@ async def test_paginate_with_process_response(provider, mock_response, mock_sett
 
 
 @pytest.mark.asyncio
-async def test_list_issues_without_comments(provider, mock_response, mock_settings, sample_issue):
+async def test_list_issues_without_comments(provider, mock_response, sample_issue):
     """Test list_issues without comments."""
     with patch.object(provider, "paginate") as mock_paginate:
         mock_paginate.return_value = [sample_issue]
@@ -230,7 +230,7 @@ async def test_list_issues_without_comments(provider, mock_response, mock_settin
 
 
 @pytest.mark.asyncio
-async def test_list_issues_with_comments(provider, mock_response, mock_settings, sample_issue, sample_comment):
+async def test_list_issues_with_comments(provider, mock_response, sample_issue, sample_comment):
     """Test list_issues with comments."""
     with patch.object(provider, "paginate") as mock_paginate:
         with patch.object(provider, "list_repo_comments") as mock_list_comments:
@@ -246,7 +246,7 @@ async def test_list_issues_with_comments(provider, mock_response, mock_settings,
 
 
 @pytest.mark.asyncio
-async def test_list_repo_comments(provider, mock_settings, sample_comment):
+async def test_list_repo_comments(provider, sample_comment):
     """Test list_repo_comments."""
     with patch.object(provider, "paginate") as mock_paginate:
         mock_paginate.return_value = [sample_comment]
@@ -293,9 +293,7 @@ async def test_get_data_from_url_single_file(provider, mock_response, sample_fil
     mock_session.get.return_value = create_async_context_manager(mock_resp)
 
     with patch.object(provider, "get_file_content", return_value=sample_file_record):
-        result = await provider.get_data_from_url(
-            "https://api.example.com/file", mock_session, owner="owner", repo="repo"
-        )
+        result = await provider.get_data_from_url("https://api.example.com/file", mock_session, owner="owner", repo="repo")
 
         assert isinstance(result, dict)
         assert result["name"] == "test.md"
@@ -380,9 +378,7 @@ async def test_get_data_from_url_directory_with_recursion(provider, mock_respons
     ]
 
     # Call the actual method to exercise the directory recursion code
-    result = await provider.get_data_from_url(
-        "https://api.example.com/dir", mock_session, owner="owner", repo="repo"
-    )
+    result = await provider.get_data_from_url("https://api.example.com/dir", mock_session, owner="owner", repo="repo")
 
     # Should return a list of parsed files
     assert isinstance(result, list)
@@ -403,7 +399,7 @@ async def test_get_data_from_url_error(provider, mock_response):
 
 
 @pytest.mark.asyncio
-async def test_list_repo_files(provider, mock_response, mock_settings, sample_file_record):
+async def test_list_repo_files(provider, mock_response, sample_file_record):
     """Test list_repo_files."""
     from unittest.mock import MagicMock
 
@@ -437,7 +433,7 @@ async def test_list_repo_files(provider, mock_response, mock_settings, sample_fi
 
 
 @pytest.mark.asyncio
-async def test_iter_repo_files(provider, mock_response, mock_settings, sample_file_record):
+async def test_iter_repo_files(provider, mock_response, sample_file_record):
     """Test iter_repo_files yields files."""
     from unittest.mock import MagicMock
 
