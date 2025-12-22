@@ -15,7 +15,7 @@ async def test_get_session():
     """Test get_session creates session with correct headers."""
     async with client.get_session() as session:
         assert isinstance(session, aiohttp.ClientSession)
-        assert session.headers["User-Agent"] == "soliplex-fs"
+        assert session.headers["User-Agent"] == "soliplex-agent"
 
 
 def test_build_url():
@@ -270,6 +270,136 @@ async def test_do_ingest_exception():
 
         assert "error" in result
         assert "Network error" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_find_batch_for_source_found(mock_response):
+    """Test find_batch_for_source returns batch ID when source is found."""
+    from tests.unit.conftest import create_async_context_manager
+
+    batches = [
+        {"id": 1, "source": "github", "name": "batch1"},
+        {"id": 2, "source": "gitlab", "name": "batch2"},
+        {"id": 3, "source": "bitbucket", "name": "batch3"},
+    ]
+    mock_resp = mock_response(200, batches)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.find_batch_for_source("gitlab")
+
+        assert result == 2
+        mock_session.get.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_find_batch_for_source_not_found(mock_response):
+    """Test find_batch_for_source returns None when source is not found."""
+    from tests.unit.conftest import create_async_context_manager
+
+    batches = [
+        {"id": 1, "source": "github", "name": "batch1"},
+        {"id": 2, "source": "gitlab", "name": "batch2"},
+    ]
+    mock_resp = mock_response(200, batches)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.find_batch_for_source("nonexistent")
+
+        assert result is None
+
+
+@pytest.mark.asyncio
+async def test_find_batch_for_source_empty_list(mock_response):
+    """Test find_batch_for_source returns None when no batches exist."""
+    from tests.unit.conftest import create_async_context_manager
+
+    batches = []
+    mock_resp = mock_response(200, batches)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.find_batch_for_source("github")
+
+        assert result is None
+
+
+@pytest.mark.asyncio
+async def test_find_batch_for_source_multiple_found(mock_response, caplog):
+    """Test find_batch_for_source returns first batch ID when multiple matches found."""
+    import logging
+
+    from tests.unit.conftest import create_async_context_manager
+
+    caplog.set_level(logging.WARNING)
+
+    batches = [
+        {"id": 10, "source": "github", "name": "batch1"},
+        {"id": 20, "source": "github", "name": "batch2"},
+        {"id": 30, "source": "github", "name": "batch3"},
+    ]
+    mock_resp = mock_response(200, batches)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.find_batch_for_source("github")
+
+        assert result == 10
+        assert "Multiple batches found 3 for source github using first one" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_find_batch_for_source_http_error(mock_response):
+    """Test find_batch_for_source handles HTTP errors."""
+    from tests.unit.conftest import create_async_context_manager
+
+    mock_resp = mock_response(500, {"error": "Internal server error"})
+    mock_resp.raise_for_status.side_effect = aiohttp.ClientResponseError(
+        request_info=MagicMock(), history=(), status=500, message="Internal Server Error"
+    )
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(aiohttp.ClientResponseError):
+            await client.find_batch_for_source("github")
+
+
+@pytest.mark.asyncio
+async def test_find_batch_for_source_url_construction(mock_response):
+    """Test find_batch_for_source uses correct endpoint."""
+    from tests.unit.conftest import create_async_context_manager
+
+    batches = [{"id": 1, "source": "github", "name": "batch1"}]
+    mock_resp = mock_response(200, batches)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        with patch("soliplex.agents.client._build_url") as mock_build_url:
+            mock_build_url.return_value = "http://127.0.0.1:8000/api/v1/batch/"
+
+            mock_session = MagicMock()
+            mock_session.get.return_value = create_async_context_manager(mock_resp)
+            mock_get_session.return_value = create_async_context_manager(mock_session)
+
+            await client.find_batch_for_source("github")
+
+            mock_build_url.assert_called_once_with("/batch/")
+            mock_session.get.assert_called_once_with("http://127.0.0.1:8000/api/v1/batch/")
 
 
 def test_constants():

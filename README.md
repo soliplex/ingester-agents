@@ -66,7 +66,7 @@ GITEA_OWNER=admin
 
 ```bash
 # File extensions to include (default: md,pdf,doc,docx)
-EXTENSIONS=md,pdf,doc,docx,txt
+EXTENSIONS=md,pdf,doc,docx
 
 # Logging level (default: INFO)
 LOG_LEVEL=INFO
@@ -110,7 +110,7 @@ Add `--detail` flag to see the full list of files:
 si-agent fs check-status /path/to/inventory.json my-source-name --detail
 ```
 
-#### 4. Run Inventory
+#### 4. Load Inventory
 
 Ingest documents from an inventory:
 
@@ -124,8 +124,6 @@ si-agent fs run-inventory /path/to/inventory.json my-source-name
 # Process a subset of files (e.g., files 10-50)
 si-agent fs run-inventory inventory.json my-source --start 10 --end 50
 
-# Resume a previous batch
-si-agent fs run-inventory inventory.json my-source --resume-batch 123
 
 # Start workflows after ingestion
 si-agent fs run-inventory inventory.json my-source \
@@ -149,10 +147,10 @@ List all issues from a repository:
 
 ```bash
 # GitHub
-si-agent scm list-issues github my-repo --owner my-github-user
+si-agent scm list-issues github my-repo  my-github-user
 
 # Gitea
-si-agent scm list-issues gitea my-repo --owner admin
+si-agent scm list-issues gitea my-repo admin
 ```
 
 #### 2. Get Repository Files
@@ -161,7 +159,7 @@ List files in a repository:
 
 ```bash
 # GitHub
-si-agent scm get-repo github my-repo --owner my-github-user
+si-agent scm get-repo github my-repo  my-github-user
 
 # Gitea
 si-agent scm get-repo gitea my-repo
@@ -173,18 +171,11 @@ Ingest files and issues from a repository:
 
 ```bash
 # GitHub
-si-agent scm load-inventory github my-repo --owner my-github-user
+si-agent scm run-inventory github my-repo  my-github-user
 
 # Gitea
-si-agent scm load-inventory gitea my-repo --owner admin
+si-agent scm run-inventory gitea my-repo  admin
 ```
-
-**With batch resumption:**
-
-```bash
-si-agent scm load-inventory github my-repo --owner my-user --resume-batch 456
-```
-
 
 ## How It Works
 
@@ -192,30 +183,15 @@ si-agent scm load-inventory github my-repo --owner my-user --resume-batch 456
 
 1. **Discovery**: Files are discovered from the source (filesystem or SCM)
 2. **Hashing**: Each file's SHA256 hash is calculated
-3. **Status Check**: The system checks which files have changed or are new
-4. **Batch Creation**: A batch is created to group the ingestion operation
+3. **Status Check**: The system checks which files have changed or are new against the ingester database
+4. **Batch Creation**: A batch is created to group the ingestion operation.  If a batch already exists for this source, it is used.
 5. **Ingestion**: Files are uploaded to the Soliplex Ingester API
-6. **Workflow Trigger** (optional): Workflows can be started to process the ingested documents
+6. **Workflow Trigger** (optional): Workflows can be started to process the ingested documents.  See Ingester documentation for details.
 
 ### File Filtering
 
-#### Filesystem Agent
 
-The filesystem agent **ignores** these extensions by default:
-- `png`, `jpg` - Images
-- `md`, `txt` - Plain text (can be changed)
-- `json`, `csv` - Data files
-- `zip` - Archives
-
-It also validates that files have supported content types and rejects:
-- ZIP archives
-- RAR archives
-- 7z archives
-- Generic binary files without proper MIME types
-
-#### SCM Agent
-
-The SCM agent only includes files with extensions specified in the `EXTENSIONS` configuration (default: `md`, `pdf`, `doc`, `docx`).
+The  agent only includes files with extensions specified in the `EXTENSIONS` configuration (default: `md`, `pdf`, `doc`, `docx`).
 
 ### Issues as Documents
 
@@ -262,7 +238,7 @@ export GH_TOKEN=ghp_your_token_here
 export GH_OWNER=mycompany
 
 # Ingest repository
-si-agent scm load-inventory github soliplex --owner soliplex
+si-agent scm load-inventory github soliplex  soliplex
 
 #check that documents are in the ingester: (your batch id may be different)
 curl -X 'GET' \

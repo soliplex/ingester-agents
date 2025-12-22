@@ -36,19 +36,24 @@ async def load_inventory(
 
     source = f"{scm.value}:{owner}:{repo_name}"
     to_process = await client.check_status(data, source)
+    ret = {"inventory": data, "to_process": to_process}
     logger.info(f"found {len(to_process)} to process")
     if len(to_process) == 0:
         logger.info("nothing to process. exiting")
-        return
-    if resume_batch:
-        batch_id = resume_batch
+        return ret
+    found_batch_id = client.find_batch_for_source(source)
+    if found_batch_id:
+        logger.info(f"found batch {found_batch_id} for {source}")
+        batch_id = found_batch_id
     else:
+        logger.info(f"no batch found for {source}. creating")
         batch_id = await client.create_batch(
             source,
             source,
         )
     logger.info(f"batch_id={batch_id}")
     errors = []
+    ingested = []
     for row in to_process:
         meta = row["metadata"].copy()
         for k in [
@@ -80,16 +85,20 @@ async def load_inventory(
             res["resumed_batch"] = resume_batch
             res["batch_id"] = batch_id
             errors.append(res)
-    if len(errors) > 0 and start_workflows:
-        ret = await client.do_start_workflows(
+        else:
+            ingested.append(row["uri"])
+    wf_res = None
+    if len(errors) == 0 and start_workflows:
+        wf_res = await client.do_start_workflows(
             batch_id,
             workflow_definition_id,
             param_set_id,
             priority,
         )
-        return ret
-    else:
-        return errors
+    ret["ingested"] = ingested
+    ret["errors"] = errors
+    ret["workflow_result"] = wf_res
+    return ret
 
 
 async def get_data(scm: str, repo_name: str, owner: str = None):
