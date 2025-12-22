@@ -22,13 +22,27 @@ PROCESSABLE_STATUSES = {STATUS_NEW, STATUS_MISMATCH}
 @asynccontextmanager
 async def get_session():
     # TODO: add auth if needed
-    async with aiohttp.ClientSession(headers={"User-Agent": "soliplex-fs"}) as session:
+    async with aiohttp.ClientSession(headers={"User-Agent": "soliplex-agent"}) as session:
         yield session
 
 
 def _build_url(path: str) -> str:
     """Build full URL from endpoint and path."""
     return f"{settings.endpoint_url}{path}"
+
+
+async def find_batch_for_source(source: str) -> int | None:
+    url = _build_url("/batch/")
+    async with get_session() as session:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            batches = await response.json()
+            found = [b for b in batches if b["source"] == source]
+            if len(found) == 0:
+                return None
+            if len(found) > 1:
+                logger.warning(f"Multiple batches found {len(found)} for source {source} using first one")
+            return found[0]["id"]
 
 
 async def _post_request(path: str, form_data: aiohttp.FormData, expected_status: int = 201) -> dict[str, Any]:

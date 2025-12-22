@@ -129,7 +129,6 @@ async def load_inventory(
     source: str,
     start: int = 0,
     end: int = None,
-    resume_batch: int = None,
     skip_invalid: bool = False,
     workflow_definition_id: str | None = None,
     start_workflows: bool = True,
@@ -143,20 +142,28 @@ async def load_inventory(
 
     logger.info(f"found {len(config)} files in {path}")
     data_path = Path(path).parent
-    logger.info(f"data_path={data_path}")
     to_process = await client.check_status(config, source)
+    logger.info(f"found {len(to_process)}  out of {len(config)} to process in {data_path}")
     if end is None:
         end = len(config)
         to_process = to_process[start:end]
+    ret = {"inventory": config, "to_process": to_process}
+    if len(to_process) == 0:
+        logger.info("nothing to process. exiting")
+        return ret
 
-    if resume_batch:
-        batch_id = resume_batch
+    found_batch_id = client.find_batch_for_source(source)
+    if found_batch_id:
+        logger.info(f"found batch {found_batch_id} for {source}")
+        batch_id = found_batch_id
     else:
+        logger.info(f"no batch found for {source}. creating")
         batch_id = await client.create_batch(
             source,
             source,
         )
-    logger.info(f"using batch {batch_id} for {source}")
+    ret["batch_id"] = batch_id
+    ingested = []
     errors = []
     for row in to_process:
         meta = row["metadata"].copy()
@@ -186,19 +193,23 @@ async def load_inventory(
             logger.error(f"Error ingesting {row['path']}: {res['error']}")
             res["uri"] = row["path"]
             res["source"] = source
-            res["resumed_batch"] = resume_batch
+            res["batch_id"] = batch_id
             res["batch_id"] = batch_id
             errors.append(res)
-    if len(errors) > 0 and start_workflows:
-        ret = await client.do_start_workflows(
+        else:
+            ingested.append(res)
+    wf_res = None
+    if len(errors) == 0 and start_workflows:
+        wf_res = await client.do_start_workflows(
             batch_id,
             workflow_definition_id,
             param_set_id,
             priority,
         )
-        return ret
-    else:
-        return errors
+    ret["ingested"] = ingested
+    ret["errors"] = errors
+    ret["workflow_result"] = wf_res
+    return ret
 
 
 async def do_ingest(
