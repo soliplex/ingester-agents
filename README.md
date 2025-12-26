@@ -14,13 +14,17 @@ Agents for ingesting documents into the [Soliplex Ingester](https://github.com/s
 - **SCM Agent (`scm`)**: Ingest files and issues from Git repositories
   - Support for GitHub and Gitea platforms
   - Automatic file type filtering
-  - Issue ingestion with comments
+  - Issue ingestion with comments (rendered as Markdown)
   - Batch processing with workflow support
   - Status checking to avoid re-ingesting unchanged files
 
 ## Installation
 
-Before using these tools, a working version of [Soliplex Ingester](https://github.com/soliplex/ingester) must be available.  The url will need to be configured in the enviroment variables to function.
+**Requirements:**
+- Python 3.12 or higher
+- Soliplex Ingester running and accessible
+
+Before using these tools, a working version of [Soliplex Ingester](https://github.com/soliplex/ingester) must be available. The URL will need to be configured in the environment variables to function.
 
 ### Using uv (Recommended)
 
@@ -56,7 +60,7 @@ ENDPOINT_URL=http://localhost:8000/api/v1
 GH_TOKEN=your_github_token_here
 GH_OWNER=your_github_username_or_org
 
-# Gitea Configuration -if needed
+# Gitea Configuration - if needed
 GITEA_URL=https://your-gitea-instance.com
 GITEA_TOKEN=your_gitea_token_here
 GITEA_OWNER=admin
@@ -110,6 +114,11 @@ Add `--detail` flag to see the full list of files:
 si-agent fs check-status /path/to/inventory.json my-source-name --detail
 ```
 
+The status check compares file hashes against the Ingester database:
+- **new**: File doesn't exist in the database
+- **mismatch**: File exists but content has changed
+- **match**: File is unchanged (will be skipped during ingestion)
+
 #### 4. Load Inventory
 
 Ingest documents from an inventory:
@@ -124,6 +133,8 @@ si-agent fs run-inventory /path/to/inventory.json my-source-name
 # Process a subset of files (e.g., files 10-50)
 si-agent fs run-inventory inventory.json my-source --start 10 --end 50
 
+# Resume a previous batch
+si-agent fs run-inventory inventory.json my-source --resume-batch 123
 
 # Start workflows after ingestion
 si-agent fs run-inventory inventory.json my-source \
@@ -147,10 +158,10 @@ List all issues from a repository:
 
 ```bash
 # GitHub
-si-agent scm list-issues github my-repo  my-github-user
+si-agent scm list-issues github my-repo my-github-user
 
 # Gitea
-si-agent scm list-issues gitea my-repo admin
+si-agent scm list-issues gitea my-repo --owner admin
 ```
 
 #### 2. Get Repository Files
@@ -159,7 +170,7 @@ List files in a repository:
 
 ```bash
 # GitHub
-si-agent scm get-repo github my-repo  my-github-user
+si-agent scm get-repo github my-repo my-github-user
 
 # Gitea
 si-agent scm get-repo gitea my-repo
@@ -167,31 +178,53 @@ si-agent scm get-repo gitea my-repo
 
 #### 3. Load Inventory
 
-Ingest files and issues from a repository:
+Ingest **both files and issues** from a repository. Issues are rendered as Markdown documents with their comments.
 
 ```bash
 # GitHub
-si-agent scm run-inventory github my-repo  my-github-user
+si-agent scm run-inventory github my-repo my-github-user
 
 # Gitea
-si-agent scm run-inventory gitea my-repo  admin
+si-agent scm run-inventory gitea my-repo admin
 ```
+
+**Note on Workflows:** By default, `start_workflows=True`. To skip workflow triggering, explicitly set `--no-start-workflows`.
 
 ## How It Works
 
 ### Document Ingestion Flow
 
 1. **Discovery**: Files are discovered from the source (filesystem or SCM)
-2. **Hashing**: Each file's SHA256 hash is calculated
+2. **Hashing**: Each file's hash is calculated
+   - Filesystem sources: SHA256 hash
+   - SCM sources: SHA3-256 hash for files, SHA256 for issues
 3. **Status Check**: The system checks which files have changed or are new against the ingester database
-4. **Batch Creation**: A batch is created to group the ingestion operation.  If a batch already exists for this source, it is used.
+4. **Batch Management**:
+   - The system searches for an existing batch matching the source name
+   - If found, new documents are added to the existing batch (incremental ingestion)
+   - If not found, a new batch is created
+   - This enables efficient re-ingestion: only new or changed files are processed
 5. **Ingestion**: Files are uploaded to the Soliplex Ingester API
-6. **Workflow Trigger** (optional): Workflows can be started to process the ingested documents.  See Ingester documentation for details.
+6. **Workflow Trigger** (optional): Workflows can be started to process the ingested documents. See Ingester documentation for details.
 
 ### File Filtering
 
+Both agents filter files by the `EXTENSIONS` configuration. The default extensions are: `md`, `pdf`, `doc`, `docx`.
 
-The  agent only includes files with extensions specified in the `EXTENSIONS` configuration (default: `md`, `pdf`, `doc`, `docx`).
+To add more types:
+```bash
+export EXTENSIONS=md,pdf,doc,docx,txt,rst
+```
+
+It also validates that files have supported content types and rejects:
+- ZIP archives
+- RAR archives
+- 7z archives
+- Generic binary files without proper MIME types
+
+#### SCM Agent
+
+The SCM agent only includes files with extensions specified in the `EXTENSIONS` configuration (default: `md`, `pdf`, `doc`, `docx`).
 
 ### Issues as Documents
 
@@ -238,7 +271,7 @@ export GH_TOKEN=ghp_your_token_here
 export GH_OWNER=mycompany
 
 # Ingest repository
-si-agent scm load-inventory github soliplex  soliplex
+si-agent scm run-inventory github soliplex soliplex
 
 #check that documents are in the ingester: (your batch id may be different)
 curl -X 'GET' \
@@ -256,6 +289,22 @@ si-agent fs run-inventory ./documents my-docs \
   --workflow-definition-id document-analysis \
   --priority 5
 ```
+
+## Troubleshooting
+
+### Authentication Errors
+Ensure your tokens have the required permissions:
+- **GitHub**: `repo` scope for private repositories, public access for public repos
+- **Gitea**: Access token with read permissions
+
+### Connection Errors
+Verify the `ENDPOINT_URL` is correct and the Ingester API is running:
+```bash
+curl http://localhost:8000/api/v1/batch/
+```
+
+### File Not Found Errors
+For SCM agents, ensure the repository name and owner are correct. Use the exact repository name, not the URL.
 
 ## Development
 
@@ -285,7 +334,7 @@ The project uses pytest with 100% code coverage requirements:
 uv run pytest
 
 # Run specific tests
-uv run pytest tests/unit/test_fs/
+uv run pytest tests/unit/test_client.py
 
 # Generate coverage report
 uv run pytest --cov-report=html
@@ -313,6 +362,7 @@ soliplex.agents/
 ├── src/soliplex/agents/
 │   ├── cli.py              # Main CLI entry point
 │   ├── client.py           # Soliplex Ingester API client
+│   ├── config.py           # Configuration and settings
 │   ├── fs/                 # Filesystem agent
 │   │   ├── app.py          # Core filesystem logic
 │   │   └── cli.py          # Filesystem CLI commands
@@ -323,7 +373,6 @@ soliplex.agents/
 │       ├── github/         # GitHub implementation
 │       ├── gitea/          # Gitea implementation
 │       └── lib/
-│           ├── config.py   # Configuration and settings
 │           ├── templates/  # Issue rendering templates
 │           └── utils.py    # Utility functions
 └── tests/                  # Test suite
