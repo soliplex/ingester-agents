@@ -41,7 +41,7 @@ async def load_inventory(
     if len(to_process) == 0:
         logger.info("nothing to process. exiting")
         return ret
-    found_batch_id = client.find_batch_for_source(source)
+    found_batch_id = await client.find_batch_for_source(source)
     if found_batch_id:
         logger.info(f"found batch {found_batch_id} for {source}")
         batch_id = found_batch_id
