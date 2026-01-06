@@ -2,7 +2,7 @@
 name = "soliplex.agents"
 version = "0.1.0"
 description = "Agents for use with soliplex-ingester"
-authors = [{ name = "Enfold", email = "info@enfoldsystems.net" }]
+authors = [{ name = "Enfold Systems", email = "info@enfoldsystems.net" }]
 readme = "README.md"
 license = "MIT"
 keywords = [ "document-processing", "soliplex", "scm", "github", "gitea"]
