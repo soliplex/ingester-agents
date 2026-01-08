@@ -303,7 +303,9 @@ class BaseSCMProvider(ABC):
                 logger.info(f"found {len(ret)} files in {repo}")
                 return ret
 
-    async def iter_repo_files(self, repo: str, owner: str | None = None, branch: str = "main") -> AsyncIterator[dict[str, Any]]:
+    async def iter_repo_files(
+        self, repo: str, owner: str | None = None, branch: str = "main"
+    ) -> AsyncIterator[dict[str, Any]]:
         """
         Iterate through repository files.
 
