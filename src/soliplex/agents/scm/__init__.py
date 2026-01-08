@@ -6,8 +6,6 @@ class SCMException(Exception):
         super().__init__(msg)
 
 
-
-
 class APIFetchError(SCMException):
     def __init__(self) -> None:
         super().__init__("Failed to fetch from API")
