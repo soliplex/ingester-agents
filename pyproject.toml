@@ -8,17 +8,16 @@ license = "MIT"
 keywords = [ "document-processing", "soliplex", "scm", "github", "gitea"]
 classifiers = [
     "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",    
+    "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Text Processing :: General",
     "Topic :: Text Processing :: Indexing",
 ]
 
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "aiofiles>=25.1.0",
     "aiohttp>=3.13.2",
@@ -34,7 +33,7 @@ dev = [
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
-    "ruff>=0.14.3",
+    "ruff>=0.14.10",
 ]
 
 
@@ -85,7 +84,7 @@ omit = [
 show_missing = true
 
 [tool.ruff]
-line-length = 128
+line-length = 126
 exclude = [
 ]
 target-version = "py313"
@@ -109,7 +108,7 @@ select = [
     # flake8-pytest-style
     "PT",
 ]
-ignore = [
+ignore = [ "TRY003"
 ]
 
 [tool.ruff.lint.isort]

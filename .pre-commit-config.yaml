@@ -12,13 +12,10 @@ repos:
       - id: debug-statements
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
-    rev: v0.14.2
+    rev: v0.14.10
     hooks:
-      # Run the linter.
-      - id: ruff-check
-        args: [ --fix ]
+      # Run the linter (reads all config from pyproject.toml).
       - id: ruff
-        args: ["check", "--select", "I", "--fix"]
-
-      # Run the formatter.
+        args: [--fix]
+      # Run the formatter (reads line-length from pyproject.toml).
       - id: ruff-format

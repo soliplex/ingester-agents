@@ -6,7 +6,7 @@ This document is specifically designed for AI assistants (like Claude) working o
 
 **Critical Facts for AI Assistants:**
 
-- **Project Type:** Python 3.12+ CLI tool for document ingestion using Typer framework
+- **Project Type:** Python 3.13+ CLI tool for document ingestion using Typer framework
 - **Architecture:** Provider-based plugin pattern for extensibility (currently supports GitHub and Gitea)
 - **Core Constraint:** 100% branch coverage requirement for all non-CLI code
 - **Async Throughout:** All I/O operations use async patterns (aiohttp for HTTP, aiofiles for filesystem)
