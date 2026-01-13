@@ -20,10 +20,17 @@ Agents for ingesting documents into the [Soliplex Ingester](https://github.com/s
   - Batch processing with workflow support
   - Status checking to avoid re-ingesting unchanged files
 
+- **REST API Server**: Run agents as a web service
+  - FastAPI-based HTTP endpoints for all operations
+  - Multiple authentication methods (API key, OAuth2 proxy)
+  - Interactive API documentation with Swagger UI
+  - Health check endpoint for monitoring
+  - Container-ready with Docker support
+
 ## Installation
 
 **Requirements:**
-- Python 3.12 or higher
+- Python 3.13 or higher
 - Soliplex Ingester running and accessible
 
 Before using these tools, a working version of [Soliplex Ingester](https://github.com/soliplex/ingester) must be available. The URL will need to be configured in the environment variables to function.
@@ -76,11 +83,23 @@ EXTENSIONS=md,pdf,doc,docx
 
 # Logging level (default: INFO)
 LOG_LEVEL=INFO
+
+# API Server Configuration
+SERVER_HOST=127.0.0.1
+SERVER_PORT=8001
+
+# Authentication (for API server)
+API_KEY=your-secret-key-here
+API_KEY_ENABLED=false
+AUTH_TRUST_PROXY_HEADERS=false
 ```
 
 ## Usage
 
-The CLI tool `si-agent` provides two main subcommands: `fs` for filesystem operations and `scm` for source code management operations.
+The CLI tool `si-agent` provides three main modes of operation:
+- **`fs`**: Filesystem agent for ingesting local documents
+- **`scm`**: SCM agent for ingesting from Git repositories
+- **`serve`**: REST API server exposing agent functionality via HTTP
 
 ### Filesystem Agent
 
@@ -292,6 +311,143 @@ si-agent fs run-inventory ./documents my-docs \
   --priority 5
 ```
 
+## Server API
+
+The agents can be run as a REST API server using FastAPI. This exposes all agent operations as HTTP endpoints with support for authentication and interactive documentation.
+
+### Starting the Server
+
+```bash
+# Basic
+si-agent serve
+
+# Custom host and port
+si-agent serve --host 0.0.0.0 --port 8080
+
+# Development mode with auto-reload
+si-agent serve --reload
+
+# Production with multiple workers
+si-agent serve --workers 4
+```
+
+### Authentication
+
+The server supports multiple authentication methods:
+
+#### 1. No Authentication (Default)
+```bash
+si-agent serve
+# All requests allowed
+```
+
+#### 2. API Key Authentication
+```bash
+export API_KEY=your-secret-key
+export API_KEY_ENABLED=true
+si-agent serve
+```
+
+Clients must include the API key in the `Authorization` header:
+```bash
+curl -H "Authorization: Bearer your-secret-key" http://localhost:8001/api/fs/status
+```
+
+#### 3. OAuth2 Proxy Headers
+```bash
+export AUTH_TRUST_PROXY_HEADERS=true
+si-agent serve
+```
+
+The server will trust authentication headers from a reverse proxy (e.g., OAuth2 Proxy):
+- `X-Auth-Request-User`
+- `X-Forwarded-User`
+- `X-Forwarded-Email`
+
+### API Endpoints
+
+#### Filesystem Routes (`/api/fs/`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/fs/build-config` | Build inventory from directory |
+| `POST` | `/api/fs/validate-config` | Validate inventory file |
+| `POST` | `/api/fs/check-status` | Check which files need ingestion |
+| `POST` | `/api/fs/run-inventory` | Ingest documents from inventory |
+
+**Example:**
+```bash
+curl -X POST http://localhost:8001/api/fs/build-config \
+  -H "Content-Type: application/json" \
+  -d '{"directory_path": "/path/to/docs"}'
+```
+
+#### SCM Routes (`/api/scm/`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/scm/{platform}/{repo}/issues` | List repository issues |
+| `GET` | `/api/scm/{platform}/{repo}/files` | List repository files |
+| `POST` | `/api/scm/{platform}/{repo}/ingest` | Ingest repo files and issues |
+
+**Example:**
+```bash
+# List GitHub issues
+curl http://localhost:8001/api/scm/github/my-repo/issues?owner=myuser
+
+# Ingest repository
+curl -X POST http://localhost:8001/api/scm/github/my-repo/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"owner": "myuser", "source": "my-source"}'
+```
+
+#### Health Check
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Server health check |
+
+**Example:**
+```bash
+curl http://localhost:8001/health
+# Returns: {"status": "healthy"}
+```
+
+### API Documentation
+
+Interactive API documentation is available at:
+- **Swagger UI:** `http://localhost:8001/docs`
+- **ReDoc:** `http://localhost:8001/redoc`
+- **OpenAPI JSON:** `http://localhost:8001/openapi.json`
+
+### Docker Deployment
+
+The server is designed to run in containers:
+
+```bash
+# Build image
+docker build -t ingester-agents:latest .
+
+# Run with environment variables
+docker run -d \
+  -p 8001:8000 \
+  -e ENDPOINT_URL=http://ingester:8000/api/v1 \
+  -e API_KEY_ENABLED=true \
+  -e API_KEY=your-secret-key \
+  ingester-agents:latest
+
+# Check health
+curl http://localhost:8001/health
+```
+
+The Docker image includes:
+- Non-root user for security
+- Health checks for orchestration
+- Proper signal handling
+- Production-ready uvicorn configuration
+
+See [DOCKERFILE_CHANGES.md](DOCKERFILE_CHANGES.md) for implementation details.
+
 ## Troubleshooting
 
 ### Authentication Errors
@@ -362,9 +518,16 @@ uv run ruff format
 ```
 soliplex.agents/
 ├── src/soliplex/agents/
-│   ├── cli.py              # Main CLI entry point
+│   ├── cli.py              # Main CLI entry point (includes 'serve' command)
 │   ├── client.py           # Soliplex Ingester API client
 │   ├── config.py           # Configuration and settings
+│   ├── server/             # FastAPI server
+│   │   ├── __init__.py     # FastAPI app initialization
+│   │   ├── auth.py         # Authentication (API key & OAuth2 proxy)
+│   │   └── routes/
+│   │       ├── __init__.py
+│   │       ├── fs.py       # Filesystem API endpoints
+│   │       └── scm.py      # SCM API endpoints
 │   ├── fs/                 # Filesystem agent
 │   │   ├── app.py          # Core filesystem logic
 │   │   └── cli.py          # Filesystem CLI commands
@@ -377,8 +540,34 @@ soliplex.agents/
 │       └── lib/
 │           ├── templates/  # Issue rendering templates
 │           └── utils.py    # Utility functions
-└── tests/                  # Test suite
+├── tests/                  # Test suite
+│   └── unit/
+│       ├── test_server_*.py  # Server API tests
+│       └── ...
+├── Dockerfile              # Production container
+├── .dockerignore           # Build context exclusions
+└── DOCKERFILE_CHANGES.md   # Docker implementation documentation
 ```
+
+### Key Components
+
+**CLI Layer:**
+- `cli.py` - Main entry point with `fs`, `scm`, and `serve` commands
+- Agent-specific CLI commands in `fs/cli.py` and `scm/cli.py`
+
+**Server Layer:**
+- `server/` - FastAPI application
+- `server/auth.py` - Flexible authentication (none, API key, OAuth2 proxy)
+- `server/routes/` - REST API endpoints mirroring CLI functionality
+
+**Agent Layer:**
+- `fs/app.py` - Filesystem operations (shared by CLI and API)
+- `scm/app.py` - SCM operations (shared by CLI and API)
+- `client.py` - HTTP client for Soliplex Ingester API
+
+**Configuration:**
+- `config.py` - Pydantic settings for all components
+- Environment variables or `.env` file for configuration
 
 ## License
 

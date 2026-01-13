@@ -18,5 +18,14 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     endpoint_url: str = "http://localhost:8000/api/v1"
 
+    # Authentication settings (matching soliplex_ingester)
+    api_key: str | None = None
+    api_key_enabled: bool = False
+    auth_trust_proxy_headers: bool = False
+
+    # Server settings
+    server_host: str = "127.0.0.1"
+    server_port: int = 8001
+
 
 settings = Settings()
