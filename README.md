@@ -96,7 +96,10 @@ AUTH_TRUST_PROXY_HEADERS=false
 
 ## Usage
 
-The CLI tool `si-agent` provides two main subcommands: `fs` for filesystem operations and `scm` for source code management operations.
+The CLI tool `si-agent` provides three main modes of operation:
+- **`fs`**: Filesystem agent for ingesting local documents
+- **`scm`**: SCM agent for ingesting from Git repositories
+- **`serve`**: REST API server exposing agent functionality via HTTP
 
 ### Filesystem Agent
 
@@ -310,9 +313,7 @@ si-agent fs run-inventory ./documents my-docs \
 
 ## Server API
 
-> **Note:** Server API is a new feature currently in development (uncommitted).
-
-The FastAPI server exposes REST endpoints for all agent operations.
+The agents can be run as a REST API server using FastAPI. This exposes all agent operations as HTTP endpoints with support for authentication and interactive documentation.
 
 ### Starting the Server
 
@@ -520,7 +521,7 @@ soliplex.agents/
 │   ├── cli.py              # Main CLI entry point (includes 'serve' command)
 │   ├── client.py           # Soliplex Ingester API client
 │   ├── config.py           # Configuration and settings
-│   ├── server/             # FastAPI server (NEW - uncommitted)
+│   ├── server/             # FastAPI server
 │   │   ├── __init__.py     # FastAPI app initialization
 │   │   ├── auth.py         # Authentication (API key & OAuth2 proxy)
 │   │   └── routes/
@@ -541,12 +542,11 @@ soliplex.agents/
 │           └── utils.py    # Utility functions
 ├── tests/                  # Test suite
 │   └── unit/
-│       ├── test_server_*.py  # Server API tests (NEW - uncommitted)
+│       ├── test_server_*.py  # Server API tests
 │       └── ...
-├── Dockerfile              # Production container (NEW - uncommitted)
-├── .dockerignore           # Build context exclusions (NEW - uncommitted)
-├── DOCKERFILE_CHANGES.md   # Docker implementation docs (NEW - uncommitted)
-└── DOCKERFILE_EVALUATION.md # Docker evaluation report (NEW - uncommitted)
+├── Dockerfile              # Production container
+├── .dockerignore           # Build context exclusions
+└── DOCKERFILE_CHANGES.md   # Docker implementation documentation
 ```
 
 ### Key Components
@@ -555,7 +555,7 @@ soliplex.agents/
 - `cli.py` - Main entry point with `fs`, `scm`, and `serve` commands
 - Agent-specific CLI commands in `fs/cli.py` and `scm/cli.py`
 
-**Server Layer (New):**
+**Server Layer:**
 - `server/` - FastAPI application
 - `server/auth.py` - Flexible authentication (none, API key, OAuth2 proxy)
 - `server/routes/` - REST API endpoints mirroring CLI functionality
