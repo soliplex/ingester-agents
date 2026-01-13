@@ -21,15 +21,19 @@ requires-python = ">=3.13"
 dependencies = [
     "aiofiles>=25.1.0",
     "aiohttp>=3.13.2",
+    "fastapi>=0.115.0",
     "jinja2>=3.1.6",
     "pydantic-settings>=2.12.0",
+    "python-multipart>=0.0.20",
     "typer>=0.20.0",
+    "uvicorn[standard]>=0.34.0",
 ]
 
 
 [dependency-groups]
 dev = [
     "coverage>=7.11.0",
+    "httpx>=0.28.0",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
@@ -78,6 +82,7 @@ omit = [
     "*/app.py",
     "*/templates/*",
     "*/conftest.py",
+    "*/server/*",
 ]
 
 [tool.coverage.report]
@@ -108,7 +113,7 @@ select = [
     # flake8-pytest-style
     "PT",
 ]
-ignore = [ "TRY003"
+ignore = [ "TRY003" , "B008"
 ]
 
 [tool.ruff.lint.isort]
