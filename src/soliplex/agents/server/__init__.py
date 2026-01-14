@@ -6,6 +6,7 @@ Provides REST API endpoints for filesystem and SCM ingestion agents.
 
 import logging
 
+from fastapi import APIRouter
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -21,6 +22,10 @@ async def lifespan(app: FastAPI):
     """Manage app lifecycle."""
     logging.basicConfig(level=settings.log_level)
     logger.info("Starting soliplex-agents server")
+    if settings.api_prefix:
+        logger.info(f"API prefix: {settings.api_prefix}")
+    if settings.root_path:
+        logger.info(f"Root path: {settings.root_path}")
     yield
     logger.info("soliplex-agents server stopped")
 
@@ -30,6 +35,7 @@ app = FastAPI(
     description="REST API for Soliplex document ingestion agents",
     version="0.1.0",
     lifespan=lifespan,
+    root_path=settings.root_path or "",
 )
 
 # CORS middleware
@@ -41,13 +47,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(fs_router)
-app.include_router(scm_router)
+# Create parent router with configurable prefix for all API routes
+api_router = APIRouter(prefix=settings.api_prefix or "")
+
+# Include sub-routers
+api_router.include_router(fs_router)
+api_router.include_router(scm_router)
 
 
-# Health check endpoint (no auth required)
-@app.get("/health", tags=["health"])
+# Health check endpoint (no auth required, under the prefix)
+@api_router.get("/health", tags=["health"])
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+# Include the parent router in the app
+app.include_router(api_router)

@@ -27,5 +27,9 @@ class Settings(BaseSettings):
     server_host: str = "127.0.0.1"
     server_port: int = 8001
 
+    # URL routing settings
+    api_prefix: str = ""  # URL prefix for all routes (e.g., "/ingester-agent")
+    root_path: str = ""  # Root path for reverse proxy (used for OpenAPI docs)
+
 
 settings = Settings()
