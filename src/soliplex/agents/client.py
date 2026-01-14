@@ -21,8 +21,10 @@ PROCESSABLE_STATUSES = {STATUS_NEW, STATUS_MISMATCH}
 
 @asynccontextmanager
 async def get_session():
-    # TODO: add auth if needed
-    async with aiohttp.ClientSession(headers={"User-Agent": "soliplex-agent"}) as session:
+    headers = {"User-Agent": "soliplex-agent"}
+    if settings.ingester_api_key:
+        headers["Authorization"] = f"Bearer {settings.ingester_api_key}"
+    async with aiohttp.ClientSession(headers=headers) as session:
         yield session
 
 

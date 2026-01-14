@@ -279,6 +279,7 @@ Pydantic BaseSettings subclass with automatic environment variable loading:
 ```python
 class Settings(BaseSettings):
     endpoint_url: str = "http://localhost:8000/api/v1"  # Ingester API
+    ingester_api_key: str | None = None                  # API key for Ingester auth
     gh_token: str | None = None                          # GitHub token
     gh_owner: str | None = None                          # GitHub default owner
     gitea_url: str | None = None                         # Gitea instance URL
@@ -299,6 +300,7 @@ allowed_exts = settings.extensions
 
 **Environment Variable Mapping:**
 - `ENDPOINT_URL` → `endpoint_url`
+- `INGESTER_API_KEY` → `ingester_api_key`
 - `GH_TOKEN` → `gh_token`
 - `EXTENSIONS` → `extensions` (comma-separated string converted to list)
 
@@ -312,15 +314,20 @@ allowed_exts = settings.extensions
 
 **Key Functions:**
 
-#### `get_session()` (lines 22-26)
-Creates authenticated aiohttp session with User-Agent header:
+#### `get_session()` (lines 22-28)
+Creates aiohttp session with User-Agent header and optional Bearer authentication:
 
 ```python
 @asynccontextmanager
 async def get_session():
-    async with aiohttp.ClientSession(headers={"User-Agent": "soliplex-agent"}) as session:
+    headers = {"User-Agent": "soliplex-agent"}
+    if settings.ingester_api_key:
+        headers["Authorization"] = f"Bearer {settings.ingester_api_key}"
+    async with aiohttp.ClientSession(headers=headers) as session:
         yield session
 ```
+
+When `INGESTER_API_KEY` is set, all requests to the Ingester API include the `Authorization: Bearer <key>` header.
 
 #### `find_batch_for_source()` (lines 34-46)
 **CRITICAL FUNCTION** - Looks for existing batch by source name to enable batch reuse:
@@ -1565,6 +1572,7 @@ def operation() -> dict[str, Any]:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ENDPOINT_URL` | Yes | `http://localhost:8000/api/v1` | Soliplex Ingester API endpoint |
+| `INGESTER_API_KEY` | No | `None` | API key for authenticating with the Ingester API (sent as Bearer token) |
 | `GH_TOKEN` | For GitHub | `None` | GitHub personal access token |
 | `GH_OWNER` | For GitHub | `None` | Default GitHub username or organization |
 | `GITEA_URL` | For Gitea | `None` | Gitea instance URL (e.g., `https://gitea.example.com`) |

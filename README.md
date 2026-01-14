@@ -65,6 +65,9 @@ The agents use environment variables for configuration. Create a `.env` file or 
 # Soliplex Ingester API endpoint
 ENDPOINT_URL=http://localhost:8000/api/v1
 
+# Ingester API authentication (for connecting to protected Ingester instances)
+INGESTER_API_KEY=your-ingester-api-key
+
 # GitHub Configuration - if needed
 GH_TOKEN=your_github_token_here
 GH_OWNER=your_github_username_or_org

@@ -18,7 +18,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     endpoint_url: str = "http://localhost:8000/api/v1"
 
-    # Authentication settings (matching soliplex_ingester)
+    # Ingester API authentication (for outgoing requests to the Ingester API)
+    ingester_api_key: str | None = None
+
+    # Authentication settings (matching soliplex_ingester - for this agent's own API server)
     api_key: str | None = None
     api_key_enabled: bool = False
     auth_trust_proxy_headers: bool = False
