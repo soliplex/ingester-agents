@@ -362,3 +362,210 @@ class BaseSCMProvider(ABC):
         """
         if isinstance(resp, dict) and "errors" in resp:
             raise SCMException(str(resp))
+
+    async def create_repository(
+        self,
+        name: str,
+        description: str = "",
+        private: bool = False,
+        owner: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Create a new repository.
+
+        If owner is specified and differs from the authenticated user, creates the repository
+        under that organization. Otherwise creates it under the authenticated user.
+
+        Args:
+            name: Repository name
+            description: Repository description
+            private: Whether the repository should be private
+            owner: Organization name to create repo under (optional)
+
+        Returns:
+            Dictionary containing the created repository information
+
+        Raises:
+            SCMException: If repository creation fails
+        """
+        owner = owner or self.owner
+
+        # Build the appropriate URL based on whether we're creating for an org or user
+        if owner:
+            url = self.build_url(f"/orgs/{owner}/repos")
+        else:
+            url = self.build_url("/user/repos")
+
+        payload = {
+            "name": name,
+            "description": description,
+            "private": private,
+        }
+
+        async with self.get_session() as session:
+            async with session.post(url, json=payload) as response:
+                resp = await response.json()
+
+                if response.status == 201:
+                    logger.info(f"Created repository: {name}")
+                    return resp
+                elif response.status == 409:
+                    msg = f"Repository '{name}' already exists"
+                    raise SCMException(msg)
+                elif response.status == 404:
+                    msg = f"Organization '{owner}' not found"
+                    raise SCMException(msg)
+                elif response.status == 403:
+                    msg = f"Permission denied to create repository under '{owner}'"
+                    raise SCMException(msg)
+                else:
+                    if isinstance(resp, dict) and "message" in resp:
+                        raise SCMException(resp["message"])
+                    raise SCMException(f"Failed to create repository: {response.status}")
+
+    async def delete_repository(self, repo: str, owner: str | None = None) -> bool:
+        """
+        Delete a repository.
+
+        Args:
+            repo: Repository name
+            owner: Repository owner (defaults to instance owner)
+
+        Returns:
+            True if deletion was successful
+
+        Raises:
+            SCMException: If repository deletion fails
+        """
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}")
+
+        async with self.get_session() as session:
+            async with session.delete(url) as response:
+                if response.status == 204:
+                    logger.info(f"Deleted repository: {owner}/{repo}")
+                    return True
+                elif response.status == 404:
+                    msg = f"Repository '{owner}/{repo}' not found"
+                    raise SCMException(msg)
+                elif response.status == 403:
+                    msg = f"Permission denied to delete repository '{owner}/{repo}'"
+                    raise SCMException(msg)
+                else:
+                    resp = await response.json()
+                    if isinstance(resp, dict) and "message" in resp:
+                        raise SCMException(resp["message"])
+                    raise SCMException(f"Failed to delete repository: {response.status}")
+
+    async def create_issue(
+        self,
+        repo: str,
+        title: str,
+        body: str = "",
+        owner: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Create a new issue in a repository.
+
+        Args:
+            repo: Repository name
+            title: Issue title
+            body: Issue body/description
+            owner: Repository owner (defaults to instance owner)
+
+        Returns:
+            Dictionary containing the created issue information
+
+        Raises:
+            SCMException: If issue creation fails
+        """
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}/issues")
+
+        payload = {
+            "title": title,
+            "body": body,
+        }
+
+        async with self.get_session() as session:
+            async with session.post(url, json=payload) as response:
+                resp = await response.json()
+
+                if response.status == 201:
+                    logger.info(f"Created issue '{title}' in {owner}/{repo}")
+                    return resp
+                elif response.status == 404:
+                    msg = f"Repository '{owner}/{repo}' not found"
+                    raise SCMException(msg)
+                elif response.status == 403:
+                    msg = f"Permission denied to create issue in '{owner}/{repo}'"
+                    raise SCMException(msg)
+                else:
+                    if isinstance(resp, dict) and "message" in resp:
+                        raise SCMException(resp["message"])
+                    raise SCMException(f"Failed to create issue: {response.status}")
+
+    async def create_file(
+        self,
+        repo: str,
+        file_path: str,
+        content: bytes | str,
+        message: str = "Add file",
+        branch: str = "main",
+        owner: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Create or update a file in a repository.
+
+        Args:
+            repo: Repository name
+            file_path: Path to the file in the repository
+            content: File content (bytes or string)
+            message: Commit message
+            branch: Branch name (default: main)
+            owner: Repository owner (defaults to instance owner)
+
+        Returns:
+            Dictionary containing the commit information
+
+        Raises:
+            SCMException: If file creation fails
+        """
+        import base64
+
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}/contents/{file_path}")
+
+        # Encode content to base64
+        if isinstance(content, str):
+            content_bytes = content.encode("utf-8")
+        else:
+            content_bytes = content
+        content_b64 = base64.b64encode(content_bytes).decode("ascii")
+
+        payload = {
+            "content": content_b64,
+            "message": message,
+            "branch": branch,
+        }
+
+        async with self.get_session() as session:
+            async with session.post(url, json=payload) as response:
+                resp = await response.json()
+
+                if response.status in (200, 201):
+                    logger.info(f"Created file '{file_path}' in {owner}/{repo}")
+                    return resp
+                elif response.status == 404:
+                    msg = f"Repository '{owner}/{repo}' not found"
+                    raise SCMException(msg)
+                elif response.status == 403:
+                    msg = f"Permission denied to create file in '{owner}/{repo}'"
+                    raise SCMException(msg)
+                elif response.status == 422:
+                    msg = f"File '{file_path}' already exists or invalid request"
+                    raise SCMException(msg)
+                else:
+                    if isinstance(resp, dict) and "message" in resp:
+                        raise SCMException(resp["message"])
+                    raise SCMException(f"Failed to create file: {response.status}")
