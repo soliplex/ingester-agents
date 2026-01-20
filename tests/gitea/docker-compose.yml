@@ -1,0 +1,30 @@
+version: "3"
+
+networks:
+  gitea:
+    external: false
+
+services:
+  server:
+    image: gitea/gitea:1.25.3
+    container_name: gitea
+    environment:
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__database__PATH=/data/gitea/gitea.db
+      - GITEA__server__ROOT_URL=http://localhost:3000/
+      - GITEA__server__DOMAIN=localhost
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__service__DISABLE_REGISTRATION=false
+      - GITEA__service__REQUIRE_SIGNIN_VIEW=false
+    restart: always
+    networks:
+      - gitea
+    volumes:
+      - gitea_data:/data
+    ports:
+      - "3000:3000"
+      - "2222:22"
+
+volumes:
+  gitea_data:
+    driver: local

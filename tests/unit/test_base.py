@@ -495,3 +495,563 @@ async def test_validate_response_list(provider):
 
     # Should not raise
     await provider.validate_response(response, resp)
+
+
+@pytest.mark.asyncio
+async def test_create_repository_success(provider, mock_response):
+    """Test create_repository creates repository successfully."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    created_repo = {"id": 1, "name": "new-repo", "full_name": "test_owner/new-repo"}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(201, created_repo)
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.create_repository("new-repo", description="A test repo", private=True)
+
+        assert result["name"] == "new-repo"
+        mock_session.post.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_create_repository_for_org(provider, mock_response):
+    """Test create_repository creates repository under organization."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    created_repo = {"id": 1, "name": "org-repo", "full_name": "my-org/org-repo"}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(201, created_repo)
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.create_repository("org-repo", owner="my-org")
+
+        assert result["name"] == "org-repo"
+
+
+@pytest.mark.asyncio
+async def test_create_repository_without_owner(mock_response):
+    """Test create_repository without owner uses user endpoint."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    # Create a provider that returns None for get_default_owner
+    class NoOwnerProvider(ConcreteSCMProvider):
+        def get_default_owner(self) -> str:
+            return ""
+
+    provider = NoOwnerProvider(owner="")  # Explicitly set empty owner
+    provider.owner = None  # Override to None
+
+    created_repo = {"id": 1, "name": "user-repo"}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(201, created_repo)
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.create_repository("user-repo")
+
+        assert result["name"] == "user-repo"
+
+
+@pytest.mark.asyncio
+async def test_create_repository_already_exists(provider, mock_response):
+    """Test create_repository raises SCMException when repo exists."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(409, {"message": "Repository already exists"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="already exists"):
+            await provider.create_repository("existing-repo")
+
+
+@pytest.mark.asyncio
+async def test_create_repository_org_not_found(provider, mock_response):
+    """Test create_repository raises SCMException when org not found."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(404, {"message": "Not found"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="not found"):
+            await provider.create_repository("new-repo", owner="nonexistent-org")
+
+
+@pytest.mark.asyncio
+async def test_create_repository_permission_denied(provider, mock_response):
+    """Test create_repository raises SCMException on permission denied."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(403, {"message": "Forbidden"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Permission denied"):
+            await provider.create_repository("new-repo")
+
+
+@pytest.mark.asyncio
+async def test_create_repository_error_with_message(provider, mock_response):
+    """Test create_repository raises SCMException with API message on error."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(500, {"message": "Internal server error"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Internal server error"):
+            await provider.create_repository("new-repo")
+
+
+@pytest.mark.asyncio
+async def test_create_repository_error_without_message(provider, mock_response):
+    """Test create_repository raises SCMException with status on error without message."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(500, {"error": "something"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Failed to create repository: 500"):
+            await provider.create_repository("new-repo")
+
+
+@pytest.mark.asyncio
+async def test_delete_repository_success(provider, mock_response):
+    """Test delete_repository deletes repository successfully."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(204, None)
+        mock_session.delete.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.delete_repository("test-repo")
+
+        assert result is True
+        mock_session.delete.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_repository_with_owner(provider, mock_response):
+    """Test delete_repository with explicit owner."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(204, None)
+        mock_session.delete.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.delete_repository("test-repo", owner="other-owner")
+
+        assert result is True
+
+
+@pytest.mark.asyncio
+async def test_delete_repository_not_found(provider, mock_response):
+    """Test delete_repository raises SCMException when repo not found."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(404, {"message": "Not found"})
+        mock_session.delete.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="not found"):
+            await provider.delete_repository("nonexistent-repo")
+
+
+@pytest.mark.asyncio
+async def test_delete_repository_permission_denied(provider, mock_response):
+    """Test delete_repository raises SCMException on permission denied."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(403, {"message": "Forbidden"})
+        mock_session.delete.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Permission denied"):
+            await provider.delete_repository("protected-repo")
+
+
+@pytest.mark.asyncio
+async def test_delete_repository_error_with_message(provider, mock_response):
+    """Test delete_repository raises SCMException with API message on error."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(500, {"message": "Internal server error"})
+        mock_session.delete.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Internal server error"):
+            await provider.delete_repository("test-repo")
+
+
+@pytest.mark.asyncio
+async def test_delete_repository_error_without_message(provider, mock_response):
+    """Test delete_repository raises SCMException with status on error without message."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(500, {"error": "something"})
+        mock_session.delete.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Failed to delete repository: 500"):
+            await provider.delete_repository("test-repo")
+
+
+# ==================== Tests for create_issue ====================
+
+
+@pytest.mark.asyncio
+async def test_create_issue_success(provider, mock_response):
+    """Test create_issue creates issue successfully."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    created_issue = {"id": 1, "number": 42, "title": "Test Issue"}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(201, created_issue)
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.create_issue("test-repo", "Test Issue", "Issue body")
+
+        assert result["title"] == "Test Issue"
+        mock_session.post.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_create_issue_with_owner(provider, mock_response):
+    """Test create_issue with explicit owner."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    created_issue = {"id": 1, "number": 1, "title": "Org Issue"}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(201, created_issue)
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.create_issue("test-repo", "Org Issue", owner="other-owner")
+
+        assert result["title"] == "Org Issue"
+
+
+@pytest.mark.asyncio
+async def test_create_issue_repo_not_found(provider, mock_response):
+    """Test create_issue raises SCMException when repo not found."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(404, {"message": "Not found"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="not found"):
+            await provider.create_issue("nonexistent-repo", "Test Issue")
+
+
+@pytest.mark.asyncio
+async def test_create_issue_permission_denied(provider, mock_response):
+    """Test create_issue raises SCMException on permission denied."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(403, {"message": "Forbidden"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Permission denied"):
+            await provider.create_issue("test-repo", "Test Issue")
+
+
+@pytest.mark.asyncio
+async def test_create_issue_error_with_message(provider, mock_response):
+    """Test create_issue raises SCMException with API message on error."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(500, {"message": "Internal server error"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Internal server error"):
+            await provider.create_issue("test-repo", "Test Issue")
+
+
+@pytest.mark.asyncio
+async def test_create_issue_error_without_message(provider, mock_response):
+    """Test create_issue raises SCMException with status on error without message."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(500, {"error": "something"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Failed to create issue: 500"):
+            await provider.create_issue("test-repo", "Test Issue")
+
+
+# ==================== Tests for create_file ====================
+
+
+@pytest.mark.asyncio
+async def test_create_file_success_with_string(provider, mock_response):
+    """Test create_file creates file successfully with string content."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    created_file = {"content": {"path": "test.md", "sha": "abc123"}}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(201, created_file)
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.create_file("test-repo", "test.md", "# Hello World")
+
+        assert result["content"]["path"] == "test.md"
+        mock_session.post.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_create_file_success_with_bytes(provider, mock_response):
+    """Test create_file creates file successfully with bytes content."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    created_file = {"content": {"path": "image.png", "sha": "def456"}}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(201, created_file)
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.create_file("test-repo", "image.png", b"\x89PNG\r\n")
+
+        assert result["content"]["path"] == "image.png"
+
+
+@pytest.mark.asyncio
+async def test_create_file_with_custom_message_and_branch(provider, mock_response):
+    """Test create_file with custom commit message and branch."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    created_file = {"content": {"path": "docs/readme.md"}}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(201, created_file)
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.create_file("test-repo", "docs/readme.md", "content", message="Add docs", branch="develop")
+
+        assert result["content"]["path"] == "docs/readme.md"
+
+
+@pytest.mark.asyncio
+async def test_create_file_with_owner(provider, mock_response):
+    """Test create_file with explicit owner."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    created_file = {"content": {"path": "file.txt"}}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(201, created_file)
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.create_file("test-repo", "file.txt", "content", owner="other-owner")
+
+        assert result["content"]["path"] == "file.txt"
+
+
+@pytest.mark.asyncio
+async def test_create_file_status_200(provider, mock_response):
+    """Test create_file handles 200 status (update case)."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    updated_file = {"content": {"path": "existing.txt"}}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, updated_file)
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.create_file("test-repo", "existing.txt", "new content")
+
+        assert result["content"]["path"] == "existing.txt"
+
+
+@pytest.mark.asyncio
+async def test_create_file_repo_not_found(provider, mock_response):
+    """Test create_file raises SCMException when repo not found."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(404, {"message": "Not found"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="not found"):
+            await provider.create_file("nonexistent-repo", "file.txt", "content")
+
+
+@pytest.mark.asyncio
+async def test_create_file_permission_denied(provider, mock_response):
+    """Test create_file raises SCMException on permission denied."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(403, {"message": "Forbidden"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Permission denied"):
+            await provider.create_file("test-repo", "file.txt", "content")
+
+
+@pytest.mark.asyncio
+async def test_create_file_already_exists(provider, mock_response):
+    """Test create_file raises SCMException when file exists (422)."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(422, {"message": "Unprocessable Entity"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="already exists"):
+            await provider.create_file("test-repo", "existing.txt", "content")
+
+
+@pytest.mark.asyncio
+async def test_create_file_error_with_message(provider, mock_response):
+    """Test create_file raises SCMException with API message on error."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(500, {"message": "Internal server error"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Internal server error"):
+            await provider.create_file("test-repo", "file.txt", "content")
+
+
+@pytest.mark.asyncio
+async def test_create_file_error_without_message(provider, mock_response):
+    """Test create_file raises SCMException with status on error without message."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(500, {"error": "something"})
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with pytest.raises(SCMException, match="Failed to create file: 500"):
+            await provider.create_file("test-repo", "file.txt", "content")
