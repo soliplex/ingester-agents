@@ -398,7 +398,7 @@ async def do_ingest(
 - `document`: File upload (multipart/form-data)
 - `metadata`: JSON string with additional metadata
 
-#### `do_start_workflows()` (lines 97-124)
+#### `do_start_workflows()` (lines 99-126)
 Triggers backend workflow processing for a batch:
 
 ```python
@@ -409,6 +409,63 @@ async def do_start_workflows(
     priority: int = 5
 ) -> dict[str, Any]:
     """Start workflows for all documents in a batch."""
+```
+
+#### `get_sync_state()` (lines 229-258)
+Retrieves the last sync state for incremental synchronization:
+
+```python
+async def get_sync_state(source: str) -> dict[str, Any]:
+    """
+    Get last sync state for a source.
+
+    Args:
+        source: Source identifier (e.g., "gitea:admin:myrepo")
+
+    Returns:
+        Sync state dict with last_commit_sha, last_sync_date, branch.
+        Returns empty state if no previous sync exists.
+    """
+```
+
+#### `update_sync_state()` (lines 261-292)
+Updates sync state after successful synchronization:
+
+```python
+async def update_sync_state(
+    source: str,
+    commit_sha: str,
+    branch: str = "main",
+    metadata: dict | None = None
+) -> dict[str, Any]:
+    """
+    Update sync state after successful sync.
+
+    Args:
+        source: Source identifier
+        commit_sha: Latest processed commit SHA
+        branch: Branch name
+        metadata: Optional sync metadata (commits processed, files changed, etc.)
+
+    Returns:
+        Updated sync state or error dict
+    """
+```
+
+#### `reset_sync_state()` (lines 295-318)
+Resets sync state to force a full synchronization:
+
+```python
+async def reset_sync_state(source: str) -> dict[str, Any]:
+    """
+    Reset sync state (forces full sync on next run).
+
+    Args:
+        source: Source identifier
+
+    Returns:
+        Confirmation message or error dict
+    """
 ```
 
 ---
@@ -538,6 +595,78 @@ async def get_file_content(
 ```
 
 **GitHub Override:** Fetches large files via blob API (see `github/__init__.py:60-80`)
+
+#### `list_commits_since()` (lines 366-426)
+Lists commits since a specific commit SHA for incremental sync:
+
+```python
+async def list_commits_since(
+    self,
+    repo: str,
+    owner: str | None = None,
+    since_commit_sha: str | None = None,
+    branch: str = "main",
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """
+    List commits since a specific commit SHA.
+
+    Args:
+        repo: Repository name
+        owner: Repository owner
+        since_commit_sha: SHA of last processed commit (None = get all recent)
+        branch: Branch to fetch from
+        limit: Maximum commits to fetch per page
+
+    Returns:
+        List of commit objects, newest first
+    """
+```
+
+**Process:**
+1. Fetches commits from the branch (paginated)
+2. Stops when `since_commit_sha` is found
+3. Returns all commits between HEAD and the marker
+4. If `since_commit_sha` is None, returns all recent commits up to limit
+
+#### `get_commit_details()` (lines 428-449)
+Fetches detailed commit information including file changes:
+
+```python
+async def get_commit_details(
+    self,
+    repo: str,
+    owner: str | None = None,
+    commit_sha: str = None
+) -> dict[str, Any]:
+    """
+    Get detailed commit information including file changes.
+
+    Returns:
+        Commit object with files list containing status (added/modified/removed)
+    """
+```
+
+#### `get_single_file()` (lines 451-479)
+Fetches a single file from the repository by path:
+
+```python
+async def get_single_file(
+    self,
+    repo: str,
+    owner: str | None = None,
+    file_path: str = "",
+    branch: str = "main"
+) -> dict[str, Any]:
+    """
+    Get a single file from repository.
+
+    Returns:
+        Parsed file object with content, hash, and metadata
+    """
+```
+
+**Used by:** Incremental sync to fetch only changed files instead of entire repository
 
 ---
 
@@ -743,6 +872,55 @@ async def load_inventory(
    - Track successes and errors
 6. If no errors and `start_workflows=True`, trigger workflows
 7. Return summary dict
+
+#### `incremental_sync()` (lines 148-338)
+**INCREMENTAL SYNC FUNCTION** - Performs commit-based incremental synchronization:
+
+```python
+async def incremental_sync(
+    scm: str,
+    repo_name: str,
+    owner: str = None,
+    branch: str = "main",
+    priority: int = 0,
+    start_workflows: bool = False,
+    workflow_definition_id: str | None = None,
+    param_set_id: str | None = None,
+) -> dict:
+    """
+    Perform incremental sync based on commit history.
+    Only fetches and processes files that changed since last sync.
+    Falls back to full sync if no sync state exists.
+    """
+```
+
+**Workflow:**
+1. Get last sync state from ingester (`client.get_sync_state()`)
+2. If no previous state, fall back to full `load_inventory()`
+3. Fetch commits since last sync (`impl.list_commits_since()`)
+4. If no new commits, return "up-to-date" status
+5. Extract changed file paths from commit details
+6. Filter by allowed extensions
+7. Fetch only changed files (`impl.get_single_file()`)
+8. Find or create batch
+9. Ingest changed files
+10. Start workflows if requested
+11. Update sync state with latest commit SHA
+12. Return summary with commits processed, files changed, ingested count
+
+**Return Value:**
+```python
+{
+    "status": "synced" | "up-to-date",
+    "commits_processed": int,
+    "files_changed": int,
+    "files_removed": int,
+    "ingested": list[str],  # URIs of ingested files
+    "errors": list[dict],
+    "workflow_result": dict | None,
+    "new_commit_sha": str
+}
+```
 
 ---
 

@@ -49,12 +49,17 @@ def run(
     source: Annotated[str, typer.Argument(help="source name")],
     start: Annotated[int, typer.Option(help="start index")] = 0,
     end: Annotated[int, typer.Option(help="end index")] = None,
-    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = True,
+    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = False,
     workflow_definition_id: Annotated[str, typer.Option(help="workflow definition id")] = None,
     param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
 ):
+    if start_workflows:
+        if workflow_definition_id is None:
+            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
+        if param_set_id is None:
+            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
     print(f"loading {config_file} source={source} to")
     if os.path.exists(config_file) and os.path.isdir(config_file):
         print(f"build config file for {config_file}")

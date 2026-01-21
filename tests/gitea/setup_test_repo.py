@@ -7,7 +7,7 @@ This script:
 3. Uploads all files from tests/test_fs to the repository
 
 Usage:
-    python setup_test_repo.py [--repo-name NAME] [--max-issues N] [--delete-existing]
+    python setup_test_repo.py [--repo-name NAME] [--delete-existing]
 
 Environment variables (or .env file):
     GITEA_URL: Gitea API URL (e.g., http://localhost:3000/api/v1)
@@ -15,12 +15,14 @@ Environment variables (or .env file):
     GITEA_OWNER: Repository owner (default: admin)
 """
 
-import argparse
 import asyncio
 import csv
 import logging
 import sys
 from pathlib import Path
+from typing import Annotated
+
+import typer
 
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
@@ -34,6 +36,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+app = typer.Typer(help="Set up a Gitea test repository with issues and files")
+
 
 def get_script_dir() -> Path:
     """Get the directory containing this script."""
@@ -45,13 +49,14 @@ def get_test_fs_dir() -> Path:
     return Path(__file__).parent.parent / "test_fs"
 
 
-def load_issues_from_csv(csv_path: Path, max_issues: int | None = None) -> list[dict]:
+def load_issues_from_csv(csv_path: Path, start_index: int | None = None, end_index: int | None = None) -> list[dict]:
     """
     Load issues from a CSV file.
 
     Args:
         csv_path: Path to the issues.csv file
-        max_issues: Maximum number of issues to load (None for all)
+        start_index: Index of the first issue to create
+        end_index: Index of the last issue to create
 
     Returns:
         List of issue dictionaries with 'title' and 'body' keys
@@ -59,9 +64,14 @@ def load_issues_from_csv(csv_path: Path, max_issues: int | None = None) -> list[
     issues = []
     with open(csv_path, encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        for i, row in enumerate(reader):
-            if max_issues is not None and i >= max_issues:
-                break
+        items = list(reader)
+        if start_index is not None and end_index is not None:
+            items = items[start_index:end_index]
+        elif end_index is not None:
+            items = items[:end_index]
+        elif start_index is not None:
+            items = items[start_index:]
+        for i, row in enumerate(items):
             issues.append(
                 {
                     "title": row.get("issue_title", f"Issue {i + 1}"),
@@ -99,7 +109,8 @@ def collect_files(directory: Path) -> list[tuple[str, bytes]]:
 async def setup_repository(
     repo_name: str,
     delete_existing: bool = False,
-    max_issues: int | None = None,
+    start_index: int | None = None,
+    end_index: int | None = None,
 ) -> None:
     """
     Set up a Gitea repository with issues and files.
@@ -107,7 +118,8 @@ async def setup_repository(
     Args:
         repo_name: Name of the repository to create
         delete_existing: If True, delete existing repo before creating
-        max_issues: Maximum number of issues to create (None for all)
+        start_index: Index of the first issue to create
+        end_index: Index of the last issue to create
     """
     provider = GiteaProvider()
     script_dir = get_script_dir()
@@ -166,7 +178,7 @@ async def setup_repository(
     # Add issues from CSV
     issues_csv = script_dir / "issues.csv"
     if issues_csv.exists():
-        issues = load_issues_from_csv(issues_csv, max_issues)
+        issues = load_issues_from_csv(issues_csv, start_index, end_index)
         logger.info(f"Loaded {len(issues)} issues from CSV")
 
         for i, issue in enumerate(issues, 1):
@@ -185,56 +197,70 @@ async def setup_repository(
     logger.info(f"Repository setup complete: {repo_name}")
 
 
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="Set up a Gitea test repository with issues and files",
-    )
-    parser.add_argument(
-        "--repo-name",
-        default="test-repo",
-        help="Name of the repository to create (default: test-repo)",
-    )
-    parser.add_argument(
-        "--max-issues",
-        type=int,
-        default=10,
-        help="Maximum number of issues to create (default: 10, use 0 for all)",
-    )
-    parser.add_argument(
-        "--delete-existing",
-        action="store_true",
-        help="Delete existing repository before creating",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
+async def delete_repository_async(repo_name: str) -> None:
+    """Delete a repository."""
+    provider = GiteaProvider()
+    try:
+        await provider.delete_repository(repo_name)
+        logger.info(f"Deleted repository: {repo_name}")
+    except SCMException as e:
+        if "not found" in str(e).lower():
+            logger.warning(f"Repository {repo_name} does not exist")
+        else:
+            raise
 
-    args = parser.parse_args()
 
-    if args.verbose:
+@app.command()
+def setup(
+    repo_name: Annotated[str, typer.Option("--repo-name", "-r", help="Name of the repository to create")] = "test-repo",
+    max_issues: Annotated[
+        int, typer.Option("--max-issues", "-n", help="Maximum number of issues to create (0 for all)")
+    ] = 10,
+    delete_existing: Annotated[
+        bool, typer.Option("--delete-existing", "-d", help="Delete existing repository before creating")
+    ] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose logging")] = False,
+) -> None:
+    """Set up a Gitea test repository with issues and files."""
+    if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    max_issues = args.max_issues if args.max_issues > 0 else None
+    end_index = max_issues if max_issues > 0 else None
 
     try:
         asyncio.run(
             setup_repository(
-                repo_name=args.repo_name,
-                delete_existing=args.delete_existing,
-                max_issues=max_issues,
+                repo_name=repo_name,
+                delete_existing=delete_existing,
+                end_index=end_index,
             )
         )
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
-        sys.exit(1)
+        raise typer.Exit(1) from None
     except Exception:
         logger.exception("Error setting up repository")
-        sys.exit(1)
+        raise typer.Exit(1) from None
+
+
+@app.command()
+def delete(
+    repo_name: Annotated[str, typer.Option("--repo-name", "-r", help="Name of the repository to delete")] = "test-repo",
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose logging")] = False,
+) -> None:
+    """Delete a Gitea test repository."""
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    try:
+        asyncio.run(delete_repository_async(repo_name))
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+        raise typer.Exit(1) from None
+    except Exception:
+        logger.exception("Error deleting repository")
+        raise typer.Exit(1) from None
 
 
 if __name__ == "__main__":
-    main()
+    app()

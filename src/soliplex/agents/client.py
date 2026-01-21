@@ -1,3 +1,4 @@
+import datetime
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -224,3 +225,96 @@ async def do_ingest(
     except Exception as e:
         logger.exception(f"Error ingesting {uri}")
         return {"error": f"Error ingesting {uri}: {e}"}
+
+
+async def get_sync_state(source: str) -> dict[str, Any]:
+    """
+    Get last sync state for a source.
+
+    Args:
+        source: Source identifier (e.g., "gitea:admin:myrepo")
+
+    Returns:
+        Sync state dict with last_commit_sha, last_sync_date, etc.
+    """
+    url = _build_url(f"/sync-state/{source}")
+    try:
+        async with get_session() as session:
+            async with session.get(url) as response:
+                if response.status == 404:
+                    # No sync state exists yet
+                    return {
+                        "source_id": source,
+                        "last_commit_sha": None,
+                        "last_sync_date": None,
+                        "branch": "main",
+                    }
+
+                response.raise_for_status()
+                resp = await response.json()
+                resp["last_sync_date"] = datetime.datetime.fromisoformat(resp["last_sync_date"])
+                return resp
+
+    except Exception as e:
+        logger.exception(f"Error getting sync state for {source}")
+        return {"error": str(e)}
+
+
+async def update_sync_state(
+    source: str, commit_sha: str, branch: str = "main", metadata: dict | None = None
+) -> dict[str, Any]:
+    """
+    Update sync state after successful sync.
+
+    Args:
+        source: Source identifier
+        commit_sha: Latest processed commit SHA
+        branch: Branch name
+        metadata: Optional sync metadata
+
+    Returns:
+        Updated sync state or error dict
+    """
+    url = _build_url(f"/sync-state/{source}")
+
+    form = aiohttp.FormData()
+    form.add_field("commit_sha", commit_sha)
+    form.add_field("branch", branch)
+    if metadata:
+        form.add_field("metadata", json.dumps(metadata))
+
+    try:
+        async with get_session() as session:
+            async with session.put(url, data=form) as response:
+                response.raise_for_status()
+                return await response.json()
+
+    except Exception as e:
+        logger.exception(f"Error updating sync state for {source}")
+        return {"error": str(e)}
+
+
+async def reset_sync_state(source: str) -> dict[str, Any]:
+    """
+    Reset sync state (forces full sync).
+
+    Args:
+        source: Source identifier
+
+    Returns:
+        Confirmation message or error dict
+    """
+    url = _build_url(f"/sync-state/{source}")
+
+    try:
+        async with get_session() as session:
+            async with session.delete(url) as response:
+                if response.status == 404:
+                    return {"message": f"No sync state found for {source}"}
+
+                response.raise_for_status()
+                return await response.json()
+
+    except Exception as e:
+        logger.exception(f"Error resetting sync state for {source}")
+        return {"error": str(e)}

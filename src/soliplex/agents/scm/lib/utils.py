@@ -34,7 +34,7 @@ def compute_file_hash(content: bytes) -> str:
     Returns:
         Hexadecimal hash string
     """
-    return hashlib.sha3_256(content, usedforsecurity=False).hexdigest()
+    return hashlib.sha256(content, usedforsecurity=False).hexdigest()
 
 
 def decode_base64_if_needed(content: bytes | str) -> bytes:

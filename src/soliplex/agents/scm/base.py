@@ -1,6 +1,7 @@
 """Abstract base class for SCM (Source Control Management) providers."""
 
 import asyncio
+import datetime
 import logging
 import mimetypes
 import random
@@ -117,7 +118,9 @@ class BaseSCMProvider(ABC):
 
         return ret
 
-    async def list_issues(self, repo: str, owner: str | None = None, add_comments: bool = False) -> list[dict[str, Any]]:
+    async def list_issues(
+        self, repo: str, owner: str | None = None, add_comments: bool = False, since: datetime.datetime | None = None
+    ) -> list[dict[str, Any]]:
         """
         List all issues for a repository.
 
@@ -131,6 +134,8 @@ class BaseSCMProvider(ABC):
         """
         owner = owner or self.owner
         url_template = self.build_url("/repos/{owner}/{repo}/issues?page={page}&status=all")
+        if since:
+            url_template += f"&since={since.isoformat()}Z"
         issues = await self.paginate(url_template, owner, repo)
 
         if add_comments:
@@ -363,12 +368,126 @@ class BaseSCMProvider(ABC):
         if isinstance(resp, dict) and "errors" in resp:
             raise SCMException(str(resp))
 
+    async def list_commits_since(
+        self,
+        repo: str,
+        owner: str | None = None,
+        since_commit_sha: str | None = None,
+        branch: str = "main",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """
+        List commits since a specific commit SHA.
+
+        Args:
+            repo: Repository name
+            owner: Repository owner
+            since_commit_sha: SHA of last processed commit (None = get all recent)
+            branch: Branch to fetch from
+            limit: Maximum commits to fetch per page
+
+        Returns:
+            List of commit objects, newest first
+        """
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}/commits?sha={branch}&limit={limit}")
+
+        logger.debug(f"Fetching commits from {url}")
+
+        commits = []
+        found_marker = False
+
+        async with self.get_session() as session:
+            # Fetch commits (paginated if needed)
+            page = 1
+            max_pages = 10  # Safety limit
+
+            while page <= max_pages and not found_marker:
+                paginated_url = f"{url}&page={page}"
+
+                async with session.get(paginated_url) as response:
+                    resp = await response.json()
+                    await self.validate_response(response, resp)
+
+                    page_commits = resp if isinstance(resp, list) else []
+
+                    if not page_commits:
+                        break  # No more commits
+
+                    for commit in page_commits:
+                        # If we have a marker and found it, stop collecting
+                        if since_commit_sha and commit.get("sha") == since_commit_sha:
+                            found_marker = True
+                            break
+                        # Add commits until we hit the marker
+                        commits.append(commit)
+
+                    # Stop if got fewer commits than limit (last page)
+                    if len(page_commits) < limit:
+                        break
+
+                    page += 1
+
+        logger.info(f"Found {len(commits)} new commits since {since_commit_sha or 'beginning'}")
+        return commits
+
+    async def get_commit_details(self, repo: str, owner: str | None = None, commit_sha: str = None) -> dict[str, Any]:
+        """
+        Get detailed commit information including file changes.
+
+        Args:
+            repo: Repository name
+            owner: Repository owner
+            commit_sha: Commit SHA
+
+        Returns:
+            Commit object with files list
+        """
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}/git/commits/{commit_sha}")
+
+        async with self.get_session() as session:
+            async with session.get(url) as response:
+                resp = await response.json()
+                await self.validate_response(response, resp)
+                return resp
+
+    async def get_single_file(
+        self, repo: str, owner: str | None = None, file_path: str = "", branch: str = "main"
+    ) -> dict[str, Any]:
+        """
+        Get a single file from repository.
+
+        Args:
+            repo: Repository name
+            owner: Repository owner
+            file_path: Path to file in repository
+            branch: Branch name
+
+        Returns:
+            Parsed file object with content
+        """
+        owner = owner or self.owner
+        # URL encode the file path
+        from urllib.parse import quote
+
+        encoded_path = quote(file_path, safe="")
+        url = self.build_url(f"/repos/{owner}/{repo}/contents/{encoded_path}?ref={branch}")
+
+        async with self.get_session() as session:
+            async with session.get(url) as response:
+                resp = await response.json()
+                await self.validate_response(response, resp)
+
+                # Parse and return
+                return self.parse_file_rec(resp)
+
     async def create_repository(
         self,
         name: str,
         description: str = "",
         private: bool = False,
-        owner: str | None = None,
+        organization: str | None = None,
     ) -> dict[str, Any]:
         """
         Create a new repository.
@@ -380,7 +499,7 @@ class BaseSCMProvider(ABC):
             name: Repository name
             description: Repository description
             private: Whether the repository should be private
-            owner: Organization name to create repo under (optional)
+            organization: Organization name to create repo under (optional)
 
         Returns:
             Dictionary containing the created repository information
@@ -388,11 +507,10 @@ class BaseSCMProvider(ABC):
         Raises:
             SCMException: If repository creation fails
         """
-        owner = owner or self.owner
 
         # Build the appropriate URL based on whether we're creating for an org or user
-        if owner:
-            url = self.build_url(f"/orgs/{owner}/repos")
+        if organization:
+            url = self.build_url(f"/orgs/{organization}/repos")
         else:
             url = self.build_url("/user/repos")
 
@@ -401,6 +519,7 @@ class BaseSCMProvider(ABC):
             "description": description,
             "private": private,
         }
+        owner = self.owner
 
         async with self.get_session() as session:
             async with session.post(url, json=payload) as response:
@@ -413,7 +532,7 @@ class BaseSCMProvider(ABC):
                     msg = f"Repository '{name}' already exists"
                     raise SCMException(msg)
                 elif response.status == 404:
-                    msg = f"Organization '{owner}' not found"
+                    msg = f"Organization '{organization}' or user '{owner}' not found"
                     raise SCMException(msg)
                 elif response.status == 403:
                     msg = f"Permission denied to create repository under '{owner}'"
