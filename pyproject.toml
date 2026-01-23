@@ -27,6 +27,7 @@ dependencies = [
     "python-multipart>=0.0.20",
     "typer>=0.20.0",
     "uvicorn[standard]>=0.34.0",
+    "webdav4>=0.10.0",
 ]
 
 
