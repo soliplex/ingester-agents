@@ -1,7 +1,7 @@
 """
 FastAPI server for Soliplex Agents.
 
-Provides REST API endpoints for filesystem and SCM ingestion agents.
+Provides REST API endpoints for filesystem, SCM, and WebDAV ingestion agents.
 """
 
 import logging
@@ -14,6 +14,7 @@ from soliplex.agents.config import settings
 
 from .routes.fs import fs_router
 from .routes.scm import scm_router
+from .routes.webdav import webdav_router
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ api_router = APIRouter(prefix=settings.api_prefix or "")
 # Include sub-routers
 api_router.include_router(fs_router)
 api_router.include_router(scm_router)
+api_router.include_router(webdav_router)
 
 
 # Health check endpoint (no auth required, under the prefix)

@@ -23,17 +23,20 @@ fs_router = APIRouter(
 
 @fs_router.post("/validate-config")
 async def validate_config(
-    config_file: str = Form(..., description="Path to inventory file"),
+    config_file: str = Form(..., description="Path to inventory file or directory (will build config if directory)"),
 ):
     """
-    Validate an inventory JSON file.
+    Validate an inventory configuration.
+
+    If a file is provided, it will be treated as an inventory.json config file.
+    If a directory is provided, a config will be built from the directory contents.
 
     Checks file support and identifies invalid files.
     """
     if not os.path.exists(config_file):
-        raise HTTPException(status_code=404, detail=f"Config file not found: {config_file}")
+        raise HTTPException(status_code=404, detail=f"Path not found: {config_file}")
 
-    config = await fs_app.read_config(config_file)
+    config, _ = await fs_app.resolve_config_path(config_file)
     validated = fs_app.check_config(config)
     invalid = [row for row in validated if "valid" in row and not row["valid"]]
 
@@ -77,22 +80,25 @@ async def build_config(
 
 @fs_router.post("/check-status")
 async def check_status(
-    config_file: str = Form(..., description="Path to inventory file"),
+    config_file: str = Form(..., description="Path to inventory file or directory (will build config if directory)"),
     source: str = Form(..., description="Source name"),
     detail: bool = Form(False, description="Include detailed file list"),
 ):
     """
     Check which files need to be ingested.
 
+    If a file is provided, it will be treated as an inventory.json config file.
+    If a directory is provided, a config will be built from the directory contents.
+
     Compares file hashes against the Ingester database to identify
     new or modified files.
     """
     if not os.path.exists(config_file):
-        raise HTTPException(status_code=404, detail=f"Config file not found: {config_file}")
+        raise HTTPException(status_code=404, detail=f"Path not found: {config_file}")
 
     from soliplex.agents import client
 
-    config = await fs_app.read_config(config_file)
+    config, _ = await fs_app.resolve_config_path(config_file)
     to_process = await client.check_status(config, source)
 
     result = {
@@ -109,7 +115,7 @@ async def check_status(
 
 @fs_router.post("/run-inventory")
 async def run_inventory(
-    config_file: str = Form(..., description="Path to inventory file or directory"),
+    config_file: str = Form(..., description="Path to inventory file or directory (will build config if directory)"),
     source: str = Form(..., description="Source name"),
     start: int = Form(0, description="Start index"),
     end: int | None = Form(None, description="End index"),
@@ -119,21 +125,16 @@ async def run_inventory(
     priority: int = Form(0, description="Workflow priority"),
 ):
     """
-    Run document ingestion from an inventory file.
+    Run document ingestion from an inventory.
 
-    If a directory is provided, an inventory file will be built automatically.
+    If a file is provided, it will be treated as an inventory.json config file.
+    If a directory is provided, a config will be built from the directory contents.
+    Path resolution is now handled internally by load_inventory via resolve_config_path.
     """
     if not os.path.exists(config_file):
         raise HTTPException(status_code=404, detail=f"Path not found: {config_file}")
 
-    # If directory provided, build config first
-    if os.path.isdir(config_file):
-        config = await fs_app.build_config(config_file)
-        cfg_file = os.path.join(config_file, "inventory.json")
-        with open(cfg_file, "w") as f:
-            json.dump(config, f, indent=2)
-        config_file = cfg_file
-
+    # Path resolution now handled by load_inventory internally
     result = await fs_app.load_inventory(
         config_file,
         source,

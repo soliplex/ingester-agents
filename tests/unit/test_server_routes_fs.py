@@ -69,12 +69,15 @@ class TestValidateConfigRoute:
     """Tests for /api/v1/fs/validate-config endpoint."""
 
     def test_validate_config_success(self, client, temp_inventory_file):
-        """Test successful config validation."""
+        """Test successful config validation with inventory file."""
+        from pathlib import Path
+
         with patch("soliplex.agents.server.routes.fs.fs_app") as mock_fs_app:
-            mock_fs_app.read_config = AsyncMock(
-                return_value=[
-                    {"path": "doc1.md", "valid": True, "metadata": {"content-type": "text/markdown"}},
-                ]
+            mock_fs_app.resolve_config_path = AsyncMock(
+                return_value=(
+                    [{"path": "doc1.md", "valid": True, "metadata": {"content-type": "text/markdown"}}],
+                    Path(temp_inventory_file).parent,
+                )
             )
             mock_fs_app.check_config.return_value = [
                 {"path": "doc1.md", "valid": True, "metadata": {"content-type": "text/markdown"}},
@@ -93,12 +96,17 @@ class TestValidateConfigRoute:
 
     def test_validate_config_with_invalid_files(self, client, temp_inventory_file):
         """Test config validation with invalid files."""
+        from pathlib import Path
+
         with patch("soliplex.agents.server.routes.fs.fs_app") as mock_fs_app:
-            mock_fs_app.read_config = AsyncMock(
-                return_value=[
-                    {"path": "doc1.md", "metadata": {"content-type": "text/markdown"}},
-                    {"path": "archive.zip", "metadata": {"content-type": "application/zip"}},
-                ]
+            mock_fs_app.resolve_config_path = AsyncMock(
+                return_value=(
+                    [
+                        {"path": "doc1.md", "metadata": {"content-type": "text/markdown"}},
+                        {"path": "archive.zip", "metadata": {"content-type": "application/zip"}},
+                    ],
+                    Path(temp_inventory_file).parent,
+                )
             )
             mock_fs_app.check_config.return_value = [
                 {"path": "doc1.md", "valid": True, "metadata": {"content-type": "text/markdown"}},
@@ -120,6 +128,37 @@ class TestValidateConfigRoute:
             assert data["invalid_count"] == 1
             assert len(data["invalid_files"]) == 1
             assert data["invalid_files"][0]["path"] == "archive.zip"
+
+    def test_validate_config_with_directory(self, client, temp_document_dir):
+        """Test config validation with directory path (NEW)."""
+        from pathlib import Path
+
+        with patch("soliplex.agents.server.routes.fs.fs_app") as mock_fs_app:
+            # When directory is provided, resolve_config_path builds config
+            mock_fs_app.resolve_config_path = AsyncMock(
+                return_value=(
+                    [
+                        {"path": "test.md", "metadata": {"content-type": "text/markdown"}},
+                        {"path": "readme.md", "metadata": {"content-type": "text/markdown"}},
+                    ],
+                    Path(temp_document_dir),
+                )
+            )
+            mock_fs_app.check_config.return_value = [
+                {"path": "test.md", "valid": True, "metadata": {"content-type": "text/markdown"}},
+                {"path": "readme.md", "valid": True, "metadata": {"content-type": "text/markdown"}},
+            ]
+
+            response = client.post(
+                "/api/v1/fs/validate-config",
+                data={"config_file": temp_document_dir},
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "ok"
+            assert data["total_files"] == 2
+            assert data["invalid_count"] == 0
 
     def test_validate_config_file_not_found(self, client):
         """Test validation with non-existent file."""
@@ -182,16 +221,21 @@ class TestCheckStatusRoute:
     """Tests for /api/v1/fs/check-status endpoint."""
 
     def test_check_status_success(self, client, temp_inventory_file):
-        """Test successful status check."""
+        """Test successful status check with inventory file."""
+        from pathlib import Path
+
         with (
             patch("soliplex.agents.server.routes.fs.fs_app") as mock_fs_app,
             patch("soliplex.agents.client.check_status") as mock_check_status,
         ):
-            mock_fs_app.read_config = AsyncMock(
-                return_value=[
-                    {"path": "doc1.md", "sha256": "abc123"},
-                    {"path": "doc2.md", "sha256": "def456"},
-                ]
+            mock_fs_app.resolve_config_path = AsyncMock(
+                return_value=(
+                    [
+                        {"path": "doc1.md", "sha256": "abc123"},
+                        {"path": "doc2.md", "sha256": "def456"},
+                    ],
+                    Path(temp_inventory_file).parent,
+                )
             )
             mock_check_status.return_value = [
                 {"path": "doc1.md", "sha256": "abc123", "status": "new"},
@@ -210,12 +254,16 @@ class TestCheckStatusRoute:
 
     def test_check_status_with_detail(self, client, temp_inventory_file):
         """Test status check with detail flag."""
+        from pathlib import Path
+
         with (
             patch("soliplex.agents.server.routes.fs.fs_app") as mock_fs_app,
             patch("soliplex.agents.client.check_status") as mock_check_status,
         ):
             to_process = [{"path": "doc1.md", "sha256": "abc123", "status": "new"}]
-            mock_fs_app.read_config = AsyncMock(return_value=[{"path": "doc1.md", "sha256": "abc123"}])
+            mock_fs_app.resolve_config_path = AsyncMock(
+                return_value=([{"path": "doc1.md", "sha256": "abc123"}], Path(temp_inventory_file).parent)
+            )
             mock_check_status.return_value = to_process
 
             response = client.post(
@@ -227,6 +275,38 @@ class TestCheckStatusRoute:
             data = response.json()
             assert "files" in data
             assert data["files"] == to_process
+
+    def test_check_status_with_directory(self, client, temp_document_dir):
+        """Test status check with directory path (NEW)."""
+        from pathlib import Path
+
+        with (
+            patch("soliplex.agents.server.routes.fs.fs_app") as mock_fs_app,
+            patch("soliplex.agents.client.check_status") as mock_check_status,
+        ):
+            mock_fs_app.resolve_config_path = AsyncMock(
+                return_value=(
+                    [
+                        {"path": "test.md", "sha256": "abc123"},
+                        {"path": "readme.md", "sha256": "def456"},
+                    ],
+                    Path(temp_document_dir),
+                )
+            )
+            mock_check_status.return_value = [
+                {"path": "test.md", "sha256": "abc123", "status": "new"},
+            ]
+
+            response = client.post(
+                "/api/v1/fs/check-status",
+                data={"config_file": temp_document_dir, "source": "test-source"},
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "ok"
+            assert data["total_files"] == 2
+            assert data["files_to_process"] == 1
 
     def test_check_status_file_not_found(self, client):
         """Test status check with non-existent file."""
@@ -294,11 +374,9 @@ class TestRunInventoryRoute:
             assert len(data["errors"]) == 1
 
     def test_run_inventory_with_directory(self, client, temp_document_dir):
-        """Test inventory run when directory is provided."""
+        """Test inventory run when directory is provided (NEW)."""
         with patch("soliplex.agents.server.routes.fs.fs_app") as mock_fs_app:
-            mock_fs_app.build_config = AsyncMock(
-                return_value=[{"path": "test.md", "sha256": "abc123", "metadata": {"size": 50}}]
-            )
+            # Path resolution now handled inside load_inventory
             mock_fs_app.load_inventory = AsyncMock(
                 return_value={
                     "inventory": [{"path": "test.md"}],
@@ -316,8 +394,10 @@ class TestRunInventoryRoute:
             )
 
             assert response.status_code == 200
-            # build_config should have been called
-            mock_fs_app.build_config.assert_called_once()
+            # load_inventory should have been called with the directory path
+            mock_fs_app.load_inventory.assert_called_once()
+            call_args = mock_fs_app.load_inventory.call_args
+            assert call_args[0][0] == temp_document_dir  # First arg is the path
 
     def test_run_inventory_with_all_options(self, client, temp_inventory_file):
         """Test inventory run with all optional parameters."""

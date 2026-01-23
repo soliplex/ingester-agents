@@ -23,18 +23,21 @@ MIME_OVERRIDES = {
 
 async def validate_config(path: str):
     """
-    Validate a configuration file and print out validation results
+    Validate a configuration and print out validation results.
+
+    If path is a file, treats it as a config file.
+    If path is a directory, builds config from directory contents.
 
     Args:
-        path: The path to the configuration file to validate
+        path: Path to either a config file or directory to validate
 
     Returns:
         None
     """
-    config = await read_config(path)
+    config, _ = await resolve_config_path(path)
     validate = check_config(config)
     invalid = [row for row in validate if "valid" in row and not row["valid"]]
-    print(f"Validation  for {path}")
+    print(f"Validation for {path}")
     print(f"Total files: {len(config)}")
     if invalid:
         print(f"Found {len(invalid)} Invalid files:")
@@ -43,6 +46,18 @@ async def validate_config(path: str):
 
 
 async def read_config(config_path: str) -> list[dict]:
+    """
+    Read and parse a configuration file.
+
+    Args:
+        config_path: Path to the inventory JSON file
+
+    Returns:
+        List of file configuration dictionaries
+
+    Raises:
+        ValidationError: If the config file format is invalid
+    """
     logger.debug(f"Reading config from {config_path}")
     async with aiofiles.open(config_path) as f:
         config = json.loads(await f.read())
@@ -57,6 +72,45 @@ async def read_config(config_path: str) -> list[dict]:
         ret = sorted(ret, key=lambda x: int(x["metadata"]["size"]))
 
         return ret
+
+
+async def resolve_config_path(path: str) -> tuple[list[dict], Path]:
+    """
+    Resolve a path to a configuration and data directory.
+
+    If the path is a file, treat it as an inventory.json config file.
+    If the path is a directory, build a config from the directory contents.
+
+    Args:
+        path: Path to either a config file or directory to scan
+
+    Returns:
+        Tuple of (config list, data_path) where data_path is the parent
+        directory containing the files referenced in the config
+
+    Raises:
+        FileNotFoundError: If the path doesn't exist
+        ValidationError: If the config file format is invalid
+    """
+    path_obj = Path(path)
+
+    if not await aos.path.exists(path_obj):
+        raise FileNotFoundError(f"Path does not exist: {path}")
+
+    is_file = await aos.path.isfile(path_obj)
+
+    if is_file:
+        # Path is a config file - read it directly
+        logger.info(f"Using {path} as config file")
+        config = await read_config(path)
+        data_path = path_obj.parent
+    else:
+        # Path is a directory - build config from contents
+        logger.info(f"Building config from directory {path}")
+        config = await build_config(path)
+        data_path = path_obj
+
+    return config, data_path
 
 
 async def build_config(source_dir) -> list[dict]:
@@ -135,13 +189,33 @@ async def load_inventory(
     param_set_id: str | None = None,
     priority: int = 0,
 ):
-    config = await read_config(path)
+    """
+    Load and process an inventory for ingestion.
+
+    If path is a file, treats it as a config file.
+    If path is a directory, builds config from directory contents.
+
+    Args:
+        path: Path to either a config file or directory to process
+        source: Source identifier for the batch
+        start: Starting index for processing (default: 0)
+        end: Ending index for processing (default: None, processes all)
+        skip_invalid: Skip files that fail validation (default: False)
+        workflow_definition_id: Optional workflow to start after ingestion
+        start_workflows: Whether to start workflows (default: True)
+        param_set_id: Parameter set for workflows
+        priority: Workflow priority (default: 0)
+
+    Returns:
+        Dictionary with inventory, to_process, batch_id, ingested, errors,
+        and workflow_result
+    """
+    config, data_path = await resolve_config_path(path)
     if skip_invalid:
         filtered = check_config(config)
         config = [x for x in filtered if x["valid"]]
 
     logger.info(f"found {len(config)} files in {path}")
-    data_path = Path(path).parent
     to_process = await client.check_status(config, source)
     logger.info(f"found {len(to_process)}  out of {len(config)} to process in {data_path}")
     if end is None:
@@ -238,8 +312,19 @@ async def do_ingest(
 
 
 async def status_report(config_path: str, source: str, detail: bool = False):
+    """
+    Generate a status report for an inventory.
+
+    If config_path is a file, treats it as a config file.
+    If config_path is a directory, builds config from directory contents.
+
+    Args:
+        config_path: Path to either a config file or directory
+        source: Source identifier to check against
+        detail: Whether to print detailed file list (default: False)
+    """
     print(f"checking status for {config_path} source={source} ")
-    config = await read_config(config_path)
+    config, _ = await resolve_config_path(config_path)
     to_process = await client.check_status(config, source)
     print(f"Files to process: {len(to_process)}")
     print(f"Total files: {len(config)}")

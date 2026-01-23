@@ -549,12 +549,29 @@ async def get_file_content(
 
 **Key Functions:**
 
+#### `resolve_config_path()` (NEW)
+**NEW FUNCTION** - Resolves a path to either a config file or directory:
+
+```python
+async def resolve_config_path(path: str) -> tuple[list[dict], Path]:
+    """
+    If path is a file: treat it as inventory.json config file
+    If path is a directory: build config from directory contents
+
+    Returns: (config list, data_path)
+    """
+```
+
+**This makes inventory.json OPTIONAL** - you can now:
+- Pass a directory path → config built automatically
+- Pass a config file → config read directly
+
 #### `build_config()` (lines 62-84)
 Scans directory recursively and creates inventory.json:
 
 ```python
-async def build_config(directory: str) -> None:
-    """Scan directory, compute SHA256 hashes, write inventory.json."""
+async def build_config(directory: str) -> list[dict]:
+    """Scan directory, compute SHA256 hashes, return config list."""
 ```
 
 **Process:**
@@ -565,7 +582,7 @@ async def build_config(directory: str) -> None:
    - Compute SHA256 hash using `hashlib.sha256()` (NOT sha3_256!)
    - Detect MIME type with overrides for Office formats
    - Create metadata dict: {size, content-type}
-4. Write JSON array to `{directory}/inventory.json`
+4. Return JSON array (no longer automatically writes to file)
 
 **MIME Type Overrides** (lines 17-21):
 ```python
@@ -589,8 +606,13 @@ async def read_config(config_path: str) -> list[dict[str, Any]]:
 Validates files in inventory for supported types:
 
 ```python
-async def validate_config(config_path: str) -> None:
-    """Check if all files are supported. Prints summary."""
+async def validate_config(path: str) -> None:
+    """
+    Check if all files are supported. Prints summary.
+
+    If path is a file: treats it as a config file
+    If path is a directory: builds config from directory contents
+    """
 ```
 
 **Rejected Types:**
@@ -613,31 +635,178 @@ def check_config(file_dict: dict[str, Any]) -> tuple[bool, str]:
 
 ```python
 async def load_inventory(
-    config_or_dir: str,
+    path: str,
     source: str,
-    start: int | None = None,
+    start: int = 0,
     end: int | None = None,
-    start_workflows: bool = False,
+    skip_invalid: bool = False,
     workflow_definition_id: str | None = None,
+    start_workflows: bool = True,
     param_set_id: str | None = None,
-    priority: int = 5
+    priority: int = 0
 ) -> dict[str, Any]:
-    """Ingest documents from inventory or directory.
-    Returns: {ingested: int, errors: int, workflow_result: dict|None}"""
+    """
+    Ingest documents from inventory or directory.
+
+    If path is a file: treats it as a config file
+    If path is a directory: builds config from directory contents
+
+    Returns: {inventory, to_process, batch_id, ingested, errors, workflow_result}
+    """
 ```
 
 **Workflow:**
-1. Load config (or build if directory provided)
-2. Filter invalid files
-3. Apply start/end slice if specified
-4. Call `client.check_status()` to get files needing processing
-5. Find existing batch or create new one
-6. Loop through files:
+1. **Call `resolve_config_path()`** to handle file vs directory
+2. Filter invalid files if `skip_invalid=True`
+3. Call `client.check_status()` to get files needing processing
+4. Find existing batch or create new one
+5. Loop through files:
    - Read file bytes asynchronously
    - Call `client.do_ingest()`
    - Track successes and errors
-7. If no errors and `start_workflows=True`, trigger workflows
-8. Return summary dict
+6. If no errors and `start_workflows=True`, trigger workflows
+7. Return summary dict
+
+---
+
+### WebDAV Agent
+
+**File:** `src/soliplex/agents/webdav/app.py`
+
+**Purpose:** Handles WebDAV server document ingestion with support for remote file access.
+
+**Key Features:**
+- Connects to any WebDAV-compliant server (Nextcloud, ownCloud, SharePoint, etc.)
+- Supports both direct WebDAV paths and local inventory files
+- Uses webdav4 library for WebDAV protocol communication
+- SHA256 hashing (same as filesystem agent)
+- Automatic MIME type detection using shared common utilities
+
+**Key Functions:**
+
+#### `create_webdav_client()` (lines 20-43)
+Creates WebDAV client with credentials:
+
+```python
+def create_webdav_client(url: str = None, username: str = None, password: str = None) -> WebDAVClient:
+    """
+    Create a WebDAV client with credentials from settings or parameters.
+    Returns configured WebDAV client.
+    """
+```
+
+**Credentials Priority:**
+1. Function parameters (if provided)
+2. Environment variables (WEBDAV_URL, WEBDAV_USERNAME, WEBDAV_PASSWORD)
+
+#### `resolve_config_path()` (lines 111-145)
+Resolves path to configuration (similar to fs agent):
+
+```python
+async def resolve_config_path(
+    path: str,
+    webdav_url: str = None,
+    webdav_username: str = None,
+    webdav_password: str = None
+) -> tuple[list[dict], str]:
+    """
+    If path is a local file: treat as inventory.json
+    If path starts with '/': treat as WebDAV path and build config
+
+    Returns: (config list, base_path)
+    """
+```
+
+#### `build_config()` (lines 148-190)
+Scans WebDAV directory recursively:
+
+```python
+async def build_config(
+    webdav_path: str,
+    webdav_url: str = None,
+    webdav_username: str = None,
+    webdav_password: str = None
+) -> list[dict]:
+    """Scan WebDAV directory and create inventory configuration."""
+```
+
+**Process:**
+1. Creates WebDAV client
+2. Recursively lists all files using `recursive_listdir_webdav()`
+3. Downloads each file for SHA256 hashing
+4. Detects MIME types using shared `detect_mime_type()` from common module
+5. Makes paths relative to webdav_path
+6. Returns config list
+
+#### `recursive_listdir_webdav()` (lines 193-223)
+Recursively lists WebDAV directory:
+
+```python
+async def recursive_listdir_webdav(client: WebDAVClient, path: str) -> list[dict]:
+    """
+    Recursively list files in a WebDAV directory.
+    Returns: List of file info dicts with 'path' and 'size'
+    """
+```
+
+#### `load_inventory()` (lines 226-321)
+**MAIN INGESTION FUNCTION** for WebDAV agent (similar to fs agent):
+
+```python
+async def load_inventory(
+    path: str,
+    source: str,
+    start: int = 0,
+    end: int | None = None,
+    skip_invalid: bool = False,
+    workflow_definition_id: str | None = None,
+    start_workflows: bool = True,
+    param_set_id: str | None = None,
+    priority: int = 0,
+    webdav_url: str = None,
+    webdav_username: str = None,
+    webdav_password: str = None,
+):
+    """
+    Load and process inventory for ingestion.
+    Supports both local files and WebDAV paths.
+    """
+```
+
+#### `do_ingest()` (lines 324-362)
+Ingests single file from WebDAV or local filesystem:
+
+```python
+async def do_ingest(
+    base_path: str,
+    uri: str,
+    meta: dict[str, str],
+    source: str,
+    batch_id: int,
+    mime_type: str,
+    webdav_url: str = None,
+    webdav_username: str = None,
+    webdav_password: str = None,
+):
+    """
+    Checks if base_path is local directory or WebDAV path.
+    Downloads file from WebDAV if needed.
+    Calls client.do_ingest() to send to Ingester API.
+    """
+```
+
+**Common Module Utilities:**
+
+The WebDAV agent uses shared utilities from `src/soliplex/agents/common/config.py`:
+- `check_config()` - Validates file metadata
+- `detect_mime_type()` - Detects MIME types with Office format overrides
+- `MIME_OVERRIDES` - Dictionary of Office format MIME types
+
+**WebDAV-Specific Features:**
+- Credentials can be provided via environment variables or CLI options
+- Paths starting with '/' are treated as WebDAV paths
+- Local file paths (if they exist) are treated as inventory files
+- Supports incremental ingestion like other agents
 
 ---
 
@@ -2329,33 +2498,39 @@ def get_last_updated(self, rec: dict[str, Any]) -> str | None:
 
 ### Filesystem Agent Commands
 
+**IMPORTANT:** All filesystem commands now support both file and directory paths:
+- If you pass a **file path**, it's treated as an `inventory.json` config file
+- If you pass a **directory path**, a config is built automatically from the directory contents
+
 ```bash
-# Build configuration from directory
+# Build configuration from directory (optional - no longer required!)
 # Creates inventory.json in the directory
 si-agent fs build-config /path/to/documents
 
-# Validate configuration file
-# Checks for unsupported file types and extensions
+# Validate configuration - ACCEPTS FILE OR DIRECTORY
+# File: reads existing inventory.json
+# Directory: builds config on-the-fly and validates
 si-agent fs validate-config /path/to/inventory.json
+si-agent fs validate-config /path/to/documents  # NEW: direct directory validation
 
-# Check status (summary)
+# Check status - ACCEPTS FILE OR DIRECTORY
 # Shows count of files needing ingestion
 si-agent fs check-status /path/to/inventory.json my-source
+si-agent fs check-status /path/to/documents my-source  # NEW: direct directory check
 
-# Check status (detailed list)
-# Shows all files needing ingestion
-si-agent fs check-status /path/to/inventory.json my-source --detail
+# Check status with details
+si-agent fs check-status /path/to/documents my-source --detail
 
-# Ingest documents
-# Basic ingestion from inventory file
+# Ingest documents - ACCEPTS FILE OR DIRECTORY
+# From inventory file (traditional approach)
 si-agent fs run-inventory /path/to/inventory.json my-source
 
-# Ingest from directory (builds config automatically)
+# From directory directly (NEW: no inventory.json needed!)
 si-agent fs run-inventory /path/to/documents my-source
 
 # Ingest with workflow trigger
-# Triggers processing after successful ingestion
-si-agent fs run-inventory /path/to/inventory.json my-source \
+# Works with both file and directory paths
+si-agent fs run-inventory /path/to/documents my-source \
   --start-workflows \
   --workflow-definition-id my-workflow \
   --param-set-id my-params \
@@ -2403,6 +2578,49 @@ si-agent scm run-inventory gitea my-repo my-owner \
   --priority 3
 ```
 
+### WebDAV Agent Commands
+
+```bash
+# Build configuration from WebDAV directory
+si-agent webdav build-config /documents \
+  --webdav-url https://webdav.example.com \
+  --webdav-username user \
+  --webdav-password pass
+
+# Validate configuration - ACCEPTS FILE OR WEBDAV PATH
+# File: reads existing inventory.json
+# WebDAV path: builds config on-the-fly and validates
+si-agent webdav validate-config /path/to/inventory.json
+si-agent webdav validate-config /documents --webdav-url https://webdav.example.com
+
+# Check status - ACCEPTS FILE OR WEBDAV PATH
+si-agent webdav check-status /documents my-source \
+  --webdav-url https://webdav.example.com \
+  --webdav-username user
+
+# Check status with details
+si-agent webdav check-status /documents my-source --detail
+
+# Ingest documents - ACCEPTS FILE OR WEBDAV PATH
+# From WebDAV directory directly (recommended!)
+si-agent webdav run-inventory /documents my-source
+
+# From inventory file
+si-agent webdav run-inventory /path/to/inventory.json my-source
+
+# Ingest with workflow trigger
+si-agent webdav run-inventory /documents my-source \
+  --start-workflows \
+  --workflow-definition-id my-workflow \
+  --webdav-url https://webdav.example.com \
+  --webdav-username user \
+  --webdav-password pass
+```
+
+**Note:** WebDAV credentials can be provided via:
+1. Environment variables: `WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD` (recommended)
+2. Command-line options: `--webdav-url`, `--webdav-username`, `--webdav-password`
+
 ### Development Commands
 
 ```bash
@@ -2436,9 +2654,272 @@ uv run ruff format
 
 ---
 
+## FastAPI Server & Web Endpoints
+
+The project includes a FastAPI server that exposes HTTP endpoints for filesystem, WebDAV, and SCM operations.
+
+**Server Entry Point:** `src/soliplex/agents/server/__init__.py`
+
+### Filesystem Agent API Endpoints
+
+All endpoints are under `/api/v1/fs` prefix and accept **both file and directory paths**.
+
+#### POST `/api/v1/fs/validate-config`
+
+**Parameters:**
+- `config_file` (form): Path to inventory file OR directory
+
+**Behavior:**
+- If file: reads as inventory.json config
+- If directory: builds config from directory contents
+
+**Returns:**
+```json
+{
+  "status": "ok",
+  "total_files": 42,
+  "invalid_count": 2,
+  "invalid_files": [...]
+}
+```
+
+#### POST `/api/v1/fs/build-config`
+
+**Parameters:**
+- `path` (form): Directory to scan
+
+**Returns:**
+```json
+{
+  "status": "ok",
+  "files_count": 42,
+  "inventory_file": "/path/to/inventory.json",
+  "inventory": [...]
+}
+```
+
+**Note:** Still creates inventory.json file (for backward compatibility)
+
+#### POST `/api/v1/fs/check-status`
+
+**Parameters:**
+- `config_file` (form): Path to inventory file OR directory
+- `source` (form): Source identifier
+- `detail` (form, optional): Include file list
+
+**Behavior:**
+- If file: reads as inventory.json config
+- If directory: builds config from directory contents
+
+**Returns:**
+```json
+{
+  "status": "ok",
+  "total_files": 42,
+  "files_to_process": 5,
+  "files": [...]  // only if detail=true
+}
+```
+
+#### POST `/api/v1/fs/run-inventory`
+
+**Parameters:**
+- `config_file` (form): Path to inventory file OR directory
+- `source` (form): Source identifier
+- `start` (form, optional): Start index
+- `end` (form, optional): End index
+- `start_workflows` (form, optional): Trigger workflows
+- `workflow_definition_id` (form, optional): Workflow ID
+- `param_set_id` (form, optional): Parameter set ID
+- `priority` (form, optional): Workflow priority
+
+**Behavior:**
+- If file: reads as inventory.json config
+- If directory: builds config from directory contents
+- Path resolution handled internally by `load_inventory()`
+
+**Returns:**
+```json
+{
+  "status": "ok",
+  "inventory_count": 42,
+  "to_process_count": 5,
+  "ingested_count": 5,
+  "error_count": 0,
+  "batch_id": 123,
+  "errors": [],
+  "workflow_result": {...}
+}
+```
+
+### WebDAV Agent API Endpoints
+
+All endpoints are under `/api/v1/webdav` prefix and accept **both local files and WebDAV paths**.
+
+#### POST `/api/v1/webdav/validate-config`
+
+**Parameters:**
+- `config_path` (form): Path to inventory file OR WebDAV directory
+- `webdav_url` (form, optional): WebDAV server URL
+- `webdav_username` (form, optional): WebDAV username
+- `webdav_password` (form, optional): WebDAV password
+
+**Behavior:**
+- If local file exists: reads as inventory.json config
+- If WebDAV path: builds config from WebDAV directory contents
+
+**Returns:**
+```json
+{
+  "status": "ok",
+  "total_files": 42,
+  "invalid_count": 2,
+  "invalid_files": [...]
+}
+```
+
+#### POST `/api/v1/webdav/build-config`
+
+**Parameters:**
+- `webdav_path` (form): WebDAV directory path (e.g., /documents)
+- `webdav_url` (form, optional): WebDAV server URL
+- `webdav_username` (form, optional): WebDAV username
+- `webdav_password` (form, optional): WebDAV password
+
+**Returns:**
+```json
+{
+  "status": "ok",
+  "files_count": 42,
+  "inventory": [...]
+}
+```
+
+**Note:** Unlike filesystem agent, this does NOT write inventory.json to disk
+
+#### POST `/api/v1/webdav/check-status`
+
+**Parameters:**
+- `config_path` (form): Path to inventory file OR WebDAV directory
+- `source` (form): Source identifier
+- `detail` (form, optional): Include file list
+- `webdav_url` (form, optional): WebDAV server URL
+- `webdav_username` (form, optional): WebDAV username
+- `webdav_password` (form, optional): WebDAV password
+- `endpoint_url` (form, optional): Ingester API endpoint URL (overrides ENDPOINT_URL env var)
+
+**Behavior:**
+- If local file: reads as inventory.json config
+- If WebDAV path: builds config from WebDAV directory contents
+
+**Returns:**
+```json
+{
+  "status": "ok",
+  "total_files": 42,
+  "files_to_process": 5,
+  "files": [...]  // only if detail=true
+}
+```
+
+#### POST `/api/v1/webdav/run-inventory`
+
+**Parameters:**
+- `config_path` (form): Path to inventory file OR WebDAV directory
+- `source` (form): Source identifier
+- `start` (form, optional): Start index
+- `end` (form, optional): End index
+- `start_workflows` (form, optional): Trigger workflows
+- `workflow_definition_id` (form, optional): Workflow ID
+- `param_set_id` (form, optional): Parameter set ID
+- `priority` (form, optional): Workflow priority
+- `webdav_url` (form, optional): WebDAV server URL
+- `webdav_username` (form, optional): WebDAV username
+- `webdav_password` (form, optional): WebDAV password
+- `endpoint_url` (form, optional): Ingester API endpoint URL (overrides ENDPOINT_URL env var)
+
+**Behavior:**
+- If local file: reads as inventory.json config
+- If WebDAV path: builds config from WebDAV directory contents
+- Path resolution handled internally by `load_inventory()`
+
+**Returns:**
+```json
+{
+  "status": "ok",
+  "inventory_count": 42,
+  "to_process_count": 5,
+  "ingested_count": 5,
+  "error_count": 0,
+  "batch_id": 123,
+  "errors": [],
+  "workflow_result": {...}
+}
+```
+
+---
+
 ## Recent Changes & Version History
 
-### Version 0.1.0 (Current)
+### Version 0.3.0 (Current)
+
+**Recent Changes:** WebDAV agent support + common utilities module
+
+**Changes:**
+- **NEW: WebDAV Agent** - Full support for ingesting from WebDAV servers
+  - Added `src/soliplex/agents/webdav/` module
+  - CLI commands: `si-agent webdav {validate-config,build-config,check-status,run-inventory}`
+  - FastAPI endpoints under `/api/v1/webdav/`
+  - Supports Nextcloud, ownCloud, SharePoint, and any WebDAV-compliant server
+- **NEW: Common Utilities Module** - `src/soliplex/agents/common/`
+  - Extracted shared code from filesystem agent
+  - `check_config()` - File validation logic
+  - `detect_mime_type()` - MIME type detection with Office format overrides
+  - Reused by both filesystem and WebDAV agents
+- Added WebDAV configuration settings to `config.py`
+- Updated CLI to include `webdav` subcommand
+- Comprehensive test coverage for WebDAV agent
+- Documentation updated in README.md and CLAUDE.md
+
+**Breaking Changes:** None (additive feature)
+
+**Migration Notes:**
+- WebDAV agent is completely optional - existing agents unaffected
+- Set `WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD` environment variables to use
+- Can also provide credentials via CLI options
+
+**Impact on AI Assistance:**
+- Three independent agent systems now: `fs`, `webdav`, and `scm`
+- WebDAV agent follows same patterns as filesystem agent
+- Common utilities module contains shared validation/MIME detection logic
+- WebDAV uses webdav4 library for protocol communication
+
+### Version 0.2.0
+
+**Recent Changes:** Optional inventory.json - file vs directory path handling
+
+**Changes:**
+- Added `resolve_config_path()` function to `fs/app.py`
+- Modified all filesystem functions to accept file OR directory paths
+- Updated CLI commands to support both path types
+- Updated FastAPI endpoints to support both path types
+- inventory.json is now **OPTIONAL** - can pass directories directly
+
+**Breaking Changes:** None (backward compatible)
+
+**Migration Notes:**
+- Old behavior still works: passing inventory.json file paths
+- New behavior: can pass directory paths instead
+- Automatic detection: file vs directory handled by `resolve_config_path()`
+- CLI help updated to reflect new "file or directory" parameter descriptions
+
+**Impact on AI Assistance:**
+- When helping with filesystem code, remember paths can be files OR directories
+- The `resolve_config_path()` function is the key abstraction
+- All filesystem commands/endpoints now support both path types
+- Users no longer need to run `build-config` before other operations
+
+### Version 0.1.0
 
 **Recent Commit:** `bd6e0c6 - feat: change batch behavior to look for pre-existing batch if available`
 
