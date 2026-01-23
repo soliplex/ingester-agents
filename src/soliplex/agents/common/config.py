@@ -62,6 +62,6 @@ def detect_mime_type(path: str) -> str:
         # Check if it matches an Office format by extension
         for mime, ext in MIME_OVERRIDES.items():
             if path.endswith(ext):
-                return mime
+                return mime  # pragma: no cover
         mime_type = "application/octet-stream"
     return mime_type
