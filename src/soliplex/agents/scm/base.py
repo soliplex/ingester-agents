@@ -1,6 +1,7 @@
 """Abstract base class for SCM (Source Control Management) providers."""
 
 import asyncio
+import base64
 import logging
 import mimetypes
 import random
@@ -42,16 +43,47 @@ class BaseSCMProvider(ABC):
 
     def get_base_url(self) -> str:
         """Get the base API URL for this provider."""
+        if settings.scm_base_url is None:
+            raise SCMException("SCM base URL is not configured")
         return settings.scm_base_url
 
     def get_auth_token(self) -> str:
         """Get the authentication token from settings."""
         return settings.scm_auth_token
 
+    def get_auth_headers(self) -> dict[str, str]:
+        """
+        Get authentication headers for HTTP requests.
+
+        Supports both token-based and basic authentication.
+        Priority: token authentication > basic authentication
+
+        Returns:
+            Dictionary with Authorization header
+
+        Raises:
+            AuthenticationConfigError: If no valid authentication is configured
+        """
+        from soliplex.agents.scm import AuthenticationConfigError
+
+        # Priority 1: Token authentication
+        if settings.scm_auth_token is not None:
+            return {"Authorization": f"token {settings.scm_auth_token.get_secret_value()}"}
+
+        # Priority 2: Basic authentication
+        if settings.scm_auth_username and settings.scm_auth_password:
+            credentials = f"{settings.scm_auth_username}:{settings.scm_auth_password.get_secret_value()}"
+            encoded = base64.b64encode(credentials.encode()).decode()
+            return {"Authorization": f"Basic {encoded}"}
+
+        # No valid authentication configured
+        raise AuthenticationConfigError
+
     @asynccontextmanager
     async def get_session(self):
         """Create an authenticated HTTP session."""
-        headers = {"Authorization": f"token {self.get_auth_token()}"}
+
+        headers = self.get_auth_headers()
         async with aiohttp.ClientSession(headers=headers) as session:
             yield session
 

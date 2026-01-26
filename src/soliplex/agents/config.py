@@ -12,6 +12,8 @@ class SCM(str, enum.Enum):
 class Settings(BaseSettings):
     # SCM settings
     scm_auth_token: SecretStr | None = None
+    scm_auth_username: str | None = None
+    scm_auth_password: SecretStr | None = None
     scm_base_url: str | None = None
     scm_owner: str | None = None
 

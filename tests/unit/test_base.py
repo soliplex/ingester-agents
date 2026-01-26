@@ -53,9 +53,11 @@ def test_init_custom_owner(provider_with_owner):
 @pytest.mark.asyncio
 async def test_get_session(provider):
     """Test get_session creates authenticated session."""
-    async with provider.get_session() as session:
-        assert isinstance(session, aiohttp.ClientSession)
-        assert session.headers["Authorization"] == "token test_token"
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_auth_token = "test_token"
+        async with provider.get_session() as session:
+            assert isinstance(session, aiohttp.ClientSession)
+            assert session.headers["Authorization"] == "token test_token"
 
 
 def test_build_url(provider):
