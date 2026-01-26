@@ -1,24 +1,18 @@
 import hashlib
-import json
 import logging
-import mimetypes
 import pathlib
 from pathlib import Path
 
 import aiofiles
 import aiofiles.os as aos
 
-from soliplex.agents import ValidationError
 from soliplex.agents import client
+from soliplex.agents.common.config import check_config
+from soliplex.agents.common.config import detect_mime_type
+from soliplex.agents.common.config import read_config
 from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
-
-MIME_OVERRIDES = {
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",  # noqa: E501
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",  # noqa: E501
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",  # noqa: E501
-}
 
 
 async def validate_config(path: str):
@@ -43,35 +37,6 @@ async def validate_config(path: str):
         print(f"Found {len(invalid)} Invalid files:")
         for row in invalid:
             print(row["path"], row["reason"], row["metadata"]["content-type"])
-
-
-async def read_config(config_path: str) -> list[dict]:
-    """
-    Read and parse a configuration file.
-
-    Args:
-        config_path: Path to the inventory JSON file
-
-    Returns:
-        List of file configuration dictionaries
-
-    Raises:
-        ValidationError: If the config file format is invalid
-    """
-    logger.debug(f"Reading config from {config_path}")
-    async with aiofiles.open(config_path) as f:
-        config = json.loads(await f.read())
-        ret = config
-        if isinstance(config, list):
-            ret = config
-        elif isinstance(config, dict) and "data" in config.keys():
-            ret = config["data"]
-        else:
-            raise ValidationError(config_path)
-
-        ret = sorted(ret, key=lambda x: int(x["metadata"]["size"]))
-
-        return ret
 
 
 async def resolve_config_path(path: str) -> tuple[list[dict], Path]:
@@ -118,14 +83,12 @@ async def build_config(source_dir) -> list[dict]:
     allowed_extensions = settings.extensions
     config = []
     for path in paths:
-        ext = path.name.split(".")[-1]
+        ext = path.suffix.lstrip(".")
         if ext not in allowed_extensions and not path.is_dir():
             logger.info(f"skipping {path}")
             continue
         adj_path = path.relative_to(Path(source_dir))
-        mime_type = mimetypes.guess_type(str(adj_path))[0]
-        if mime_type is None:
-            mime_type = MIME_OVERRIDES.get(mime_type, "application/octet-stream")
+        mime_type = detect_mime_type(str(adj_path))
         rec = {
             "path": str(adj_path),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -152,32 +115,6 @@ async def recursive_listdir(file_dir: pathlib.Path):
     return file_paths
 
 
-def check_config(config: list[dict], start: int = 0, end: int = None) -> list[dict]:
-    for row in config:
-        path = row["path"]
-        ext = path.split(".")[-1]
-        row["valid"] = True
-        if "metadata" in row and "content-type" in row["metadata"]:
-            content_type = row["metadata"]["content-type"]
-            if content_type in [
-                "application/zip",
-                "application/x-zip-compressed",
-                "application/octet-stream",
-                "application/x-rar-compressed",
-                "application/x-7z-compressed",
-            ]:
-                row["valid"] = False
-                row["reason"] = "Unsupported content type"
-        else:
-            row["valid"] = False
-            row["reason"] = "No content type"
-
-        if len(ext) > 4:
-            row["valid"] = False
-            row["reason"] = f"Unsupported file extension {ext}"
-    return config
-
-
 async def load_inventory(
     path: str,
     source: str,
@@ -185,7 +122,7 @@ async def load_inventory(
     end: int = None,
     skip_invalid: bool = False,
     workflow_definition_id: str | None = None,
-    start_workflows: bool = True,
+    start_workflows: bool = False,
     param_set_id: str | None = None,
     priority: int = 0,
 ):
@@ -202,7 +139,7 @@ async def load_inventory(
         end: Ending index for processing (default: None, processes all)
         skip_invalid: Skip files that fail validation (default: False)
         workflow_definition_id: Optional workflow to start after ingestion
-        start_workflows: Whether to start workflows (default: True)
+        start_workflows: Whether to start workflows (default: False)
         param_set_id: Parameter set for workflows
         priority: Workflow priority (default: 0)
 
@@ -267,7 +204,6 @@ async def load_inventory(
             logger.error(f"Error ingesting {row['path']}: {res['error']}")
             res["uri"] = row["path"]
             res["source"] = source
-            res["batch_id"] = batch_id
             res["batch_id"] = batch_id
             errors.append(res)
         else:

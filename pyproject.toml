@@ -55,11 +55,11 @@ module-name = "soliplex.agents"
 si-agent = "soliplex.agents.cli:cli"
 
 [tool.pytest_env]
-GITEA_TOKEN="test_gitea_token"
-GITEA_OWNER="test_owner"
-GITEA_URL="http://localhost:3000/api/v1"
-GH_TOKEN="test_gh_token"
-GH_OWNER="test_owner"
+scm_auth_token="test_scm_auth_token"
+scm_auth_username="test_username"
+scm_auth_password="test_password"
+scm_owner="test_owner"
+scm_base_url="http://localhost:3000/api/v1"
 LOG_LEVEL="INFO"
 INGESTER_URL="http://localhost:8000/ingest_document"
 
@@ -84,6 +84,7 @@ omit = [
     "*/templates/*",
     "*/conftest.py",
     "*/server/*",
+    "*/tests/*",
 ]
 
 [tool.coverage.report]

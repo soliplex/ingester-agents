@@ -16,17 +16,9 @@ logger = logging.getLogger(__name__)
 class GitHubProvider(BaseSCMProvider):
     """GitHub implementation of SCM provider."""
 
-    def get_default_owner(self) -> str:
-        """Get the default owner from settings."""
-        return settings.gh_owner
-
     def get_base_url(self) -> str:
         """Get the base API URL for GitHub."""
-        return "https://api.github.com"
-
-    def get_auth_token(self) -> str:
-        """Get the GitHub authentication token."""
-        return settings.gh_token
+        return settings.scm_base_url or "https://api.github.com"
 
     def get_last_updated(self, rec: dict[str, Any]) -> str | None:
         """

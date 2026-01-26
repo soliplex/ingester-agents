@@ -1,5 +1,6 @@
 import enum
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -10,11 +11,11 @@ class SCM(str, enum.Enum):
 
 class Settings(BaseSettings):
     # SCM settings
-    gitea_url: str | None = None
-    gitea_token: str | None = None
-    gitea_owner: str | None = "admin"
-    gh_token: str | None = None
-    gh_owner: str | None = None
+    scm_auth_token: SecretStr | None = None
+    scm_auth_username: str | None = None
+    scm_auth_password: SecretStr | None = None
+    scm_base_url: str | None = None
+    scm_owner: str | None = None
 
     # File settings
     extensions: list[str] = ["md", "pdf", "doc", "docx"]
@@ -22,12 +23,13 @@ class Settings(BaseSettings):
     endpoint_url: str = "http://localhost:8000/api/v1"
 
     # Ingester API authentication (for outgoing requests to the Ingester API)
-    ingester_api_key: str | None = None
+    ingester_api_key: SecretStr | None = None
 
     # Authentication settings (matching soliplex_ingester - for this agent's own API server)
-    api_key: str | None = None
+    api_key: SecretStr | None = None
     api_key_enabled: bool = False
     auth_trust_proxy_headers: bool = False
+    ssl_verify: bool = True
 
     # Server settings
     server_host: str = "127.0.0.1"

@@ -1,6 +1,7 @@
 """Abstract base class for SCM (Source Control Management) providers."""
 
 import asyncio
+import base64
 import logging
 import mimetypes
 import random
@@ -9,6 +10,7 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -35,26 +37,54 @@ class BaseSCMProvider(ABC):
         """
         self.owner = owner or self.get_default_owner()
 
-    @abstractmethod
     def get_default_owner(self) -> str:
         """Get the default owner from settings."""
-        pass  # pragma: no cover
+        return settings.scm_owner
 
-    @abstractmethod
     def get_base_url(self) -> str:
         """Get the base API URL for this provider."""
-        pass  # pragma: no cover
+        if settings.scm_base_url is None:
+            raise SCMException("SCM base URL is not configured")
+        return settings.scm_base_url
 
-    @abstractmethod
     def get_auth_token(self) -> str:
         """Get the authentication token from settings."""
-        pass  # pragma: no cover
+        return settings.scm_auth_token
+
+    def get_auth_headers(self) -> dict[str, str]:
+        """
+        Get authentication headers for HTTP requests.
+
+        Supports both token-based and basic authentication.
+        Priority: token authentication > basic authentication
+
+        Returns:
+            Dictionary with Authorization header
+
+        Raises:
+            AuthenticationConfigError: If no valid authentication is configured
+        """
+        from soliplex.agents.scm import AuthenticationConfigError
+
+        # Priority 1: Token authentication
+        if settings.scm_auth_token is not None:
+            return {"Authorization": f"token {settings.scm_auth_token.get_secret_value()}"}
+
+        # Priority 2: Basic authentication
+        if settings.scm_auth_username and settings.scm_auth_password:
+            credentials = f"{settings.scm_auth_username}:{settings.scm_auth_password.get_secret_value()}"
+            encoded = base64.b64encode(credentials.encode()).decode()
+            return {"Authorization": f"Basic {encoded}"}
+
+        # No valid authentication configured
+        raise AuthenticationConfigError
 
     @asynccontextmanager
     async def get_session(self):
         """Create an authenticated HTTP session."""
-        headers = {"Authorization": f"token {self.get_auth_token()}"}
-        async with aiohttp.ClientSession(headers=headers) as session:
+        connector = aiohttp.TCPConnector(ssl=settings.ssl_verify)
+        headers = self.get_auth_headers()
+        async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
             yield session
 
     def build_url(self, path: str) -> str:
@@ -293,7 +323,7 @@ class BaseSCMProvider(ABC):
                 tasks = [
                     self.get_data_from_url(file["url"], session, owner, repo)
                     for file in files
-                    if file["name"].split(".")[-1] in allowed_extensions
+                    if Path(file["name"]).suffix.lstrip(".") in allowed_extensions
                 ]
                 for dir in dirs:
                     tasks.append(self.get_data_from_url(dir["url"], session, owner, repo))

@@ -1,8 +1,14 @@
 """Tests for soliplex.agents.common.config module."""
 
+import json
+
+import pytest
+
+from soliplex.agents import ValidationError
 from soliplex.agents.common.config import MIME_OVERRIDES
 from soliplex.agents.common.config import check_config
 from soliplex.agents.common.config import detect_mime_type
+from soliplex.agents.common.config import read_config
 
 
 class TestCheckConfig:
@@ -234,3 +240,53 @@ class TestMimeOverrides:
         assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.wordprocessingml.document"] == ".docx"
         assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] == ".xlsx"
         assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.presentationml.presentation"] == ".pptx"
+
+
+class TestReadConfig:
+    """Tests for read_config function."""
+
+    @pytest.mark.asyncio
+    async def test_read_config_list_format(self, tmp_path):
+        """Test read_config with list format config file."""
+        config_data = [
+            {"path": "a.pdf", "metadata": {"size": 200}},
+            {"path": "b.pdf", "metadata": {"size": 100}},
+        ]
+        config_file = tmp_path / "inventory.json"
+        config_file.write_text(json.dumps(config_data))
+
+        result = await read_config(str(config_file))
+
+        assert len(result) == 2
+        # Should be sorted by size
+        assert result[0]["path"] == "b.pdf"
+        assert result[1]["path"] == "a.pdf"
+
+    @pytest.mark.asyncio
+    async def test_read_config_dict_with_data_key(self, tmp_path):
+        """Test read_config with dict format containing 'data' key."""
+        config_data = {
+            "data": [
+                {"path": "large.pdf", "metadata": {"size": 500}},
+                {"path": "small.pdf", "metadata": {"size": 50}},
+            ]
+        }
+        config_file = tmp_path / "inventory.json"
+        config_file.write_text(json.dumps(config_data))
+
+        result = await read_config(str(config_file))
+
+        assert len(result) == 2
+        # Should be sorted by size
+        assert result[0]["path"] == "small.pdf"
+        assert result[1]["path"] == "large.pdf"
+
+    @pytest.mark.asyncio
+    async def test_read_config_invalid_format(self, tmp_path):
+        """Test read_config with invalid format raises ValidationError."""
+        config_data = {"invalid": "format", "no_data_key": True}
+        config_file = tmp_path / "inventory.json"
+        config_file.write_text(json.dumps(config_data))
+
+        with pytest.raises(ValidationError):
+            await read_config(str(config_file))

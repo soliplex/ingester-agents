@@ -24,7 +24,7 @@ def github_provider_custom_owner(mock_settings):
 
 def test_init_default_owner(github_provider, mock_settings):
     """Test GitHubProvider initialization with default owner."""
-    assert github_provider.owner == "test_gh_owner"
+    assert github_provider.owner == "test_scm_owner"
 
 
 def test_init_custom_owner(github_provider_custom_owner):
@@ -34,7 +34,7 @@ def test_init_custom_owner(github_provider_custom_owner):
 
 def test_get_default_owner(github_provider, mock_settings):
     """Test get_default_owner returns settings value."""
-    assert github_provider.get_default_owner() == "test_gh_owner"
+    assert github_provider.get_default_owner() == "test_scm_owner"
 
 
 def test_get_base_url(github_provider):
@@ -44,7 +44,7 @@ def test_get_base_url(github_provider):
 
 def test_get_auth_token(github_provider, mock_settings):
     """Test get_auth_token returns GitHub token."""
-    assert github_provider.get_auth_token() == "test_gh_token"
+    assert github_provider.get_auth_token() == "test_scm_auth_token"
 
 
 def test_get_last_updated(github_provider):
@@ -71,7 +71,7 @@ def test_build_url(github_provider):
 async def test_get_session_has_auth_header(github_provider):
     """Test get_session creates session with correct auth header."""
     async with github_provider.get_session() as session:
-        assert session.headers["Authorization"] == "token test_gh_token"
+        assert session.headers["Authorization"] == "token test_scm_auth_token"
 
 
 @pytest.mark.asyncio

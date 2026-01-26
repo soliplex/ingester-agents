@@ -127,11 +127,11 @@ class BaseSCMProvider(abc.ABC):
 # Concrete implementations
 class GitHubProvider(BaseSCMProvider):
     def get_base_url(self) -> str:
-        return "https://api.github.com"
+        return settings.scm_base_url or "https://api.github.com"
 
 class GiteaProvider(BaseSCMProvider):
-    def get_base_url(self) -> str:
-        return settings.gitea_url
+    # Inherits get_base_url() from BaseSCMProvider
+    pass
 ```
 
 #### 2. Template Method Pattern
@@ -271,6 +271,16 @@ C:\src\monkeytronics\enfold\ingester-agents\
 
 **Purpose:** Centralized configuration using Pydantic Settings that automatically loads from environment variables.
 
+**Unified SCM Authentication:**
+
+The configuration uses unified authentication settings that work across all SCM providers (GitHub, Gitea, etc.). This simplifies configuration and reduces duplication:
+
+- **`scm_auth_token`**: Single authentication token used for the active SCM provider
+- **`scm_owner`**: Default repository owner across all providers
+- **`scm_base_url`**: Base API URL (optional for GitHub which defaults to `https://api.github.com`, required for Gitea)
+
+The base class ([src/soliplex/agents/scm/base.py:38-48](src/soliplex/agents/scm/base.py#L38-L48)) provides default implementations of authentication methods using these unified settings. Individual providers can override these methods if needed (e.g., GitHub provides a default URL).
+
 **Key Classes:**
 
 #### `Settings` (lines 11-22)
@@ -280,11 +290,9 @@ Pydantic BaseSettings subclass with automatic environment variable loading:
 class Settings(BaseSettings):
     endpoint_url: str = "http://localhost:8000/api/v1"  # Ingester API
     ingester_api_key: str | None = None                  # API key for Ingester auth
-    gh_token: str | None = None                          # GitHub token
-    gh_owner: str | None = None                          # GitHub default owner
-    gitea_url: str | None = None                         # Gitea instance URL
-    gitea_token: str | None = None                       # Gitea token
-    gitea_owner: str | None = "admin"                    # Gitea default owner
+    scm_auth_token: str | None = None                    # Unified SCM authentication token
+    scm_owner: str | None = None                         # Unified SCM default owner
+    scm_base_url: str | None = None                      # SCM base URL (optional for GitHub, required for Gitea)
     extensions: list[str] = ["md", "pdf", "doc", "docx"] # Allowed file extensions
     log_level: str = "INFO"                              # Logging level
 ```
@@ -301,7 +309,7 @@ allowed_exts = settings.extensions
 **Environment Variable Mapping:**
 - `ENDPOINT_URL` → `endpoint_url`
 - `INGESTER_API_KEY` → `ingester_api_key`
-- `GH_TOKEN` → `gh_token`
+- `scm_auth_token` → `scm_auth_token`
 - `EXTENSIONS` → `extensions` (comma-separated string converted to list)
 
 ---
@@ -1742,11 +1750,9 @@ def operation() -> dict[str, Any]:
 |----------|----------|---------|-------------|
 | `ENDPOINT_URL` | Yes | `http://localhost:8000/api/v1` | Soliplex Ingester API endpoint |
 | `INGESTER_API_KEY` | No | `None` | API key for authenticating with the Ingester API (sent as Bearer token) |
-| `GH_TOKEN` | For GitHub | `None` | GitHub personal access token |
-| `GH_OWNER` | For GitHub | `None` | Default GitHub username or organization |
-| `GITEA_URL` | For Gitea | `None` | Gitea instance URL (e.g., `https://gitea.example.com`) |
-| `GITEA_TOKEN` | For Gitea | `None` | Gitea API token |
-| `GITEA_OWNER` | For Gitea | `"admin"` | Default Gitea username |
+| `scm_auth_token` | For SCM | `None` | Unified SCM authentication token (GitHub or Gitea) |
+| `scm_owner` | For SCM | `None` | Default repository owner (GitHub or Gitea) |
+| `scm_base_url` | For SCM | `None` | SCM base URL (optional for GitHub, required for Gitea, e.g., `https://gitea.example.com/api/v1`) |
 | `EXTENSIONS` | No | `"md,pdf,doc,docx"` | Comma-separated list of allowed file extensions |
 | `LOG_LEVEL` | No | `"INFO"` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
@@ -1778,7 +1784,7 @@ allowed_extensions = settings.extensions
 **Environment Variable Naming:**
 - Pydantic automatically converts uppercase env vars to lowercase attributes
 - `ENDPOINT_URL` → `endpoint_url`
-- `GH_TOKEN` → `gh_token`
+- `scm_auth_token` → `scm_auth_token`
 
 **List Handling:**
 ```bash

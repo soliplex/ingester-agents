@@ -6,6 +6,7 @@ from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import Form
 from fastapi import HTTPException
+from pydantic import SecretStr
 
 from soliplex.agents.server.auth import get_current_user
 from soliplex.agents.webdav import app as webdav_app
@@ -27,7 +28,7 @@ async def validate_config(
     ),
     webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
     webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
-    webdav_password: str = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
+    webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
 ):
     """
     Validate an inventory configuration.
@@ -59,7 +60,7 @@ async def build_config(
     webdav_path: str = Form(..., description="WebDAV directory path (e.g., /documents)"),
     webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
     webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
-    webdav_password: str = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
+    webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
 ):
     """
     Scan a WebDAV directory and create an inventory configuration.
@@ -90,8 +91,7 @@ async def check_status(
     detail: bool = Form(False, description="Include detailed file list"),
     webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
     webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
-    webdav_password: str = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
-    endpoint_url: str = Form(None, description="Ingester API endpoint URL (optional, uses env var if not provided)"),
+    webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
 ):
     """
     Check which files need to be ingested.
@@ -104,29 +104,21 @@ async def check_status(
     """
     try:
         from soliplex.agents import client
-        from soliplex.agents.config import settings as app_settings
 
-        # Temporarily override endpoint_url if provided
-        original_endpoint = app_settings.endpoint_url
-        if endpoint_url:
-            app_settings.endpoint_url = endpoint_url
+        config, _ = await webdav_app.resolve_config_path(config_path, webdav_url, webdav_username, webdav_password)
+        to_process = await client.check_status(config, source)
 
-        try:
-            config, _ = await webdav_app.resolve_config_path(config_path, webdav_url, webdav_username, webdav_password)
-            to_process = await client.check_status(config, source)
+        result = {
+            "status": "ok",
+            "total_files": len(config),
+            "files_to_process": len(to_process),
+        }
 
-            result = {
-                "status": "ok",
-                "total_files": len(config),
-                "files_to_process": len(to_process),
-            }
+        if detail:
+            result["files"] = to_process
 
-            if detail:
-                result["files"] = to_process
+        return result  # noqa: TRY300
 
-            return result
-        finally:
-            app_settings.endpoint_url = original_endpoint
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
@@ -148,8 +140,7 @@ async def run_inventory(
     priority: int = Form(0, description="Workflow priority"),
     webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
     webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
-    webdav_password: str = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
-    endpoint_url: str = Form(None, description="Ingester API endpoint URL (optional, uses env var if not provided)"),
+    webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
 ):
     """
     Run document ingestion from an inventory.
@@ -171,7 +162,6 @@ async def run_inventory(
             webdav_url=webdav_url,
             webdav_username=webdav_username,
             webdav_password=webdav_password,
-            endpoint_url=endpoint_url,
         )
 
         return {

@@ -41,7 +41,7 @@ def test_get_base_url(gitea_provider, mock_settings):
 
 def test_get_auth_token(gitea_provider, mock_settings):
     """Test get_auth_token returns Gitea token."""
-    assert gitea_provider.get_auth_token() == "test_gitea_token"
+    assert gitea_provider.get_auth_token() == "test_scm_auth_token"
 
 
 def test_get_last_updated_with_date(gitea_provider):
@@ -75,7 +75,7 @@ def test_build_url(gitea_provider, mock_settings):
 async def test_get_session_has_auth_header(gitea_provider):
     """Test get_session creates session with correct auth header."""
     async with gitea_provider.get_session() as session:
-        assert session.headers["Authorization"] == "token test_gitea_token"
+        assert session.headers["Authorization"] == "token test_scm_auth_token"
 
 
 @pytest.mark.asyncio

@@ -211,7 +211,6 @@ class TestLoadInventory:
             temp_inventory_file,
             "test-source",
             start_workflows=False,
-            endpoint_url="http://localhost:8000/api/v1",
         )
 
         assert "inventory" in result

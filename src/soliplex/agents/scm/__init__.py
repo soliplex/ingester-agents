@@ -11,6 +11,14 @@ class APIFetchError(SCMException):
         super().__init__("Failed to fetch from API")
 
 
+class AuthenticationConfigError(SCMException):
+    def __init__(self) -> None:
+        super().__init__(
+            "No valid authentication configured. "
+            "Provide either scm_auth_token or both scm_auth_username and scm_auth_password."
+        )
+
+
 class GitHubAPIError(SCMException):
     def __init__(self) -> None:
         super().__init__("GitHub API error")

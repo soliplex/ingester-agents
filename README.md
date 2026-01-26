@@ -73,16 +73,39 @@ ENDPOINT_URL=http://localhost:8000/api/v1
 
 # Ingester API authentication (for connecting to protected Ingester instances)
 INGESTER_API_KEY=your-ingester-api-key
+```
 
-# GitHub Configuration - if needed
-GH_TOKEN=your_github_token_here
-GH_OWNER=your_github_username_or_org
+### SCM Configuration
 
-# Gitea Configuration - if needed
-GITEA_URL=https://your-gitea-instance.com
-GITEA_TOKEN=your_gitea_token_here
-GITEA_OWNER=admin
+The agents use unified authentication settings that work across all SCM providers (GitHub, Gitea, etc.):
 
+```bash
+# SCM authentication token (GitHub personal access token or Gitea API token)
+scm_auth_token=your_scm_token_here
+
+# Default repository owner (username or organization)
+scm_owner=your_username_or_org
+
+# SCM base URL (required for Gitea, optional for GitHub)
+# For Gitea: Full API URL including /api/v1
+# For GitHub: Defaults to https://api.github.com if not specified
+scm_base_url=https://your-gitea-instance.com/api/v1
+```
+
+**Examples:**
+
+For GitHub:
+```bash
+export scm_auth_token=ghp_YourGitHubToken
+export scm_owner=your-github-username
+# scm_base_url not needed for public GitHub
+```
+
+For Gitea:
+```bash
+export scm_auth_token=your_gitea_token
+export scm_owner=admin
+export scm_base_url=https://gitea.example.com/api/v1
 ```
 
 ### Optional Configuration
@@ -441,8 +464,8 @@ curl -X 'GET' \
 ```bash
 # Set up environment
 export ENDPOINT_URL=http://localhost:8000/api/v1
-export GH_TOKEN=ghp_your_token_here
-export GH_OWNER=mycompany
+export scm_auth_token=ghp_your_token_here
+export scm_owner=mycompany
 
 # Ingest repository
 si-agent scm run-inventory github soliplex soliplex
