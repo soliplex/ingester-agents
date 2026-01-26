@@ -30,8 +30,8 @@ def github_provider_with_owner():
 
 def test_get_default_owner(github_provider):
     """Test get_default_owner returns settings value."""
-    with patch("soliplex.agents.scm.github.settings") as mock_settings:
-        mock_settings.gh_owner = "test-owner"
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_owner = "test-owner"
         assert github_provider.get_default_owner() == "test-owner"
 
 
@@ -42,8 +42,8 @@ def test_get_base_url(github_provider):
 
 def test_get_auth_token(github_provider):
     """Test get_auth_token returns settings value."""
-    with patch("soliplex.agents.scm.github.settings") as mock_settings:
-        mock_settings.gh_token = "test-token"
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_auth_token = "test-token"
         assert github_provider.get_auth_token() == "test-token"
 
 
@@ -220,8 +220,8 @@ async def test_get_blob_raises_on_error(github_provider, mock_response):
 
 def test_initialization_with_default_owner(github_provider):
     """Test GitHub provider uses default owner from settings."""
-    with patch("soliplex.agents.scm.github.settings") as mock_settings:
-        mock_settings.gh_owner = "default-owner"
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_owner = "default-owner"
         provider = GitHubProvider()
         assert provider.owner == "default-owner"
 

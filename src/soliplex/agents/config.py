@@ -10,11 +10,9 @@ class SCM(str, enum.Enum):
 
 class Settings(BaseSettings):
     # SCM settings
-    gitea_url: str | None = None
-    gitea_token: str | None = None
-    gitea_owner: str | None = "admin"
-    gh_token: str | None = None
-    gh_owner: str | None = None
+    scm_auth_token: str | None = None
+    scm_base_url: str | None = None
+    scm_owner: str | None = None
 
     # File settings
     extensions: list[str] = ["md", "pdf", "doc", "docx"]

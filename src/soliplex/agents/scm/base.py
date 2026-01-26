@@ -35,20 +35,17 @@ class BaseSCMProvider(ABC):
         """
         self.owner = owner or self.get_default_owner()
 
-    @abstractmethod
     def get_default_owner(self) -> str:
         """Get the default owner from settings."""
-        pass  # pragma: no cover
+        return settings.scm_owner
 
-    @abstractmethod
     def get_base_url(self) -> str:
         """Get the base API URL for this provider."""
-        pass  # pragma: no cover
+        return settings.scm_base_url
 
-    @abstractmethod
     def get_auth_token(self) -> str:
         """Get the authentication token from settings."""
-        pass  # pragma: no cover
+        return settings.scm_auth_token
 
     @asynccontextmanager
     async def get_session(self):
