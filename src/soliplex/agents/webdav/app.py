@@ -250,7 +250,6 @@ async def load_inventory(
     webdav_url: str = None,
     webdav_username: str = None,
     webdav_password: str = None,
-    endpoint_url: str = None,
 ):
     """
     Load and process an inventory for ingestion.
@@ -277,95 +276,87 @@ async def load_inventory(
         Dictionary with inventory, to_process, batch_id, ingested, errors,
         and workflow_result
     """
-    # Temporarily override endpoint_url if provided
-    original_endpoint = settings.endpoint_url
-    if endpoint_url:
-        settings.endpoint_url = endpoint_url
 
-    try:
-        config, base_path = await resolve_config_path(path, webdav_url, webdav_username, webdav_password)
-        if skip_invalid:
-            filtered = check_config(config)
-            config = [x for x in filtered if x["valid"]]
+    config, base_path = await resolve_config_path(path, webdav_url, webdav_username, webdav_password)
+    if skip_invalid:
+        filtered = check_config(config)
+        config = [x for x in filtered if x["valid"]]
 
-        logger.info(f"found {len(config)} files in {path}")
-        to_process = await client.check_status(config, source)
-        logger.info(f"found {len(to_process)} out of {len(config)} to process in {base_path}")
-        if end is None:
-            end = len(config)
-            to_process = to_process[start:end]
-        ret = {
-            "inventory": config,
-            "to_process": to_process,
-            "batch_id": None,
-            "ingested": [],
-            "errors": [],
-            "workflow_result": None,
-        }
-        if len(to_process) == 0:
-            logger.info("nothing to process. exiting")
-            return ret
-
-        found_batch_id = await client.find_batch_for_source(source)
-        if found_batch_id:
-            logger.info(f"found batch {found_batch_id} for {source}")
-            batch_id = found_batch_id
-        else:
-            logger.info(f"no batch found for {source}. creating")
-            batch_id = await client.create_batch(source, source)
-        ret["batch_id"] = batch_id
-        ingested = []
-        errors = []
-        for row in to_process:
-            meta = row["metadata"].copy()
-            for k in [
-                "path",
-                "sha256",
-                "size",
-                "source",
-                "batch_id",
-                "source_uri",
-            ]:
-                if k in meta:
-                    del meta[k]
-            logger.info(f"starting ingest for {row['path']}")
-            mime_type = None
-            if "metadata" in row and "content-type" in row["metadata"]:
-                mime_type = row["metadata"]["content-type"]
-            res = await do_ingest(
-                base_path,
-                row["path"],
-                meta,
-                source,
-                batch_id,
-                mime_type,
-                webdav_url,
-                webdav_username,
-                webdav_password,
-            )
-            if "error" in res:
-                logger.error(f"Error ingesting {row['path']}: {res['error']}")
-                res["uri"] = row["path"]
-                res["source"] = source
-                res["batch_id"] = batch_id
-                errors.append(res)
-            else:
-                ingested.append(res)
-        wf_res = None
-        if len(errors) == 0 and start_workflows:
-            wf_res = await client.do_start_workflows(
-                batch_id,
-                workflow_definition_id,
-                param_set_id,
-                priority,
-            )
-        ret["ingested"] = ingested
-        ret["errors"] = errors
-        ret["workflow_result"] = wf_res
+    logger.info(f"found {len(config)} files in {path}")
+    to_process = await client.check_status(config, source)
+    logger.info(f"found {len(to_process)} out of {len(config)} to process in {base_path}")
+    if end is None:
+        end = len(config)
+        to_process = to_process[start:end]
+    ret = {
+        "inventory": config,
+        "to_process": to_process,
+        "batch_id": None,
+        "ingested": [],
+        "errors": [],
+        "workflow_result": None,
+    }
+    if len(to_process) == 0:
+        logger.info("nothing to process. exiting")
         return ret
-    finally:
-        # Restore original endpoint_url
-        settings.endpoint_url = original_endpoint
+
+    found_batch_id = await client.find_batch_for_source(source)
+    if found_batch_id:
+        logger.info(f"found batch {found_batch_id} for {source}")
+        batch_id = found_batch_id
+    else:
+        logger.info(f"no batch found for {source}. creating")
+        batch_id = await client.create_batch(source, source)
+    ret["batch_id"] = batch_id
+    ingested = []
+    errors = []
+    for row in to_process:
+        meta = row["metadata"].copy()
+        for k in [
+            "path",
+            "sha256",
+            "size",
+            "source",
+            "batch_id",
+            "source_uri",
+        ]:
+            if k in meta:
+                del meta[k]
+        logger.info(f"starting ingest for {row['path']}")
+        mime_type = None
+        if "metadata" in row and "content-type" in row["metadata"]:
+            mime_type = row["metadata"]["content-type"]
+        res = await do_ingest(
+            base_path,
+            row["path"],
+            meta,
+            source,
+            batch_id,
+            mime_type,
+            webdav_url,
+            webdav_username,
+            webdav_password,
+        )
+        if "error" in res:
+            logger.error(f"Error ingesting {row['path']}: {res['error']}")
+            res["uri"] = row["path"]
+            res["source"] = source
+            res["batch_id"] = batch_id
+            errors.append(res)
+        else:
+            ingested.append(res)
+    wf_res = None
+    if len(errors) == 0 and start_workflows:
+        wf_res = await client.do_start_workflows(
+            batch_id,
+            workflow_definition_id,
+            param_set_id,
+            priority,
+        )
+    ret["ingested"] = ingested
+    ret["errors"] = errors
+    ret["workflow_result"] = wf_res
+    return ret
 
 
 async def do_ingest(
@@ -431,7 +422,6 @@ async def status_report(
     webdav_url: str = None,
     webdav_username: str = None,
     webdav_password: str = None,
-    endpoint_url: str = None,
 ):
     """
     Generate a status report for an inventory.
@@ -446,22 +436,14 @@ async def status_report(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
-        endpoint_url: Optional Ingester API endpoint URL
-    """
-    # Temporarily override endpoint_url if provided
-    original_endpoint = settings.endpoint_url
-    if endpoint_url:
-        settings.endpoint_url = endpoint_url
 
-    try:
-        print(f"checking status for {config_path} source={source} ")
-        config, _ = await resolve_config_path(config_path, webdav_url, webdav_username, webdav_password)
-        to_process = await client.check_status(config, source)
-        print(f"Files to process: {len(to_process)}")
-        print(f"Total files: {len(config)}")
-        if detail and len(to_process) > 0:
-            for row in to_process:
-                print(row)
-    finally:
-        # Restore original endpoint_url
-        settings.endpoint_url = original_endpoint
+    """
+
+    print(f"checking status for {config_path} source={source} ")
+    config, _ = await resolve_config_path(config_path, webdav_url, webdav_username, webdav_password)
+    to_process = await client.check_status(config, source)
+    print(f"Files to process: {len(to_process)}")
+    print(f"Total files: {len(config)}")
+    if detail and len(to_process) > 0:
+        for row in to_process:
+            print(row)
