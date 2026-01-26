@@ -122,7 +122,7 @@ async def load_inventory(
     end: int = None,
     skip_invalid: bool = False,
     workflow_definition_id: str | None = None,
-    start_workflows: bool = True,
+    start_workflows: bool = False,
     param_set_id: str | None = None,
     priority: int = 0,
 ):

@@ -37,7 +37,7 @@ def run_inventory(
     scm: Annotated[SCM, typer.Argument(help="scm provider")],
     repo_name: Annotated[str, typer.Argument(help="repo name")],
     owner: Annotated[str, typer.Argument(help="repo owner")],
-    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = True,
+    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = False,
     workflow_definition_id: Annotated[str, typer.Option(help="workflow definition id")] = None,
     param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
