@@ -53,8 +53,11 @@ def test_init_custom_owner(provider_with_owner):
 @pytest.mark.asyncio
 async def test_get_session(provider):
     """Test get_session creates authenticated session."""
+    from pydantic import SecretStr
+
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_auth_token = "test_token"
+        mock_settings.scm_auth_token = SecretStr("test_token")
+        mock_settings.ssl_verify = True
         async with provider.get_session() as session:
             assert isinstance(session, aiohttp.ClientSession)
             assert session.headers["Authorization"] == "token test_token"
@@ -64,6 +67,27 @@ def test_build_url(provider):
     """Test build_url constructs correct URL."""
     url = provider.build_url("/repos/owner/repo")
     assert url == "https://api.example.com/repos/owner/repo"
+
+
+def test_get_base_url_raises_when_not_configured():
+    """Test get_base_url raises SCMException when scm_base_url is not configured."""
+
+    # Create a provider that uses the base class implementation
+    class ProviderWithoutBaseUrlOverride(BaseSCMProvider):
+        def get_default_owner(self) -> str:
+            return "test_owner"
+
+        def get_last_updated(self, rec: dict[str, Any]) -> str | None:
+            return rec.get("updated_at")
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_base_url = None
+        mock_settings.scm_owner = "test_owner"
+
+        provider = ProviderWithoutBaseUrlOverride()
+
+        with pytest.raises(SCMException, match="SCM base URL is not configured"):
+            provider.get_base_url()
 
 
 def test_build_url_strips_slashes(provider):

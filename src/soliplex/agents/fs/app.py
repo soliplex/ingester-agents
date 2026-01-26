@@ -139,7 +139,7 @@ async def load_inventory(
         end: Ending index for processing (default: None, processes all)
         skip_invalid: Skip files that fail validation (default: False)
         workflow_definition_id: Optional workflow to start after ingestion
-        start_workflows: Whether to start workflows (default: True)
+        start_workflows: Whether to start workflows (default: False)
         param_set_id: Parameter set for workflows
         priority: Workflow priority (default: 0)
 

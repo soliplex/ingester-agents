@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import aiohttp
 import pytest
+from pydantic import SecretStr
 
 from soliplex.agents.scm import GitHubAPIError
 from soliplex.agents.scm import SCMException
@@ -243,7 +244,7 @@ def test_build_url(github_provider):
 def test_get_auth_headers_with_token(github_provider):
     """Test get_auth_headers returns token auth when token is provided."""
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_auth_token = "test-token-123"
+        mock_settings.scm_auth_token = SecretStr("test-token-123")
         mock_settings.scm_auth_username = None
         mock_settings.scm_auth_password = None
 
@@ -257,7 +258,7 @@ def test_get_auth_headers_with_basic_auth(github_provider):
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
         mock_settings.scm_auth_token = None
         mock_settings.scm_auth_username = "testuser"
-        mock_settings.scm_auth_password = "testpass"
+        mock_settings.scm_auth_password = SecretStr("testpass")
 
         headers = github_provider.get_auth_headers()
 
@@ -268,9 +269,9 @@ def test_get_auth_headers_with_basic_auth(github_provider):
 def test_get_auth_headers_token_priority(github_provider):
     """Test get_auth_headers prioritizes token over basic auth when both are provided."""
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_auth_token = "priority-token"
+        mock_settings.scm_auth_token = SecretStr("priority-token")
         mock_settings.scm_auth_username = "testuser"
-        mock_settings.scm_auth_password = "testpass"
+        mock_settings.scm_auth_password = SecretStr("testpass")
 
         headers = github_provider.get_auth_headers()
 

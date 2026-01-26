@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 
 from soliplex.agents.scm.gitea import GiteaProvider
 
@@ -92,7 +93,7 @@ def test_build_url(gitea_provider):
 def test_get_auth_headers_with_token(gitea_provider):
     """Test get_auth_headers returns token auth when token is provided."""
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_auth_token = "gitea-token-456"
+        mock_settings.scm_auth_token = SecretStr("gitea-token-456")
         mock_settings.scm_auth_username = None
         mock_settings.scm_auth_password = None
 
@@ -106,7 +107,7 @@ def test_get_auth_headers_with_basic_auth(gitea_provider):
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
         mock_settings.scm_auth_token = None
         mock_settings.scm_auth_username = "giteauser"
-        mock_settings.scm_auth_password = "giteapass"
+        mock_settings.scm_auth_password = SecretStr("giteapass")
 
         headers = gitea_provider.get_auth_headers()
 
@@ -117,9 +118,9 @@ def test_get_auth_headers_with_basic_auth(gitea_provider):
 def test_get_auth_headers_token_priority(gitea_provider):
     """Test get_auth_headers prioritizes token over basic auth when both are provided."""
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_auth_token = "priority-gitea-token"
+        mock_settings.scm_auth_token = SecretStr("priority-gitea-token")
         mock_settings.scm_auth_username = "giteauser"
-        mock_settings.scm_auth_password = "giteapass"
+        mock_settings.scm_auth_password = SecretStr("giteapass")
 
         headers = gitea_provider.get_auth_headers()
 
