@@ -1,7 +1,6 @@
 """WebDAV agent core functionality."""
 
 import hashlib
-import json
 import logging
 from io import BytesIO
 from pathlib import Path
@@ -9,10 +8,10 @@ from pathlib import Path
 import aiofiles
 from webdav4.client import Client as WebDAVClient
 
-from soliplex.agents import ValidationError
 from soliplex.agents import client
 from soliplex.agents.common.config import check_config
 from soliplex.agents.common.config import detect_mime_type
+from soliplex.agents.common.config import read_config
 from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
@@ -72,35 +71,6 @@ async def validate_config(path: str, webdav_url: str = None, webdav_username: st
         print(f"Found {len(invalid)} Invalid files:")
         for row in invalid:
             print(row["path"], row["reason"], row["metadata"]["content-type"])
-
-
-async def read_config(config_path: str) -> list[dict]:
-    """
-    Read and parse a configuration file.
-
-    Args:
-        config_path: Path to the inventory JSON file
-
-    Returns:
-        List of file configuration dictionaries
-
-    Raises:
-        ValidationError: If the config file format is invalid
-    """
-    logger.debug(f"Reading config from {config_path}")
-    async with aiofiles.open(config_path) as f:
-        config = json.loads(await f.read())
-        ret = config
-        if isinstance(config, list):
-            ret = config
-        elif isinstance(config, dict) and "data" in config.keys():
-            ret = config["data"]
-        else:
-            raise ValidationError(config_path)
-
-        ret = sorted(ret, key=lambda x: int(x["metadata"]["size"]))
-
-        return ret
 
 
 async def resolve_config_path(

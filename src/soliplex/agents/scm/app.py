@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from pathlib import Path
 
 from soliplex.agents.scm.base import BaseSCMProvider
 
@@ -109,7 +110,7 @@ async def get_data(scm: str, repo_name: str, owner: str = None):
 
     issues = await impl.list_issues(repo=repo_name, owner=owner, add_comments=True)
     doc_data = []
-    filtered_files = [x for x in files if x["name"].split(".")[-1] in allowed_extensions]
+    filtered_files = [x for x in files if Path(x["name"]).suffix.lstrip(".") in allowed_extensions]
     for f in filtered_files:
         txt = f["file_bytes"]
         row = {

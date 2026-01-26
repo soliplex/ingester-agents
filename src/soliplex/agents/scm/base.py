@@ -9,6 +9,7 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -290,7 +291,7 @@ class BaseSCMProvider(ABC):
                 tasks = [
                     self.get_data_from_url(file["url"], session, owner, repo)
                     for file in files
-                    if file["name"].split(".")[-1] in allowed_extensions
+                    if Path(file["name"]).suffix.lstrip(".") in allowed_extensions
                 ]
                 for dir in dirs:
                     tasks.append(self.get_data_from_url(dir["url"], session, owner, repo))
