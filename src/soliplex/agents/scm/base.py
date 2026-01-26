@@ -82,9 +82,9 @@ class BaseSCMProvider(ABC):
     @asynccontextmanager
     async def get_session(self):
         """Create an authenticated HTTP session."""
-
+        connector = aiohttp.TCPConnector(ssl=settings.ssl_verify)
         headers = self.get_auth_headers()
-        async with aiohttp.ClientSession(headers=headers) as session:
+        async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
             yield session
 
     def build_url(self, path: str) -> str:

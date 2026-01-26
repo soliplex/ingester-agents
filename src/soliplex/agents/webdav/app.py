@@ -43,7 +43,7 @@ def create_webdav_client(url: str = None, username: str = None, password: str = 
     if webdav_username and webdav_password:
         auth = (webdav_username, webdav_password)
 
-    return WebDAVClient(webdav_url, auth=auth)
+    return WebDAVClient(webdav_url, auth=auth, verify=settings.ssl_verify)
 
 
 async def validate_config(path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None):

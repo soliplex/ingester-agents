@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     api_key: SecretStr | None = None
     api_key_enabled: bool = False
     auth_trust_proxy_headers: bool = False
+    ssl_verify: bool = True
 
     # Server settings
     server_host: str = "127.0.0.1"
