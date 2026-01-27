@@ -244,7 +244,12 @@ class BaseSCMProvider(ABC):
         return rec
 
     async def get_data_from_url(
-        self, url: str, session: aiohttp.ClientSession, owner: str | None = None, repo: str | None = None
+        self,
+        url: str,
+        session: aiohttp.ClientSession,
+        owner: str | None = None,
+        repo: str | None = None,
+        allowed_extensions: list[str] | None = None,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         """
         Recursively fetch data from API URL.
@@ -275,10 +280,15 @@ class BaseSCMProvider(ABC):
                     return self.parse_file_rec(res)
                 else:
                     # This is a directory, recursively fetch all files
+
                     parsed = []
                     for r in res:
-                        logger.debug(f"fetching file in dir for url = {r['url']}")
-                        parsed.append(await self.get_data_from_url(r["url"], session, owner, repo))
+                        if allowed_extensions and Path(r["name"]).suffix.lstrip(".") in allowed_extensions:
+                            logger.debug(f"fetching file in dir for url = {r['url']}")
+                            parsed.append(await self.get_data_from_url(r["url"], session, owner, repo))
+                        else:
+                            logger.debug(f"ignoring {r['name']} in dir for url = {r['url']}")
+
                     return parsed
 
         except aiohttp.ClientError as e:
@@ -326,7 +336,9 @@ class BaseSCMProvider(ABC):
                     if Path(file["name"]).suffix.lstrip(".") in allowed_extensions
                 ]
                 for dir in dirs:
-                    tasks.append(self.get_data_from_url(dir["url"], session, owner, repo))
+                    tasks.append(
+                        self.get_data_from_url(dir["url"], session, owner, repo, allowed_extensions=allowed_extensions)
+                    )
 
                 ret = await asyncio.gather(*tasks)
                 ret = flatten_list(ret)
