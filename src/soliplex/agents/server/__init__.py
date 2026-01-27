@@ -73,7 +73,7 @@ if settings.scheduler_enabled:
 
     # Custom database path
     state_backend = SQLiteStateBackend(db_path=":memory:")
-    crons = Crons(app)
+    crons = Crons(app, state_backend=state_backend)
     app.include_router(get_cron_router())
 
     @crons.cron("*/1 * * * *", name="run_scheduled_jobs")
