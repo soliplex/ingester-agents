@@ -4,6 +4,7 @@ FastAPI server for Soliplex Agents.
 Provides REST API endpoints for filesystem, SCM, and WebDAV ingestion agents.
 """
 
+import importlib
 import logging
 
 from fastapi import APIRouter
@@ -62,6 +63,30 @@ api_router.include_router(webdav_router)
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+# start schedules if needed
+if settings.scheduler_enabled:
+    from fastapi_crons import Crons
+    from fastapi_crons import SQLiteStateBackend
+    from fastapi_crons import get_cron_router
+
+    # Custom database path
+    state_backend = SQLiteStateBackend(db_path=":memory:")
+    crons = Crons(app)
+    app.include_router(get_cron_router())
+
+    @crons.cron("*/1 * * * *", name="run_scheduled_jobs")
+    async def run_jobs():
+        logger.info("start jobs")
+        if settings.scheduler_modules:
+            for module_name in settings.scheduler_modules:
+                try:
+                    module = importlib.import_module(module_name)
+                    await module.run_schedule_minute()
+                except Exception as e:
+                    logger.exception(f"Error running module {module_name}", exc_info=e)
+        logger.info("end jobs")
 
 
 # Include the parent router in the app
