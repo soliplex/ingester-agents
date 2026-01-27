@@ -283,7 +283,7 @@ class BaseSCMProvider(ABC):
 
                     parsed = []
                     for r in res:
-                        if allowed_extensions and Path(r["name"]).suffix.lstrip(".") in allowed_extensions:
+                        if allowed_extensions is None or Path(r["name"]).suffix.lstrip(".") in allowed_extensions:
                             logger.debug(f"fetching file in dir for url = {r['url']}")
                             parsed.append(await self.get_data_from_url(r["url"], session, owner, repo))
                         else:
