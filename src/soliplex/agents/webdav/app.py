@@ -152,7 +152,7 @@ async def build_config(
         buffer = BytesIO()
         client.download_fileobj(full_path, buffer)
         content = buffer.getvalue()
-        sha256_hash = hashlib.sha256(content).hexdigest()
+        sha256_hash = hashlib.sha256(content, usedforsecurity=False).hexdigest()
 
         # Detect MIME type
         mime_type = detect_mime_type(full_path)
@@ -276,7 +276,7 @@ async def load_inventory(
         Dictionary with inventory, to_process, batch_id, ingested, errors,
         and workflow_result
     """
-
+    client.validate_parameters(start_workflows, workflow_definition_id, param_set_id)
     config, base_path = await resolve_config_path(path, webdav_url, webdav_username, webdav_password)
     if skip_invalid:
         filtered = check_config(config)
@@ -347,7 +347,7 @@ async def load_inventory(
             ingested.append(res)
     wf_res = None
     if len(errors) == 0 and start_workflows:
-        wf_res = await client.do_start_workflows(
+        wf_res = await client.start_workflows_for_batch(
             batch_id,
             workflow_definition_id,
             param_set_id,

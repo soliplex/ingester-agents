@@ -33,6 +33,7 @@ async def load_inventory(
     workflow_definition_id: str | None = None,
     param_set_id: str | None = None,
 ):
+    client.validate_parameters(start_workflows, workflow_definition_id, param_set_id)
     data = await get_data(scm, repo_name, owner)
 
     source = f"{scm.value}:{owner}:{repo_name}"
@@ -71,6 +72,7 @@ async def load_inventory(
         mime_type = None
         if "metadata" in row and "content-type" in row["metadata"]:
             mime_type = row["metadata"]["content-type"]
+
         res = await client.do_ingest(
             row["body"],
             row["uri"],
@@ -90,7 +92,7 @@ async def load_inventory(
             ingested.append(row["uri"])
     wf_res = None
     if len(errors) == 0 and start_workflows:
-        wf_res = await client.do_start_workflows(
+        wf_res = await client.start_workflows_for_batch(
             batch_id,
             workflow_definition_id,
             param_set_id,
@@ -116,7 +118,7 @@ async def get_data(scm: str, repo_name: str, owner: str = None):
         row = {
             "body": txt,
             "uri": f["uri"],
-            "sha256": f["sha256"],
+            "sha256": hashlib.sha256(f["file_bytes"], usedforsecurity=False).hexdigest(),
             "metadata": {
                 "last_modified_date": f["last_updated"],
                 "content-type": f["content-type"],
@@ -139,7 +141,7 @@ async def get_data(scm: str, repo_name: str, owner: str = None):
                 "content-type": "text/markdown",
             },
         }
-        row["sha256"] = hashlib.sha256(row["body"].encode("utf-8")).hexdigest()
+        row["sha256"] = hashlib.sha256(row["body"].encode("utf-8"), usedforsecurity=False).hexdigest()
 
         doc_data.append(row)
 
