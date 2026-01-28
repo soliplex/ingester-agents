@@ -19,6 +19,11 @@ STATUS_MISMATCH = "mismatch"
 PROCESSABLE_STATUSES = {STATUS_NEW, STATUS_MISMATCH}
 
 
+def validate_parameters(start_workflows: bool, workflow_definition_id: str | None, param_set_id: str | None) -> None:
+    if start_workflows and (workflow_definition_id is None or param_set_id is None):
+        raise ValueError("start_workflows requires both workflow_definition_id and param_set_id")
+
+
 @asynccontextmanager
 async def get_session():
     headers = {"User-Agent": "soliplex-agent"}
@@ -96,10 +101,10 @@ async def create_batch(source: str, name: str) -> int:
     return res["batch_id"]
 
 
-async def do_start_workflows(
+async def start_workflows_for_batch(
     batch_id: int,
-    workflow_definition_id: str | None,
-    param_id: str | None,
+    workflow_definition_id: str,
+    param_id: str,
     priority: int,
 ) -> dict[str, Any]:
     """
@@ -114,16 +119,22 @@ async def do_start_workflows(
     Returns:
         Response dictionary from the API
     """
+    validate_parameters(True, workflow_definition_id, param_id)
     form = aiohttp.FormData()
     form.add_field("batch_id", str(batch_id))
     form.add_field("priority", str(priority))
+    form.add_field("only_unparsed", "true")
 
-    if param_id:
-        form.add_field("param_id", param_id)
-    if workflow_definition_id:
-        form.add_field("workflow_definition_id", workflow_definition_id)
+    form.add_field("param_id", param_id)
+    form.add_field("workflow_definition_id", workflow_definition_id)
 
-    return await _post_request("/batch/start-workflows", form)
+    res = await _post_request("/batch/start-workflows", form)
+
+    if "workflows" in res:
+        logger.info(f"Started {res['workflows']} workflows for batch {batch_id}")
+    elif "error" in res:
+        logger.error(f"Failed to start workflows for batch {batch_id}: {res['error']}")
+    return res
 
 
 async def check_status(file_info: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:

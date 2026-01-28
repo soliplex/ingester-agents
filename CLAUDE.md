@@ -406,11 +406,11 @@ async def do_ingest(
 - `document`: File upload (multipart/form-data)
 - `metadata`: JSON string with additional metadata
 
-#### `do_start_workflows()` (lines 97-124)
+#### `start_workflows_for_batch()` (lines 97-124)
 Triggers backend workflow processing for a batch:
 
 ```python
-async def do_start_workflows(
+async def start_workflows_for_batch(
     batch_id: int,
     workflow_definition_id: str,
     param_id: str | None = None,
@@ -877,7 +877,7 @@ async def get_data(
    for issue in issues:
        body = await templates.render_issue(issue, owner, repo)
        # Compute SHA256 (NOT SHA3-256!) for issue content
-       sha256_hash = hashlib.sha256(body.encode()).hexdigest()
+       sha256_hash = hashlib.sha256(body.encode(), usedforsecurity=False).hexdigest()
        issue_list.append({
            "uri": f"/{owner}/{repo}/issues/{issue['number']}",
            "sha256": sha256_hash,
@@ -1070,7 +1070,7 @@ def decode_base64_if_needed(content: str | bytes) -> bytes:
 6. **Workflow Trigger** (`fs/app.py:202-208`)
    ```python
    if errors == 0 and start_workflows:
-       workflow_result = await client.do_start_workflows(
+       workflow_result = await client.start_workflows_for_batch(
            batch_id=batch_id,
            workflow_definition_id=workflow_definition_id,
            param_id=param_set_id,
@@ -1121,7 +1121,7 @@ def decode_base64_if_needed(content: str | bytes) -> bytes:
    ```python
    for issue in issues:
        body = await templates.render_issue(issue, owner, repo)
-       sha256_hash = hashlib.sha256(body.encode()).hexdigest()
+       sha256_hash = hashlib.sha256(body.encode(), usedforsecurity=False).hexdigest()
        issue_list.append({
            "uri": f"/{owner}/{repo}/issues/{issue['number']}",
            "sha256": sha256_hash,
@@ -1168,7 +1168,7 @@ def decode_base64_if_needed(content: str | bytes) -> bytes:
 6. **Workflow Trigger** (`scm/app.py:91-97`)
    ```python
    if errors == 0 and start_workflows:
-       workflow_result = await client.do_start_workflows(...)
+       workflow_result = await client.start_workflows_for_batch(...)
    ```
 
 ---
@@ -1250,7 +1250,7 @@ if not batch_id:
 
 **4. Workflow Triggering** (`client.py:97-124`)
 ```python
-async def do_start_workflows(
+async def start_workflows_for_batch(
     batch_id: int,
     workflow_definition_id: str,
     param_id: str | None = None,
@@ -2458,7 +2458,7 @@ async def list_issues(self, repo: str, owner: str | None = None):
 **Code:**
 ```python
 if errors == 0 and start_workflows:
-    workflow_result = await client.do_start_workflows(...)
+    workflow_result = await client.start_workflows_for_batch(...)
 ```
 
 **Implication:** Single file failure prevents workflow triggering for entire batch.

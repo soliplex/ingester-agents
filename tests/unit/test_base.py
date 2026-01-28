@@ -521,3 +521,48 @@ async def test_validate_response_list(provider):
 
     # Should not raise
     await provider.validate_response(response, resp)
+
+
+@pytest.mark.asyncio
+async def test_get_data_from_url_directory_with_extension_filtering(provider, mock_response):
+    """Test get_data_from_url filters files by allowed_extensions in directory."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    dir_response = [
+        {"name": "file1.md", "url": "https://api.example.com/file1", "type": "file"},
+        {"name": "file2.txt", "url": "https://api.example.com/file2", "type": "file"},  # Should be ignored
+        {"name": "file3.md", "url": "https://api.example.com/file3", "type": "file"},
+    ]
+
+    file1_response = {"name": "file1.md", "path": "file1.md", "url": "https://api.example.com/file1", "content": "VGVzdDE="}
+    file3_response = {"name": "file3.md", "path": "file3.md", "url": "https://api.example.com/file3", "content": "VGVzdDM="}
+
+    mock_session = MagicMock()
+
+    # First GET returns the directory listing
+    mock_resp_dir = mock_response(200, dir_response)
+    # Second GET returns file1 (file2.txt is skipped due to extension filtering)
+    mock_resp_file1 = mock_response(200, file1_response)
+    # Third GET returns file3
+    mock_resp_file3 = mock_response(200, file3_response)
+
+    mock_session.get.side_effect = [
+        create_async_context_manager(mock_resp_dir),
+        create_async_context_manager(mock_resp_file1),
+        create_async_context_manager(mock_resp_file3),
+    ]
+
+    # Call with allowed_extensions to exercise the filtering branch (line 290)
+    result = await provider.get_data_from_url(
+        "https://api.example.com/dir",
+        mock_session,
+        owner="owner",
+        repo="repo",
+        allowed_extensions=["md"],
+    )
+
+    # Should return only the .md files, file2.txt should be ignored
+    assert isinstance(result, list)
+    assert len(result) == 2
