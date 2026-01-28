@@ -123,30 +123,59 @@ async def test_create_batch():
 
 
 @pytest.mark.asyncio
-async def test_do_start_workflows_minimal():
-    """Test do_start_workflows with minimal parameters."""
-    with patch("soliplex.agents.client._post_request") as mock_post:
-        mock_post.return_value = {"status": "started"}
-
-        result = await client.do_start_workflows(batch_id=123, workflow_definition_id=None, param_id=None, priority=5)
-
-        assert result == {"status": "started"}
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        assert call_args[0][0] == "/batch/start-workflows"
+async def test_start_workflows_for_batch_minimal():
+    """Test start_workflows_for_batch with minimal parameters. Should raise ValueError."""
+    with pytest.raises(ValueError, match="start_workflows requires both workflow_definition_id and param_set_id"):
+        await client.start_workflows_for_batch(batch_id=123, workflow_definition_id=None, param_id=None, priority=5)
 
 
 @pytest.mark.asyncio
-async def test_do_start_workflows_with_optional_params():
-    """Test do_start_workflows with all parameters."""
+async def test_start_workflows_for_batch_with_optional_params():
+    """Test start_workflows_for_batch with all parameters."""
     with patch("soliplex.agents.client._post_request") as mock_post:
         mock_post.return_value = {"status": "started"}
 
-        result = await client.do_start_workflows(
+        result = await client.start_workflows_for_batch(
             batch_id=123, workflow_definition_id="wf_123", param_id="param_456", priority=10
         )
 
         assert result == {"status": "started"}
+
+
+@pytest.mark.asyncio
+async def test_start_workflows_for_batch_success_with_workflows(caplog):
+    """Test start_workflows_for_batch logs success when workflows key present."""
+    import logging
+
+    caplog.set_level(logging.INFO)
+
+    with patch("soliplex.agents.client._post_request") as mock_post:
+        mock_post.return_value = {"workflows": 5}
+
+        result = await client.start_workflows_for_batch(
+            batch_id=123, workflow_definition_id="wf_123", param_id="param_456", priority=10
+        )
+
+        assert result == {"workflows": 5}
+        assert "Started 5 workflows for batch 123" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_start_workflows_for_batch_error_response(caplog):
+    """Test start_workflows_for_batch logs error when error key present."""
+    import logging
+
+    caplog.set_level(logging.ERROR)
+
+    with patch("soliplex.agents.client._post_request") as mock_post:
+        mock_post.return_value = {"error": "No documents in batch"}
+
+        result = await client.start_workflows_for_batch(
+            batch_id=456, workflow_definition_id="wf_789", param_id="param_012", priority=5
+        )
+
+        assert result == {"error": "No documents in batch"}
+        assert "Failed to start workflows for batch 456: No documents in batch" in caplog.text
 
 
 @pytest.mark.asyncio

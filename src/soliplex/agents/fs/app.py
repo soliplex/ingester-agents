@@ -91,7 +91,7 @@ async def build_config(source_dir) -> list[dict]:
         mime_type = detect_mime_type(str(adj_path))
         rec = {
             "path": str(adj_path),
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "sha256": hashlib.sha256(path.read_bytes(), usedforsecurity=False).hexdigest(),
             "metadata": {
                 "size": path.stat().st_size,
                 "content-type": mime_type,
@@ -147,6 +147,7 @@ async def load_inventory(
         Dictionary with inventory, to_process, batch_id, ingested, errors,
         and workflow_result
     """
+    client.validate_parameters(start_workflows, workflow_definition_id, param_set_id)
     config, data_path = await resolve_config_path(path)
     if skip_invalid:
         filtered = check_config(config)
@@ -210,7 +211,7 @@ async def load_inventory(
             ingested.append(res)
     wf_res = None
     if len(errors) == 0 and start_workflows:
-        wf_res = await client.do_start_workflows(
+        wf_res = await client.start_workflows_for_batch(
             batch_id,
             workflow_definition_id,
             param_set_id,
