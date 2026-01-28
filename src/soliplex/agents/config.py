@@ -39,5 +39,9 @@ class Settings(BaseSettings):
     api_prefix: str = ""  # URL prefix for all routes (e.g., "/ingester-agent")
     root_path: str = ""  # Root path for reverse proxy (used for OpenAPI docs)
 
+    # scheduler settings
+    scheduler_enabled: bool = False  # turn on scheduler
+    scheduler_modules: list[str] | None = None  # list of scheduler modules example: '["soliplex.agents.example"]'
+
 
 settings = Settings()
