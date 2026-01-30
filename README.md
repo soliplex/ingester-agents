@@ -72,7 +72,7 @@ The agents use environment variables for configuration. Create a `.env` file or 
 ENDPOINT_URL=http://localhost:8000/api/v1
 
 # Ingester API authentication (for connecting to protected Ingester instances)
-INGESTER_API_KEY=your-ingester-api-key
+INGESTER_API_KEY=your-api-key
 ```
 
 ### SCM Configuration
@@ -122,7 +122,7 @@ SERVER_HOST=127.0.0.1
 SERVER_PORT=8001
 
 # Authentication (for API server)
-API_KEY=your-secret-key-here
+API_KEY=your-api-key
 API_KEY_ENABLED=false
 AUTH_TRUST_PROXY_HEADERS=false
 ```
@@ -537,14 +537,14 @@ si-agent serve
 
 #### 2. API Key Authentication
 ```bash
-export API_KEY=your-secret-key
+export API_KEY=your-api-key
 export API_KEY_ENABLED=true
 si-agent serve
 ```
 
 Clients must include the API key in the `Authorization` header:
 ```bash
-curl -H "Authorization: Bearer your-secret-key" http://localhost:8001/api/fs/status
+curl -H "Authorization: Bearer your-api-key" http://localhost:8001/api/fs/status
 ```
 
 #### 3. OAuth2 Proxy Headers

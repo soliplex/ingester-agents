@@ -22,12 +22,12 @@ async def test_get_session():
 async def test_get_session_with_api_key():
     """Test get_session includes Bearer token when INGESTER_API_KEY is set."""
     with patch("soliplex.agents.client.settings") as mock_settings:
-        mock_settings.ingester_api_key = "test-api-key-12345"
+        mock_settings.ingester_api_key = "your-api-key"
 
         async with client.get_session() as session:
             assert isinstance(session, aiohttp.ClientSession)
             assert session.headers["User-Agent"] == "soliplex-agent"
-            assert session.headers["Authorization"] == "Bearer test-api-key-12345"
+            assert session.headers["Authorization"] == "Bearer your-api-key"
 
 
 @pytest.mark.asyncio
