@@ -24,6 +24,14 @@ class GitHubAPIError(SCMException):
         super().__init__("GitHub API error")
 
 
+class RateLimitError(SCMException):
+    """Raised when SCM API rate limit is exceeded."""
+
+    def __init__(self, retry_after: int = 60) -> None:
+        self.retry_after = retry_after
+        super().__init__(f"Rate limit exceeded. Retry after {retry_after} seconds.")
+
+
 class UnexpectedResponseError(Exception):
     def __init__(self) -> None:
         super().__init__("Unexpected response status")

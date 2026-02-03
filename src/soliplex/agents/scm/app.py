@@ -108,8 +108,10 @@ async def get_data(scm: str, repo_name: str, owner: str = None):
     impl = get_scm(scm)
 
     allowed_extensions = settings.extensions
-    files = await impl.list_repo_files(repo_name, owner, allowed_extensions=allowed_extensions)
-
+    files0 = await impl.list_repo_files(repo_name, owner, allowed_extensions=allowed_extensions)
+    logger.debug(f"found {len(files0)} ")
+    files = [x for x in files0 if "uri" in x and x["uri"] is not None]
+    logger.debug(f"after uri check found {len(files)} ")
     issues = await impl.list_issues(repo=repo_name, owner=owner, add_comments=True)
     doc_data = []
 

@@ -35,6 +35,17 @@ class Settings(BaseSettings):
     server_host: str = "127.0.0.1"
     server_port: int = 8001
 
+    # HTTP timeout settings (seconds)
+    http_timeout_total: int = 120
+    http_timeout_connect: int = 10
+    http_timeout_sock_read: int = 60
+
+    # SCM concurrency and retry settings
+    scm_max_concurrent_requests: int = 3
+    scm_retry_attempts: int = 3
+    scm_retry_backoff_base: float = 1.0
+    scm_retry_backoff_max: float = 30.0
+
     # URL routing settings
     api_prefix: str = ""  # URL prefix for all routes (e.g., "/ingester-agent")
     root_path: str = ""  # Root path for reverse proxy (used for OpenAPI docs)
