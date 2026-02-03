@@ -505,6 +505,18 @@ class BaseSCMProvider(ABC):
                     logger.error(f"Unexpected response type: {response.content_type} - response: {response.text}")
                 resp = await response.json()
 
+                # Handle empty repositories (no commits on branch yet)
+                # Gitea returns 404 with "object does not exist" for repos with no commits
+                if response.status == 404:
+                    if isinstance(resp, dict) and "errors" in resp:
+                        errors = resp.get("errors", [])
+                        if any("object does not exist" in str(e) for e in errors):
+                            logger.info(
+                                f"Repository {owner}/{repo} has no commits on branch {branch}, returning empty file list"
+                            )
+                            return []
+                    # If it's a different 404 error, let validate_response handle it
+
                 await self.validate_response(response, resp)
 
                 files = [x for x in resp if x["type"] == "file"]
@@ -549,6 +561,15 @@ class BaseSCMProvider(ABC):
         async with self.get_session() as session:
             async with session.get(url) as response:
                 resp = await response.json()
+
+                # Handle empty repositories (no commits on branch yet)
+                # Gitea returns 404 with "object does not exist" for repos with no commits
+                if response.status == 404:
+                    if isinstance(resp, dict) and "errors" in resp:
+                        errors = resp.get("errors", [])
+                        if any("object does not exist" in str(e) for e in errors):
+                            logger.info(f"Repository {owner}/{repo} has no commits on branch {branch}, returning empty")
+                            return
 
                 await self.validate_response(response, resp)
 
