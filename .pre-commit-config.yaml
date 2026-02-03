@@ -19,3 +19,16 @@ repos:
         args: [--fix]
       # Run the formatter (reads line-length from pyproject.toml).
       - id: ruff-format
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+  - repo: local
+    hooks:
+      - id: pip-audit
+        name: pip-audit
+        #ignore CVE-2026-0994 as not fixed
+        entry: uv run --with pip-audit pip-audit --ignore-vuln CVE-2026-0994
+        language: system
+        pass_filenames: false
+        files: (^pyproject\.toml$|^uv\.lock$)

@@ -1,6 +1,7 @@
 """Abstract base class for SCM (Source Control Management) providers."""
 
 import asyncio
+import base64
 import datetime
 import logging
 import mimetypes
@@ -10,12 +11,14 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import aiohttp
 
 from soliplex.agents.config import settings
 from soliplex.agents.scm import APIFetchError
+from soliplex.agents.scm import RateLimitError
 from soliplex.agents.scm import SCMException
 from soliplex.agents.scm.lib.utils import compute_file_hash
 from soliplex.agents.scm.lib.utils import decode_base64_if_needed
@@ -36,26 +39,59 @@ class BaseSCMProvider(ABC):
         """
         self.owner = owner or self.get_default_owner()
 
-    @abstractmethod
     def get_default_owner(self) -> str:
         """Get the default owner from settings."""
-        pass  # pragma: no cover
+        return settings.scm_owner
 
-    @abstractmethod
     def get_base_url(self) -> str:
         """Get the base API URL for this provider."""
-        pass  # pragma: no cover
+        if settings.scm_base_url is None:
+            raise SCMException("SCM base URL is not configured")
+        return settings.scm_base_url
 
-    @abstractmethod
     def get_auth_token(self) -> str:
         """Get the authentication token from settings."""
-        pass  # pragma: no cover
+        return settings.scm_auth_token
+
+    def get_auth_headers(self) -> dict[str, str]:
+        """
+        Get authentication headers for HTTP requests.
+
+        Supports both token-based and basic authentication.
+        Priority: token authentication > basic authentication
+
+        Returns:
+            Dictionary with Authorization header
+
+        Raises:
+            AuthenticationConfigError: If no valid authentication is configured
+        """
+        from soliplex.agents.scm import AuthenticationConfigError
+
+        # Priority 1: Token authentication
+        if settings.scm_auth_token is not None:
+            return {"Authorization": f"token {settings.scm_auth_token.get_secret_value()}"}
+
+        # Priority 2: Basic authentication
+        if settings.scm_auth_username and settings.scm_auth_password:
+            credentials = f"{settings.scm_auth_username}:{settings.scm_auth_password.get_secret_value()}"
+            encoded = base64.b64encode(credentials.encode()).decode()
+            return {"Authorization": f"Basic {encoded}"}
+
+        # No valid authentication configured
+        raise AuthenticationConfigError
 
     @asynccontextmanager
     async def get_session(self):
-        """Create an authenticated HTTP session."""
-        headers = {"Authorization": f"token {self.get_auth_token()}"}
-        async with aiohttp.ClientSession(headers=headers) as session:
+        """Create an authenticated HTTP session with timeout configuration."""
+        timeout = aiohttp.ClientTimeout(
+            total=settings.http_timeout_total,
+            connect=settings.http_timeout_connect,
+            sock_read=settings.http_timeout_sock_read,
+        )
+        connector = aiohttp.TCPConnector(ssl=settings.ssl_verify)
+        headers = self.get_auth_headers()
+        async with aiohttp.ClientSession(headers=headers, connector=connector, timeout=timeout) as session:
             yield session
 
     def build_url(self, path: str) -> str:
@@ -76,7 +112,7 @@ class BaseSCMProvider(ABC):
         self, url_template: str, owner: str, repo: str, process_response: Callable | None = None
     ) -> list[dict[str, Any]]:
         """
-        Paginate through API responses.
+        Paginate through API responses with session reuse and retry logic.
 
         Args:
             url_template: URL template with {page} placeholder
@@ -91,30 +127,51 @@ class BaseSCMProvider(ABC):
         items = []
         page = 1
 
-        while len(items) != 0 or page == 1:
-            url = url_template.format(owner=owner, repo=repo, page=page)
-            logger.info(f"fetching page={page} {owner}/{repo}")
+        async with self.get_session() as session:
+            while len(items) != 0 or page == 1:
+                url = url_template.format(owner=owner, repo=repo, page=page)
+                logger.info(f"fetching page={page} {owner}/{repo}")
 
-            async with self.get_session() as session:
-                async with session.get(url) as response:
-                    if response.status == 404:
-                        msg = f"repo {owner}/{repo} not found"
-                        raise SCMException(msg)
+                # Retry loop for each page
+                for attempt in range(settings.scm_retry_attempts):  # pragma: no branch
+                    try:
+                        await asyncio.sleep(random.uniform(0.01, 0.05))
 
-                    items = await response.json()
+                        async with session.get(url) as response:
+                            if await self._should_retry_response(response, url, attempt):
+                                continue
 
-                    if response.status != 200:
-                        if "errors" in items:
-                            raise SCMException(str(items["errors"]))
-                        logger.error(f"Failed to fetch from {url}: {items}")
-                        raise APIFetchError
+                            if response.status == 404:
+                                msg = f"repo {owner}/{repo} not found"
+                                raise SCMException(msg)
 
-                    if process_response:
-                        items = process_response(items)
+                            items = await response.json()
 
-                    logger.info(f"found {len(items)} items on page {page}")
-                    ret.extend(items)
-                    page += 1
+                            if response.status != 200:
+                                if "errors" in items:
+                                    raise SCMException(str(items["errors"]))
+                                logger.error(f"Failed to fetch from {url}: {items}")
+                                raise APIFetchError
+
+                            if process_response:
+                                items = process_response(items)
+
+                            logger.info(f"found {len(items)} items on page {page}")
+                            ret.extend(items)
+                            page += 1
+                            break  # Success, exit retry loop
+
+                    except (aiohttp.ClientError, TimeoutError) as e:
+                        backoff = min(
+                            settings.scm_retry_backoff_base * (2**attempt),
+                            settings.scm_retry_backoff_max,
+                        )
+                        logger.warning(f"Request failed for {url}: {e}, retrying in {backoff}s (attempt {attempt + 1})")
+
+                        if attempt < settings.scm_retry_attempts - 1:
+                            await asyncio.sleep(backoff)
+                        else:
+                            raise
 
         return ret
 
@@ -218,30 +275,94 @@ class BaseSCMProvider(ABC):
         """
         return rec
 
+    async def _should_retry_response(self, response: aiohttp.ClientResponse, url: str, attempt: int) -> bool:
+        """
+        Check if response indicates we should retry.
+
+        Args:
+            response: HTTP response
+            url: Request URL (for logging)
+            attempt: Current attempt number (0-indexed)
+
+        Returns:
+            True if we should retry, False otherwise
+
+        Raises:
+            RateLimitError: If rate limit exceeded on final attempt
+        """
+        # Handle rate limiting (429)
+        if response.status == 429:
+            retry_after = int(response.headers.get("Retry-After", 60))
+            logger.warning(f"Rate limited on {url}, waiting {retry_after}s (attempt {attempt + 1})")
+
+            if attempt < settings.scm_retry_attempts - 1:
+                await asyncio.sleep(retry_after)
+                return True
+            else:
+                raise RateLimitError(retry_after)
+
+        # Handle server errors (5xx) with retry
+        if response.status >= 500:
+            backoff = min(
+                settings.scm_retry_backoff_base * (2**attempt),
+                settings.scm_retry_backoff_max,
+            )
+            logger.warning(f"Server error {response.status} on {url}, retrying in {backoff}s (attempt {attempt + 1})")
+
+            if attempt < settings.scm_retry_attempts - 1:
+                await asyncio.sleep(backoff)
+                return True
+
+        return False
+
     async def get_data_from_url(
-        self, url: str, session: aiohttp.ClientSession, owner: str | None = None, repo: str | None = None
+        self,
+        url: str,
+        session: aiohttp.ClientSession,
+        owner: str | None = None,
+        repo: str | None = None,
+        allowed_extensions: list[str] | None = None,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         """
-        Recursively fetch data from API URL.
+        Recursively fetch data from API URL with concurrency control and retry logic.
 
         Args:
             url: API URL to fetch
             session: HTTP session
             owner: Repository owner (optional, for provider-specific handling)
             repo: Repository name (optional, for provider-specific handling)
+            allowed_extensions: List of allowed file extensions
+            semaphore: Optional semaphore for concurrency limiting
 
         Returns:
             Parsed file record or list of records
         """
         logger.debug(f"get_data_from_url = {url}")
 
-        # Add small sleep to avoid rate limiting
-        await asyncio.sleep(random.randint(1, 5) * 0.01)
+        last_exception: Exception | None = None
 
-        try:
-            async with session.get(url) as response:
-                response.raise_for_status()
-                res = await response.json()
+        for attempt in range(settings.scm_retry_attempts):
+            try:
+                # Add small jitter to avoid thundering herd
+                await asyncio.sleep(random.uniform(0.01, 0.05))
+
+                # Use semaphore if provided for concurrency control
+                if semaphore:
+                    async with semaphore:
+                        async with session.get(url) as response:
+                            if await self._should_retry_response(response, url, attempt):
+                                continue
+
+                            response.raise_for_status()
+                            res = await response.json()
+                else:
+                    async with session.get(url) as response:
+                        if await self._should_retry_response(response, url, attempt):
+                            continue
+
+                        response.raise_for_status()
+                        res = await response.json()
 
                 if isinstance(res, dict):
                     # This is a file, fetch content if needed and parse
@@ -252,13 +373,34 @@ class BaseSCMProvider(ABC):
                     # This is a directory, recursively fetch all files
                     parsed = []
                     for r in res:
-                        logger.debug(f"fetching file in dir for url = {r['url']}")
-                        parsed.append(await self.get_data_from_url(r["url"], session, owner, repo))
+                        if allowed_extensions is None or Path(r["name"]).suffix.lstrip(".") in allowed_extensions:
+                            logger.debug(f"fetching file in dir for url = {r['url']}")
+                            parsed.append(
+                                await self.get_data_from_url(r["url"], session, owner, repo, allowed_extensions, semaphore)
+                            )
+                        else:
+                            logger.debug(f"ignoring {r['name']} in dir for url = {r['url']}")
+
                     return parsed
 
-        except aiohttp.ClientError as e:
-            logger.exception(f"Error fetching from {url}")
-            return {"error": str(e)}
+            except (aiohttp.ClientError, TimeoutError) as e:
+                last_exception = e
+                backoff = min(
+                    settings.scm_retry_backoff_base * (2**attempt),
+                    settings.scm_retry_backoff_max,
+                )
+                logger.warning(f"Request failed for {url}: {e}, retrying in {backoff}s (attempt {attempt + 1})")
+
+                if attempt < settings.scm_retry_attempts - 1:
+                    await asyncio.sleep(backoff)
+                else:
+                    logger.exception(f"Error fetching from {url}")
+                    return {"error": str(e)}
+
+        # Should not reach here, but handle gracefully
+        if last_exception:  # pragma: no cover
+            return {"error": str(last_exception)}
+        return {"error": f"Failed to fetch {url} after {settings.scm_retry_attempts} attempts"}  # pragma: no cover
 
     async def list_repo_files(
         self,
@@ -268,7 +410,7 @@ class BaseSCMProvider(ABC):
         branch: str = "main",
     ) -> list[dict[str, Any]]:
         """
-        List all files in a repository.
+        List all files in a repository with concurrency control.
 
         Args:
             repo: Repository name
@@ -285,8 +427,13 @@ class BaseSCMProvider(ABC):
 
         logger.debug(f"url = {url}")
 
+        # Create semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(settings.scm_max_concurrent_requests)
+
         async with self.get_session() as session:
             async with session.get(url) as response:
+                if response.content_type != "application/json":  # pragma: no cover
+                    logger.error(f"Unexpected response type: {response.content_type} - response: {response.text}")
                 resp = await response.json()
 
                 await self.validate_response(response, resp)
@@ -296,12 +443,12 @@ class BaseSCMProvider(ABC):
                 logger.debug(f"dirs={[(x['name'], x['type']) for x in resp]}")
 
                 tasks = [
-                    self.get_data_from_url(file["url"], session, owner, repo)
+                    self.get_data_from_url(file["url"], session, owner, repo, None, semaphore)
                     for file in files
-                    if file["name"].split(".")[-1] in allowed_extensions
+                    if Path(file["name"]).suffix.lstrip(".") in allowed_extensions
                 ]
                 for dir in dirs:
-                    tasks.append(self.get_data_from_url(dir["url"], session, owner, repo))
+                    tasks.append(self.get_data_from_url(dir["url"], session, owner, repo, allowed_extensions, semaphore))
 
                 ret = await asyncio.gather(*tasks)
                 ret = flatten_list(ret)
@@ -312,7 +459,7 @@ class BaseSCMProvider(ABC):
         self, repo: str, owner: str | None = None, branch: str = "main"
     ) -> AsyncIterator[dict[str, Any]]:
         """
-        Iterate through repository files.
+        Iterate through repository files with concurrency control.
 
         Args:
             repo: Repository name
@@ -327,6 +474,9 @@ class BaseSCMProvider(ABC):
 
         logger.debug(f"url = {url}")
 
+        # Create semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(settings.scm_max_concurrent_requests)
+
         async with self.get_session() as session:
             async with session.get(url) as response:
                 resp = await response.json()
@@ -337,9 +487,9 @@ class BaseSCMProvider(ABC):
                 dirs = [x for x in resp if x["type"] == "dir"]
                 logger.debug(f"dirs={[(x['name'], x['type']) for x in resp]}")
 
-                tasks = [self.get_data_from_url(file["url"], session, owner, repo) for file in files]
+                tasks = [self.get_data_from_url(file["url"], session, owner, repo, None, semaphore) for file in files]
                 for dir in dirs:
-                    tasks.append(self.get_data_from_url(dir["url"], session, owner, repo))
+                    tasks.append(self.get_data_from_url(dir["url"], session, owner, repo, None, semaphore))
 
                 ct = 0
                 for task in tasks:

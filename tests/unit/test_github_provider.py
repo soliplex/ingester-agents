@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import aiohttp
 import pytest
+from pydantic import SecretStr
 
 from soliplex.agents.scm import GitHubAPIError
 from soliplex.agents.scm import SCMException
@@ -30,8 +31,8 @@ def github_provider_with_owner():
 
 def test_get_default_owner(github_provider):
     """Test get_default_owner returns settings value."""
-    with patch("soliplex.agents.scm.github.settings") as mock_settings:
-        mock_settings.gh_owner = "test-owner"
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_owner = "test-owner"
         assert github_provider.get_default_owner() == "test-owner"
 
 
@@ -42,8 +43,8 @@ def test_get_base_url(github_provider):
 
 def test_get_auth_token(github_provider):
     """Test get_auth_token returns settings value."""
-    with patch("soliplex.agents.scm.github.settings") as mock_settings:
-        mock_settings.gh_token = "test-token"
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_auth_token = "test-token"
         assert github_provider.get_auth_token() == "test-token"
 
 
@@ -220,8 +221,8 @@ async def test_get_blob_raises_on_error(github_provider, mock_response):
 
 def test_initialization_with_default_owner(github_provider):
     """Test GitHub provider uses default owner from settings."""
-    with patch("soliplex.agents.scm.github.settings") as mock_settings:
-        mock_settings.gh_owner = "default-owner"
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_owner = "default-owner"
         provider = GitHubProvider()
         assert provider.owner == "default-owner"
 
@@ -235,3 +236,82 @@ def test_build_url(github_provider):
     """Test build_url constructs correct GitHub API URL."""
     url = github_provider.build_url("/repos/owner/repo")
     assert url == "https://api.github.com/repos/owner/repo"
+
+
+# Authentication method tests
+
+
+def test_get_auth_headers_with_token(github_provider):
+    """Test get_auth_headers returns token auth when token is provided."""
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_auth_token = SecretStr("test-token-123")
+        mock_settings.scm_auth_username = None
+        mock_settings.scm_auth_password = None
+
+        headers = github_provider.get_auth_headers()
+
+        assert headers == {"Authorization": "token test-token-123"}
+
+
+def test_get_auth_headers_with_basic_auth(github_provider):
+    """Test get_auth_headers returns basic auth when username and password are provided."""
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_auth_token = None
+        mock_settings.scm_auth_username = "testuser"
+        mock_settings.scm_auth_password = SecretStr("testpass")
+
+        headers = github_provider.get_auth_headers()
+
+        # base64("testuser:testpass") = "dGVzdHVzZXI6dGVzdHBhc3M="
+        assert headers == {"Authorization": "Basic dGVzdHVzZXI6dGVzdHBhc3M="}
+
+
+def test_get_auth_headers_token_priority(github_provider):
+    """Test get_auth_headers prioritizes token over basic auth when both are provided."""
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_auth_token = SecretStr("priority-token")
+        mock_settings.scm_auth_username = "testuser"
+        mock_settings.scm_auth_password = SecretStr("testpass")
+
+        headers = github_provider.get_auth_headers()
+
+        assert headers == {"Authorization": "token priority-token"}
+
+
+def test_get_auth_headers_raises_when_no_auth(github_provider):
+    """Test get_auth_headers raises AuthenticationConfigError when no auth is configured."""
+    from soliplex.agents.scm import AuthenticationConfigError
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_auth_token = None
+        mock_settings.scm_auth_username = None
+        mock_settings.scm_auth_password = None
+
+        with pytest.raises(AuthenticationConfigError):
+            github_provider.get_auth_headers()
+
+
+def test_get_auth_headers_raises_when_only_username(github_provider):
+    """Test get_auth_headers raises when only username is provided."""
+    from soliplex.agents.scm import AuthenticationConfigError
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_auth_token = None
+        mock_settings.scm_auth_username = "testuser"
+        mock_settings.scm_auth_password = None
+
+        with pytest.raises(AuthenticationConfigError):
+            github_provider.get_auth_headers()
+
+
+def test_get_auth_headers_raises_when_only_password(github_provider):
+    """Test get_auth_headers raises when only password is provided."""
+    from soliplex.agents.scm import AuthenticationConfigError
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_auth_token = None
+        mock_settings.scm_auth_username = None
+        mock_settings.scm_auth_password = "testpass"
+
+        with pytest.raises(AuthenticationConfigError):
+            github_provider.get_auth_headers()

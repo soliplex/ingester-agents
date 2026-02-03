@@ -16,7 +16,18 @@ cli = typer.Typer(no_args_is_help=True)
 
 
 @cli.command("validate-config")
-def validate(config_file: Annotated[str, typer.Argument(help="path to inventory file")]):
+def validate(
+    config_file: Annotated[
+        str,
+        typer.Argument(help="path to inventory file or directory (will build config if directory)"),
+    ],
+):
+    """
+    Validate a configuration.
+
+    If a file is provided, it will be treated as an inventory.json config file.
+    If a directory is provided, a config will be built from the directory contents.
+    """
     asyncio.run(app.validate_config(config_file))
 
 
@@ -36,16 +47,28 @@ def _build_config(path: str):
 
 @cli.command("check-status")
 def check_status(
-    config_file: Annotated[str, typer.Argument(help="path to inventory file")],
+    config_file: Annotated[
+        str,
+        typer.Argument(help="path to inventory file or directory (will build config if directory)"),
+    ],
     source: Annotated[str, typer.Argument(help="source name")],
     detail: bool = False,
 ):
+    """
+    Check the status of files in an inventory.
+
+    If a file is provided, it will be treated as an inventory.json config file.
+    If a directory is provided, a config will be built from the directory contents.
+    """
     asyncio.run(app.status_report(config_file, source, detail=detail))
 
 
 @cli.command("run-inventory")
 def run(
-    config_file: Annotated[str, typer.Argument(help="path to inventory file")],
+    config_file: Annotated[
+        str,
+        typer.Argument(help="path to inventory file or directory (will build config if directory)"),
+    ],
     source: Annotated[str, typer.Argument(help="source name")],
     start: Annotated[int, typer.Option(help="start index")] = 0,
     end: Annotated[int, typer.Option(help="end index")] = None,
@@ -55,12 +78,18 @@ def run(
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
 ):
+    """
+    Run an inventory ingestion.
+
+    If a file is provided, it will be treated as an inventory.json config file.
+    If a directory is provided, a config will be built from the directory contents.
+    """
     if start_workflows:
         if workflow_definition_id is None:
             raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
         if param_set_id is None:
             raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
-    print(f"loading {config_file} source={source} to")
+    print(f"loading {config_file} source={source}")
     if os.path.exists(config_file) and os.path.isdir(config_file):
         print(f"build config file for {config_file}")
         config_file = _build_config(config_file)

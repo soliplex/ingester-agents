@@ -2,15 +2,21 @@
 
 [![CI](https://github.com/soliplex/ingester-agents/actions/workflows/soliplex.yaml/badge.svg)](https://github.com/soliplex/ingester-agents/actions/workflows/soliplex.yaml)
 
-Agents for ingesting documents into the [Soliplex Ingester](https://github.com/soliplex/ingester) system. This package provides tools to collect, validate, and ingest documents from multiple sources including local filesystems, and source code management platforms (GitHub, Gitea).
+Agents for loading documents into the [Soliplex Ingester](https://github.com/soliplex/ingester) system. This package provides tools to collect, validate, and ingest documents from multiple sources including local filesystems, WebDAV servers, and source code management platforms (GitHub, Gitea).
 
 ## Features
 
 - **Filesystem Agent (`fs`)**: Ingest documents from local directories
   - Recursive directory scanning
-  - Automatic SHA256 hash calculation
   - MIME type detection
   - Configuration validation
+  - Status checking to avoid re-ingesting unchanged files
+
+- **WebDAV Agent (`webdav`)**: Ingest documents from WebDAV servers
+  - Support for any WebDAV-compliant server (Nextcloud, ownCloud, SharePoint, etc.)
+  - Recursive directory scanning
+  - MIME type detection
+  - Authentication support (username/password)
   - Status checking to avoid re-ingesting unchanged files
 
 - **SCM Agent (`scm`)**: Ingest files and issues from Git repositories
@@ -66,16 +72,40 @@ The agents use environment variables for configuration. Create a `.env` file or 
 ENDPOINT_URL=http://localhost:8000/api/v1
 
 # Ingester API authentication (for connecting to protected Ingester instances)
-INGESTER_API_KEY=your-ingester-api-key
+INGESTER_API_KEY=your-api-key
+```
 
-# GitHub Configuration - if needed
-GH_TOKEN=your_github_token_here
-GH_OWNER=your_github_username_or_org
+### SCM Configuration
 
-# Gitea Configuration - if needed
-GITEA_URL=https://your-gitea-instance.com
-GITEA_TOKEN=your_gitea_token_here
-GITEA_OWNER=admin
+The agents use unified authentication settings that work across all SCM providers (GitHub, Gitea, etc.):
+
+```bash
+# SCM authentication token (GitHub personal access token or Gitea API token)
+scm_auth_token=your_scm_token_here
+
+# Default repository owner (username or organization)
+scm_owner=your_username_or_org
+
+# SCM base URL (required for Gitea, optional for GitHub)
+# For Gitea: Full API URL including /api/v1
+# For GitHub: Defaults to https://api.github.com if not specified
+scm_base_url=https://your-gitea-instance.com/api/v1
+```
+
+**Examples:**
+
+For GitHub:
+```bash
+export scm_auth_token=ghp_YourGitHubToken
+export scm_owner=your-github-username
+# scm_base_url not needed for public GitHub
+```
+
+For Gitea:
+```bash
+export scm_auth_token=your_gitea_token
+export scm_owner=admin
+export scm_base_url=https://gitea.example.com/api/v1
 ```
 
 ### Optional Configuration
@@ -92,21 +122,42 @@ SERVER_HOST=127.0.0.1
 SERVER_PORT=8001
 
 # Authentication (for API server)
-API_KEY=your-secret-key-here
+API_KEY=your-api-key
 API_KEY_ENABLED=false
 AUTH_TRUST_PROXY_HEADERS=false
 ```
 
 ## Usage
 
-The CLI tool `si-agent` provides three main modes of operation:
+The CLI tool `si-agent` provides four main modes of operation:
 - **`fs`**: Filesystem agent for ingesting local documents
 - **`scm`**: SCM agent for ingesting from Git repositories
+- **`webdav`**: WebDAV agent for ingesting documents from WebDAV servers
 - **`serve`**: REST API server exposing agent functionality via HTTP
 
 ### Filesystem Agent
 
-#### 1. Build Configuration
+
+
+#### Quick Start
+
+Ingest documents directly from a directory:
+
+```bash
+si-agent fs run-inventory /path/to/documents my-source-name
+```
+
+That's it! The tool automatically:
+1. Scans the directory
+2. Builds the configuration
+3. Validates files
+4. Ingests documents
+
+#### Traditional Workflow (with inventory.json)
+
+If you want to review or modify the inventory before ingestion:
+
+**1. Build Configuration (Optional)**
 
 Scan a directory and create an inventory file:
 
@@ -114,28 +165,36 @@ Scan a directory and create an inventory file:
 si-agent fs build-config /path/to/documents
 ```
 
-This creates an `inventory.json` file containing metadata for all discovered files. This file can be modified with additional metadata if desired.
+This creates an `inventory.json` file containing metadata for all discovered files. You can edit this file to add custom metadata or exclude specific files.
 
-#### 2. Validate Configuration
+**2. Validate Configuration**
 
-Check if files in the inventory are supported:
+Check if files are supported (accepts file OR directory):
 
 ```bash
+# Validate existing inventory file
 si-agent fs validate-config /path/to/inventory.json
+
+# Or validate directory directly (builds config on-the-fly)
+si-agent fs validate-config /path/to/documents
 ```
 
-#### 3. Check Status
+**3. Check Status**
 
-See which files need to be ingested:
+See which files need to be ingested (accepts file OR directory):
 
 ```bash
+# Using inventory file
 si-agent fs check-status /path/to/inventory.json my-source-name
+
+# Or using directory directly
+si-agent fs check-status /path/to/documents my-source-name
 ```
 
 Add `--detail` flag to see the full list of files:
 
 ```bash
-si-agent fs check-status /path/to/inventory.json my-source-name --detail
+si-agent fs check-status /path/to/documents my-source-name --detail
 ```
 
 The status check compares file hashes against the Ingester database:
@@ -143,12 +202,16 @@ The status check compares file hashes against the Ingester database:
 - **mismatch**: File exists but content has changed
 - **match**: File is unchanged (will be skipped during ingestion)
 
-#### 4. Load Inventory
+**4. Load Inventory**
 
-Ingest documents from an inventory:
+Ingest documents (accepts file OR directory):
 
 ```bash
+# From inventory file
 si-agent fs run-inventory /path/to/inventory.json my-source-name
+
+# Or from directory directly (recommended!)
+si-agent fs run-inventory /path/to/documents my-source-name
 ```
 
 **Advanced options:**
@@ -157,21 +220,12 @@ si-agent fs run-inventory /path/to/inventory.json my-source-name
 # Process a subset of files (e.g., files 10-50)
 si-agent fs run-inventory inventory.json my-source --start 10 --end 50
 
-# Resume a previous batch
-si-agent fs run-inventory inventory.json my-source --resume-batch 123
-
 # Start workflows after ingestion
-si-agent fs run-inventory inventory.json my-source \
+si-agent fs run-inventory /path/to/documents my-source \
   --start-workflows \
   --workflow-definition-id my-workflow \
   --param-set-id my-params \
   --priority 10
-```
-
-You can also pass a directory path directly (it will build the config automatically):
-
-```bash
-si-agent fs run-inventory /path/to/documents my-source-name
 ```
 
 ### SCM Agent
@@ -254,6 +308,106 @@ si-agent scm get-sync-state gitea my-repo admin
 si-agent scm reset-sync gitea my-repo admin
 ```
 
+### WebDAV Agent
+
+The WebDAV agent allows you to ingest documents directly from WebDAV servers (like Nextcloud, ownCloud, SharePoint, etc.).
+
+#### Quick Start
+
+Ingest documents directly from a WebDAV directory:
+
+```bash
+# Set up environment
+export WEBDAV_URL=https://webdav.example.com
+export WEBDAV_USERNAME=your-username
+export WEBDAV_PASSWORD=your-password
+
+# Ingest documents from WebDAV path
+si-agent webdav run-inventory /documents my-source-name
+```
+
+That's it! The tool automatically:
+1. Connects to the WebDAV server
+2. Scans the directory
+3. Builds the configuration
+4. Validates files
+5. Ingests documents
+
+#### Commands
+
+**1. Build Configuration**
+
+Scan a WebDAV directory and create an inventory file:
+
+```bash
+si-agent webdav build-config /documents \
+  --webdav-url https://webdav.example.com \
+  --webdav-username user \
+  --webdav-password pass \
+  --output inventory.json
+```
+
+**2. Validate Configuration**
+
+Check if files are supported:
+
+```bash
+# Validate existing inventory file
+si-agent webdav validate-config inventory.json
+
+# Or validate WebDAV directory directly
+si-agent webdav validate-config /documents \
+  --webdav-url https://webdav.example.com \
+  --webdav-username user \
+  --webdav-password pass
+```
+
+**3. Check Status**
+
+See which files need to be ingested:
+
+```bash
+si-agent webdav check-status /documents my-source-name \
+  --webdav-url https://webdav.example.com \
+  --webdav-username user \
+  --webdav-password pass
+```
+
+Add `--detail` flag to see the full list of files.
+
+**4. Load Inventory**
+
+Ingest documents:
+
+```bash
+# From WebDAV directory (recommended!)
+si-agent webdav run-inventory /documents my-source-name
+
+# Or from local inventory file
+si-agent webdav run-inventory inventory.json my-source-name
+```
+
+**Advanced options:**
+
+```bash
+# Override all configuration via command line
+si-agent webdav run-inventory /documents my-source \
+  --start-workflows \
+  --workflow-definition-id my-workflow \
+  --param-set-id my-params \
+  --priority 10 \
+  --webdav-url https://webdav.example.com \
+  --webdav-username user \
+  --webdav-password pass \
+  --endpoint-url http://custom-ingester:8000/api/v1
+```
+
+**Note:** All commands support both local inventory files and direct WebDAV paths. All configuration (WebDAV credentials, Ingester endpoint URL) can be provided via:
+- **Environment variables** (recommended for security): `WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD`, `ENDPOINT_URL`
+- **Command-line options** (useful for scripts or testing): `--webdav-url`, `--webdav-username`, `--webdav-password`, `--endpoint-url`
+
+**Git Bash on Windows:** If using Git Bash on Windows, use double slashes for WebDAV paths to prevent path conversion (e.g., `//documents` instead of `/documents`).
+
 ## How It Works
 
 ### Document Ingestion Flow
@@ -314,29 +468,48 @@ As an example, the soliplex [documentation](https://github.com/soliplex/soliplex
 
 ### Example 1: Ingest Local Documents
 
+**Quick version (NEW - no inventory.json needed):**
+
 ```bash
 git clone https://github.com/soliplex/soliplex.git
 
-
-# Set up environment, check ingester configuration for details
+# Set up environment
 export ENDPOINT_URL=http://localhost:8000/api/v1
 
-# Create inventory and ingest
-uv run  si-agent fs build-config <path-to-checkout>soliplex/docs
-#you may see messages about ignored files
+# Ingest directly from directory!
+uv run si-agent fs run-inventory <path-to-checkout>/soliplex/docs soliplex-docs
 
-#if you want to update the inventory.json file, do it here
-
-uv run  si-agent fs validate-config <path-to-checkout>soliplex/docs/inventory.json
-#if there are errors, fix them now
-
-uv run  si-agent fs run-inventory <path-to-checkout>soliplex/docs soliplex-docs
-
-#check that documents are in the ingester: (your batch id may be different)
+# Check that documents are in the ingester (your batch id may be different)
 curl -X 'GET' \
   'http://127.0.0.1:8000/api/v1/document/?batch_id=1' \
   -H 'accept: application/json'
+```
 
+**Traditional version (with inventory.json):**
+
+```bash
+git clone https://github.com/soliplex/soliplex.git
+
+# Set up environment
+export ENDPOINT_URL=http://localhost:8000/api/v1
+
+# Create inventory (optional - only if you want to review/modify it)
+uv run si-agent fs build-config <path-to-checkout>/soliplex/docs
+# You may see messages about ignored files
+
+# If you want to update the inventory.json file, do it here
+
+# Validate configuration
+uv run si-agent fs validate-config <path-to-checkout>/soliplex/docs/inventory.json
+# If there are errors, fix them now
+
+# Ingest
+uv run si-agent fs run-inventory <path-to-checkout>/soliplex/docs/inventory.json soliplex-docs
+
+# Check that documents are in the ingester (your batch id may be different)
+curl -X 'GET' \
+  'http://127.0.0.1:8000/api/v1/document/?batch_id=1' \
+  -H 'accept: application/json'
 ```
 
 ### Example 2: Ingest GitHub Repository
@@ -344,8 +517,8 @@ curl -X 'GET' \
 ```bash
 # Set up environment
 export ENDPOINT_URL=http://localhost:8000/api/v1
-export GH_TOKEN=ghp_your_token_here
-export GH_OWNER=mycompany
+export scm_auth_token=ghp_your_token_here
+export scm_owner=mycompany
 
 # Ingest repository
 si-agent scm run-inventory github soliplex soliplex
@@ -357,7 +530,25 @@ curl -X 'GET' \
 
 ```
 
-### Example 3: Batch Processing with Workflows
+### Example 3: Ingest from WebDAV Server
+
+```bash
+# Set up environment
+export ENDPOINT_URL=http://localhost:8000/api/v1
+export WEBDAV_URL=https://nextcloud.example.com/remote.php/dav/files/username
+export WEBDAV_USERNAME=your-username
+export WEBDAV_PASSWORD=your-password
+
+# Ingest directly from WebDAV directory
+si-agent webdav run-inventory /Documents/project-docs webdav-docs
+
+# Check that documents are in the ingester (your batch id may be different)
+curl -X 'GET' \
+  'http://127.0.0.1:8000/api/v1/document/?batch_id=3' \
+  -H 'accept: application/json'
+```
+
+### Example 4: Batch Processing with Workflows
 
 ```bash
 # Ingest and trigger processing workflows
@@ -399,14 +590,14 @@ si-agent serve
 
 #### 2. API Key Authentication
 ```bash
-export API_KEY=your-secret-key
+export API_KEY=your-api-key
 export API_KEY_ENABLED=true
 si-agent serve
 ```
 
 Clients must include the API key in the `Authorization` header:
 ```bash
-curl -H "Authorization: Bearer your-secret-key" http://localhost:8001/api/fs/status
+curl -H "Authorization: Bearer your-api-key" http://localhost:8001/api/fs/status
 ```
 
 #### 3. OAuth2 Proxy Headers
@@ -422,20 +613,35 @@ The server will trust authentication headers from a reverse proxy (e.g., OAuth2 
 
 ### API Endpoints
 
-#### Filesystem Routes (`/api/fs/`)
+#### Filesystem Routes (`/api/v1/fs/`)
+
+**NEW:** All endpoints now accept both file paths (inventory.json) and directory paths!
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/fs/build-config` | Build inventory from directory |
-| `POST` | `/api/fs/validate-config` | Validate inventory file |
-| `POST` | `/api/fs/check-status` | Check which files need ingestion |
-| `POST` | `/api/fs/run-inventory` | Ingest documents from inventory |
+| `POST` | `/api/v1/fs/build-config` | Build inventory from directory |
+| `POST` | `/api/v1/fs/validate-config` | Validate inventory (file or directory) |
+| `POST` | `/api/v1/fs/check-status` | Check which files need ingestion (file or directory) |
+| `POST` | `/api/v1/fs/run-inventory` | Ingest documents (file or directory) |
 
-**Example:**
+**Examples:**
 ```bash
-curl -X POST http://localhost:8001/api/fs/build-config \
-  -H "Content-Type: application/json" \
-  -d '{"directory_path": "/path/to/docs"}'
+# Build configuration from directory
+curl -X POST http://localhost:8001/api/v1/fs/build-config \
+  -F "path=/path/to/docs"
+
+# Validate using directory (no inventory.json needed)
+curl -X POST http://localhost:8001/api/v1/fs/validate-config \
+  -F "config_file=/path/to/docs"
+
+# Or validate using existing inventory file
+curl -X POST http://localhost:8001/api/v1/fs/validate-config \
+  -F "config_file=/path/to/docs/inventory.json"
+
+# Ingest directly from directory
+curl -X POST http://localhost:8001/api/v1/fs/run-inventory \
+  -F "config_file=/path/to/docs" \
+  -F "source=my-source"
 ```
 
 #### SCM Routes (`/api/scm/`)
@@ -456,6 +662,43 @@ curl -X POST http://localhost:8001/api/scm/github/my-repo/ingest \
   -H "Content-Type: application/json" \
   -d '{"owner": "myuser", "source": "my-source"}'
 ```
+
+#### WebDAV Routes (`/api/v1/webdav/`)
+
+All endpoints accept both local inventory files and WebDAV paths!
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/webdav/build-config` | Build inventory from WebDAV directory |
+| `POST` | `/api/v1/webdav/validate-config` | Validate inventory (file or WebDAV path) |
+| `POST` | `/api/v1/webdav/check-status` | Check which files need ingestion |
+| `POST` | `/api/v1/webdav/run-inventory` | Ingest documents from WebDAV |
+
+**Examples:**
+```bash
+# Build configuration from WebDAV
+curl -X POST http://localhost:8001/api/v1/webdav/build-config \
+  -F "webdav_path=/documents" \
+  -F "webdav_url=https://webdav.example.com" \
+  -F "webdav_username=user" \
+  -F "webdav_password=pass"
+
+# Validate using WebDAV path
+curl -X POST http://localhost:8001/api/v1/webdav/validate-config \
+  -F "config_path=/documents" \
+  -F "webdav_url=https://webdav.example.com"
+
+# Ingest directly from WebDAV with custom endpoint
+curl -X POST http://localhost:8001/api/v1/webdav/run-inventory \
+  -F "config_path=/documents" \
+  -F "source=my-source" \
+  -F "webdav_url=https://webdav.example.com" \
+  -F "webdav_username=user" \
+  -F "webdav_password=pass" \
+  -F "endpoint_url=http://custom-ingester:8000/api/v1"
+```
+
+**Note:** The `endpoint_url` parameter allows you to override the Ingester API endpoint on a per-request basis.
 
 #### Health Check
 
@@ -502,7 +745,7 @@ The Docker image includes:
 - Proper signal handling
 - Production-ready uvicorn configuration
 
-See [DOCKERFILE_CHANGES.md](DOCKERFILE_CHANGES.md) for implementation details.
+
 
 ## Troubleshooting
 

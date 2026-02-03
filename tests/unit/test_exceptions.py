@@ -5,6 +5,7 @@ import pytest
 from soliplex.agents import ValidationError
 from soliplex.agents.scm import APIFetchError
 from soliplex.agents.scm import GitHubAPIError
+from soliplex.agents.scm import RateLimitError
 from soliplex.agents.scm import SCMException
 from soliplex.agents.scm import UnexpectedResponseError
 
@@ -42,6 +43,31 @@ def test_github_api_error():
 def test_github_api_error_inheritance():
     """Test GitHubAPIError inherits from SCMException."""
     exc = GitHubAPIError()
+    assert isinstance(exc, SCMException)
+
+
+def test_rate_limit_error():
+    """Test RateLimitError has correct message."""
+    with pytest.raises(RateLimitError, match="Rate limit exceeded"):
+        raise RateLimitError(retry_after=60)
+
+
+def test_rate_limit_error_default_retry_after():
+    """Test RateLimitError default retry_after value."""
+    exc = RateLimitError()
+    assert exc.retry_after == 60
+
+
+def test_rate_limit_error_custom_retry_after():
+    """Test RateLimitError with custom retry_after value."""
+    exc = RateLimitError(retry_after=120)
+    assert exc.retry_after == 120
+    assert "120" in str(exc)
+
+
+def test_rate_limit_error_inheritance():
+    """Test RateLimitError inherits from SCMException."""
+    exc = RateLimitError()
     assert isinstance(exc, SCMException)
 
 

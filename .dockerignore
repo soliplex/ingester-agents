@@ -35,6 +35,7 @@ htmlcov/
 docs/
 *.md
 !README.md
+tmp_docs/
 
 # Databases
 *.db
