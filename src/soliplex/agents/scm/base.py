@@ -322,6 +322,8 @@ class BaseSCMProvider(ABC):
 
         async with self.get_session() as session:
             async with session.get(url) as response:
+                if response.content_type != "application/json":  # pragma: no cover
+                    logger.error(f"Unexpected response type: {response.content_type} - response: {response.text}")
                 resp = await response.json()
 
                 await self.validate_response(response, resp)
