@@ -566,3 +566,285 @@ async def test_get_data_from_url_directory_with_extension_filtering(provider, mo
     # Should return only the .md files, file2.txt should be ignored
     assert isinstance(result, list)
     assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_should_retry_response_429_rate_limit(provider, mock_response):
+    """Test _should_retry_response returns True for 429 rate limit on non-final attempt."""
+    response = mock_response(429, {})
+    response.headers = {"Retry-After": "5"}
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_retry_attempts = 3
+
+        result = await provider._should_retry_response(response, "http://test.com", attempt=0)
+        assert result is True
+
+
+@pytest.mark.asyncio
+async def test_should_retry_response_429_final_attempt_raises(provider, mock_response):
+    """Test _should_retry_response raises RateLimitError on 429 at final attempt."""
+    from soliplex.agents.scm import RateLimitError
+
+    response = mock_response(429, {})
+    response.headers = {"Retry-After": "60"}
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_retry_attempts = 3
+
+        with pytest.raises(RateLimitError) as exc_info:
+            await provider._should_retry_response(response, "http://test.com", attempt=2)
+
+        assert exc_info.value.retry_after == 60
+
+
+@pytest.mark.asyncio
+async def test_should_retry_response_5xx_server_error(provider, mock_response):
+    """Test _should_retry_response returns True for 5xx server errors on non-final attempt."""
+    response = mock_response(503, {})
+    response.headers = {}
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_retry_attempts = 3
+        mock_settings.scm_retry_backoff_base = 1.0
+        mock_settings.scm_retry_backoff_max = 30.0
+
+        result = await provider._should_retry_response(response, "http://test.com", attempt=0)
+        assert result is True
+
+
+@pytest.mark.asyncio
+async def test_should_retry_response_5xx_final_attempt(provider, mock_response):
+    """Test _should_retry_response returns False for 5xx on final attempt."""
+    response = mock_response(500, {})
+    response.headers = {}
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_retry_attempts = 3
+        mock_settings.scm_retry_backoff_base = 1.0
+        mock_settings.scm_retry_backoff_max = 30.0
+
+        result = await provider._should_retry_response(response, "http://test.com", attempt=2)
+        assert result is False
+
+
+@pytest.mark.asyncio
+async def test_should_retry_response_success(provider, mock_response):
+    """Test _should_retry_response returns False for successful responses."""
+    response = mock_response(200, {})
+    response.headers = {}
+
+    result = await provider._should_retry_response(response, "http://test.com", attempt=0)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_get_data_from_url_retry_on_client_error(provider, mock_response):
+    """Test get_data_from_url retries on client errors and eventually returns error."""
+    from unittest.mock import MagicMock
+
+    import aiohttp
+
+    mock_session = MagicMock()
+
+    # All attempts fail with client error
+    mock_session.get.side_effect = aiohttp.ClientError("Connection failed")
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_retry_attempts = 2
+        mock_settings.scm_retry_backoff_base = 0.01
+        mock_settings.scm_retry_backoff_max = 0.1
+
+        result = await provider.get_data_from_url("https://api.example.com/file", mock_session)
+
+        assert "error" in result
+        assert "Connection failed" in result["error"]
+        # Should have tried twice
+        assert mock_session.get.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_data_from_url_retry_success_after_failure(provider, mock_response):
+    """Test get_data_from_url succeeds after initial failures."""
+    from unittest.mock import MagicMock
+
+    import aiohttp
+
+    from tests.unit.conftest import create_async_context_manager
+
+    file_response = {"name": "test.md", "path": "test.md", "url": "https://api.example.com/file", "content": "VGVzdA=="}
+
+    mock_session = MagicMock()
+
+    # First attempt fails, second succeeds
+    mock_resp_success = mock_response(200, file_response)
+    mock_session.get.side_effect = [
+        aiohttp.ClientError("Temporary failure"),
+        create_async_context_manager(mock_resp_success),
+    ]
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_retry_attempts = 3
+        mock_settings.scm_retry_backoff_base = 0.01
+        mock_settings.scm_retry_backoff_max = 0.1
+
+        result = await provider.get_data_from_url("https://api.example.com/file", mock_session)
+
+        assert result["name"] == "test.md"
+        assert mock_session.get.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_data_from_url_with_semaphore(provider, mock_response):
+    """Test get_data_from_url respects semaphore for concurrency control."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    file_response = {"name": "test.md", "path": "test.md", "url": "https://api.example.com/file", "content": "VGVzdA=="}
+
+    mock_session = MagicMock()
+    mock_resp = mock_response(200, file_response)
+    mock_session.get.return_value = create_async_context_manager(mock_resp)
+
+    semaphore = asyncio.Semaphore(1)
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_retry_attempts = 1
+        mock_settings.scm_retry_backoff_base = 0.01
+        mock_settings.scm_retry_backoff_max = 0.1
+
+        result = await provider.get_data_from_url("https://api.example.com/file", mock_session, semaphore=semaphore)
+
+        assert result["name"] == "test.md"
+
+
+@pytest.mark.asyncio
+async def test_paginate_retry_on_client_error(provider, mock_response):
+    """Test paginate retries on client errors."""
+    from unittest.mock import MagicMock
+
+    import aiohttp
+
+    from tests.unit.conftest import create_async_context_manager
+
+    page1_data = [{"id": 1}]
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+
+        # First attempt fails, second succeeds, third returns empty
+        mock_resp_success = mock_response(200, page1_data)
+        mock_resp_empty = mock_response(200, [])
+        mock_session.get.side_effect = [
+            aiohttp.ClientError("Temporary failure"),
+            create_async_context_manager(mock_resp_success),
+            create_async_context_manager(mock_resp_empty),
+        ]
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_retry_attempts = 3
+            mock_settings.scm_retry_backoff_base = 0.01
+            mock_settings.scm_retry_backoff_max = 0.1
+
+            url_template = "https://api.example.com/repos/{owner}/{repo}/items?page={page}"
+            result = await provider.paginate(url_template, "test_owner", "test_repo")
+
+            assert len(result) == 1
+            assert result[0]["id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_paginate_raises_after_max_retries(provider, mock_response):
+    """Test paginate raises after exhausting all retries."""
+    from unittest.mock import MagicMock
+
+    import aiohttp
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+
+        # All attempts fail
+        mock_session.get.side_effect = aiohttp.ClientError("Connection failed")
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_retry_attempts = 2
+            mock_settings.scm_retry_backoff_base = 0.01
+            mock_settings.scm_retry_backoff_max = 0.1
+
+            url_template = "https://api.example.com/repos/{owner}/{repo}/items?page={page}"
+
+            with pytest.raises(aiohttp.ClientError):
+                await provider.paginate(url_template, "test_owner", "test_repo")
+
+
+@pytest.mark.asyncio
+async def test_get_data_from_url_retry_on_5xx_with_semaphore(provider, mock_response):
+    """Test get_data_from_url retries on 5xx errors when using semaphore."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    file_response = {"name": "test.md", "path": "test.md", "url": "https://api.example.com/file", "content": "VGVzdA=="}
+
+    mock_session = MagicMock()
+
+    # First attempt returns 503, second succeeds
+    mock_resp_503 = mock_response(503, {})
+    mock_resp_503.headers = {}
+    mock_resp_success = mock_response(200, file_response)
+
+    mock_session.get.side_effect = [
+        create_async_context_manager(mock_resp_503),
+        create_async_context_manager(mock_resp_success),
+    ]
+
+    semaphore = asyncio.Semaphore(1)
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_retry_attempts = 3
+        mock_settings.scm_retry_backoff_base = 0.01
+        mock_settings.scm_retry_backoff_max = 0.1
+
+        result = await provider.get_data_from_url("https://api.example.com/file", mock_session, semaphore=semaphore)
+
+        assert result["name"] == "test.md"
+        assert mock_session.get.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_data_from_url_retry_on_5xx_without_semaphore(provider, mock_response):
+    """Test get_data_from_url retries on 5xx errors without semaphore."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    file_response = {"name": "test.md", "path": "test.md", "url": "https://api.example.com/file", "content": "VGVzdA=="}
+
+    mock_session = MagicMock()
+
+    # First attempt returns 500, second succeeds
+    mock_resp_500 = mock_response(500, {})
+    mock_resp_500.headers = {}
+    mock_resp_success = mock_response(200, file_response)
+
+    mock_session.get.side_effect = [
+        create_async_context_manager(mock_resp_500),
+        create_async_context_manager(mock_resp_success),
+    ]
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_retry_attempts = 3
+        mock_settings.scm_retry_backoff_base = 0.01
+        mock_settings.scm_retry_backoff_max = 0.1
+
+        result = await provider.get_data_from_url("https://api.example.com/file", mock_session)
+
+        assert result["name"] == "test.md"
+        assert mock_session.get.call_count == 2
