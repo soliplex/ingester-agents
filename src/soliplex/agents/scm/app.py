@@ -141,7 +141,7 @@ async def get_data(scm: str, repo_name: str, owner: str = None):
 
     allowed_extensions = settings.extensions
     files = await impl.list_repo_files(repo_name, owner, allowed_extensions=allowed_extensions)
-
+    files = sorted(files, key=lambda x: x["last_updated"], reverse=True)
     doc_data = []
     filtered_files = [x for x in files if x["name"].split(".")[-1] in allowed_extensions]
     for f in filtered_files:
@@ -152,6 +152,7 @@ async def get_data(scm: str, repo_name: str, owner: str = None):
             "metadata": {
                 "last_modified_date": f["last_updated"],
                 "content-type": f["content-type"],
+                "last_commit_sha": f["last_commit_sha"],
             },
         }
         doc_data.append(row)
@@ -215,8 +216,20 @@ async def incremental_sync(
             param_set_id=param_set_id,
         )
 
-        update_result = await client.update_sync_state(source, last_commit_sha, branch=branch, metadata={})
+        latest_commit_sha = None
+
+        if len(inventory_res["inventory"]) > 0:
+            for i in inventory_res["inventory"]:
+                if "metadata" in i:
+                    meta = i.get("metadata")
+                    if meta and "last_commit_sha" in meta:
+                        latest_commit_sha = meta["last_commit_sha"]
+                        break
+
+        update_result = await client.update_sync_state(source, latest_commit_sha, branch=branch, metadata={})
+
         return inventory_res
+
     issues = await get_issues(scm, repo_name, owner, since=sync_state.get("last_sync_date"))
     logger.info(f"found {len(issues)} files to ingest")
     # Fetch commits since last sync

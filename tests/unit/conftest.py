@@ -83,6 +83,7 @@ def sample_file_record():
         "content": "VGVzdCBjb250ZW50",  # "Test content" in base64
         "sha": "abc123",
         "last_committer_date": "2024-01-01T00:00:00Z",
+        "last_commit_sha": "def456",
     }
 
 

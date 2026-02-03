@@ -53,9 +53,17 @@ def test_init_custom_owner(provider_with_owner):
 @pytest.mark.asyncio
 async def test_get_session(provider):
     """Test get_session creates authenticated session."""
-    async with provider.get_session() as session:
-        assert isinstance(session, aiohttp.ClientSession)
-        assert session.headers["Authorization"] == "token test_token"
+    from pydantic import SecretStr
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_auth_token = SecretStr("test_token")
+        mock_settings.ssl_verify = True
+        mock_settings.http_timeout_total = 30
+        mock_settings.http_timeout_connect = 10
+        mock_settings.http_timeout_sock_read = 10
+        async with provider.get_session() as session:
+            assert isinstance(session, aiohttp.ClientSession)
+            assert session.headers["Authorization"] == "token test_token"
 
 
 def test_build_url(provider):
@@ -359,8 +367,20 @@ async def test_get_data_from_url_directory_with_recursion(provider, mock_respons
         {"name": "file2.md", "url": "https://api.example.com/file2", "type": "file"},
     ]
 
-    file1_response = {"name": "file1.md", "path": "file1.md", "url": "https://api.example.com/file1", "content": "VGVzdDE="}
-    file2_response = {"name": "file2.md", "path": "file2.md", "url": "https://api.example.com/file2", "content": "VGVzdDI="}
+    file1_response = {
+        "name": "file1.md",
+        "path": "file1.md",
+        "url": "https://api.example.com/file1",
+        "content": "VGVzdDE=",
+        "last_commit_sha": "abc1",
+    }
+    file2_response = {
+        "name": "file2.md",
+        "path": "file2.md",
+        "url": "https://api.example.com/file2",
+        "content": "VGVzdDI=",
+        "last_commit_sha": "abc2",
+    }
 
     mock_session = MagicMock()
 
@@ -533,7 +553,7 @@ async def test_create_repository_for_org(provider, mock_response):
         mock_session.post.return_value = create_async_context_manager(mock_resp)
         mock_get_session.return_value = create_async_context_manager(mock_session)
 
-        result = await provider.create_repository("org-repo", owner="my-org")
+        result = await provider.create_repository("org-repo", organization="my-org")
 
         assert result["name"] == "org-repo"
 
@@ -597,7 +617,7 @@ async def test_create_repository_org_not_found(provider, mock_response):
         mock_get_session.return_value = create_async_context_manager(mock_session)
 
         with pytest.raises(SCMException, match="not found"):
-            await provider.create_repository("new-repo", owner="nonexistent-org")
+            await provider.create_repository("new-repo", organization="nonexistent-org")
 
 
 @pytest.mark.asyncio
@@ -1073,8 +1093,20 @@ async def test_get_data_from_url_directory_with_extension_filtering(provider, mo
         {"name": "file3.md", "url": "https://api.example.com/file3", "type": "file"},
     ]
 
-    file1_response = {"name": "file1.md", "path": "file1.md", "url": "https://api.example.com/file1", "content": "VGVzdDE="}
-    file3_response = {"name": "file3.md", "path": "file3.md", "url": "https://api.example.com/file3", "content": "VGVzdDM="}
+    file1_response = {
+        "name": "file1.md",
+        "path": "file1.md",
+        "url": "https://api.example.com/file1",
+        "content": "VGVzdDE=",
+        "last_commit_sha": "abc1",
+    }
+    file3_response = {
+        "name": "file3.md",
+        "path": "file3.md",
+        "url": "https://api.example.com/file3",
+        "content": "VGVzdDM=",
+        "last_commit_sha": "abc3",
+    }
 
     mock_session = MagicMock()
 
@@ -1209,7 +1241,13 @@ async def test_get_data_from_url_retry_success_after_failure(provider, mock_resp
 
     from tests.unit.conftest import create_async_context_manager
 
-    file_response = {"name": "test.md", "path": "test.md", "url": "https://api.example.com/file", "content": "VGVzdA=="}
+    file_response = {
+        "name": "test.md",
+        "path": "test.md",
+        "url": "https://api.example.com/file",
+        "content": "VGVzdA==",
+        "last_commit_sha": "abc123",
+    }
 
     mock_session = MagicMock()
 
@@ -1239,7 +1277,13 @@ async def test_get_data_from_url_with_semaphore(provider, mock_response):
 
     from tests.unit.conftest import create_async_context_manager
 
-    file_response = {"name": "test.md", "path": "test.md", "url": "https://api.example.com/file", "content": "VGVzdA=="}
+    file_response = {
+        "name": "test.md",
+        "path": "test.md",
+        "url": "https://api.example.com/file",
+        "content": "VGVzdA==",
+        "last_commit_sha": "abc123",
+    }
 
     mock_session = MagicMock()
     mock_resp = mock_response(200, file_response)
@@ -1328,7 +1372,13 @@ async def test_get_data_from_url_retry_on_5xx_with_semaphore(provider, mock_resp
 
     from tests.unit.conftest import create_async_context_manager
 
-    file_response = {"name": "test.md", "path": "test.md", "url": "https://api.example.com/file", "content": "VGVzdA=="}
+    file_response = {
+        "name": "test.md",
+        "path": "test.md",
+        "url": "https://api.example.com/file",
+        "content": "VGVzdA==",
+        "last_commit_sha": "abc123",
+    }
 
     mock_session = MagicMock()
 
@@ -1362,7 +1412,13 @@ async def test_get_data_from_url_retry_on_5xx_without_semaphore(provider, mock_r
 
     from tests.unit.conftest import create_async_context_manager
 
-    file_response = {"name": "test.md", "path": "test.md", "url": "https://api.example.com/file", "content": "VGVzdA=="}
+    file_response = {
+        "name": "test.md",
+        "path": "test.md",
+        "url": "https://api.example.com/file",
+        "content": "VGVzdA==",
+        "last_commit_sha": "abc123",
+    }
 
     mock_session = MagicMock()
 
@@ -1385,3 +1441,716 @@ async def test_get_data_from_url_retry_on_5xx_without_semaphore(provider, mock_r
 
         assert result["name"] == "test.md"
         assert mock_session.get.call_count == 2
+
+
+# ==================== Tests for coverage gaps ====================
+
+
+def test_get_base_url_raises_when_not_configured():
+    """Test get_base_url raises SCMException when scm_base_url is None."""
+    from soliplex.agents.scm import SCMException
+    from soliplex.agents.scm.base import BaseSCMProvider
+
+    class TestProvider(BaseSCMProvider):
+        def get_default_owner(self):
+            return "admin"
+
+        def get_auth_token(self):
+            return "token"
+
+        def get_last_updated(self, rec):
+            return None
+
+    provider = TestProvider()
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_base_url = None
+
+        with pytest.raises(SCMException, match="SCM base URL is not configured"):
+            provider.get_base_url()
+
+
+@pytest.mark.asyncio
+async def test_list_issues_with_since_parameter(provider, mock_response, sample_issue):
+    """Test list_issues with since parameter adds date filter to URL."""
+    import datetime
+
+    since_date = datetime.datetime(2024, 6, 15, 10, 30, 0)
+
+    with patch.object(provider, "paginate") as mock_paginate:
+        mock_paginate.return_value = [sample_issue]
+
+        result = await provider.list_issues("test_repo", add_comments=False, since=since_date)
+
+        assert len(result) == 1
+        # Verify the URL template includes the since parameter
+        call_args = mock_paginate.call_args
+        url_template = call_args[0][0]
+        assert "&since=2024-06-15T10:30:00Z" in url_template
+
+
+# ==================== Tests for _fetch_json ====================
+
+
+@pytest.mark.asyncio
+async def test_fetch_json_success(provider, mock_response):
+    """Test _fetch_json returns JSON data on success."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    json_data = [{"id": 1, "body": "Comment 1"}, {"id": 2, "body": "Comment 2"}]
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, json_data)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider._fetch_json("https://api.example.com/test")
+
+        assert len(result) == 2
+        assert result[0]["body"] == "Comment 1"
+
+
+@pytest.mark.asyncio
+async def test_fetch_json_retry_on_client_error(provider, mock_response):
+    """Test _fetch_json retries on client errors and succeeds."""
+    from unittest.mock import MagicMock
+
+    import aiohttp
+
+    from tests.unit.conftest import create_async_context_manager
+
+    json_data = {"id": 1, "body": "Test"}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+
+        # First attempt fails, second succeeds
+        mock_resp_success = mock_response(200, json_data)
+        mock_session.get.side_effect = [
+            aiohttp.ClientError("Temporary failure"),
+            create_async_context_manager(mock_resp_success),
+        ]
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_retry_attempts = 3
+            mock_settings.scm_retry_backoff_base = 0.01
+            mock_settings.scm_retry_backoff_max = 0.1
+
+            result = await provider._fetch_json("https://api.example.com/test")
+
+            assert result["id"] == 1
+            assert mock_session.get.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_json_raises_after_max_retries(provider, mock_response):
+    """Test _fetch_json raises after exhausting all retries."""
+    from unittest.mock import MagicMock
+
+    import aiohttp
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+
+        # All attempts fail
+        mock_session.get.side_effect = aiohttp.ClientError("Connection failed")
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_retry_attempts = 2
+            mock_settings.scm_retry_backoff_base = 0.01
+            mock_settings.scm_retry_backoff_max = 0.1
+
+            with pytest.raises(aiohttp.ClientError):
+                await provider._fetch_json("https://api.example.com/test")
+
+            assert mock_session.get.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_json_retry_on_5xx(provider, mock_response):
+    """Test _fetch_json retries on 5xx server errors."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    json_data = {"id": 1}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+
+        # First attempt returns 503, second succeeds
+        mock_resp_503 = mock_response(503, {})
+        mock_resp_503.headers = {}
+        mock_resp_success = mock_response(200, json_data)
+
+        mock_session.get.side_effect = [
+            create_async_context_manager(mock_resp_503),
+            create_async_context_manager(mock_resp_success),
+        ]
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_retry_attempts = 3
+            mock_settings.scm_retry_backoff_base = 0.01
+            mock_settings.scm_retry_backoff_max = 0.1
+
+            result = await provider._fetch_json("https://api.example.com/test")
+
+            assert result["id"] == 1
+            assert mock_session.get.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_json_rate_limit_retry(provider, mock_response):
+    """Test _fetch_json retries on 429 rate limit."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    json_data = {"id": 1}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+
+        # First attempt returns 429, second succeeds
+        mock_resp_429 = mock_response(429, {})
+        mock_resp_429.headers = {"Retry-After": "1"}
+        mock_resp_success = mock_response(200, json_data)
+
+        mock_session.get.side_effect = [
+            create_async_context_manager(mock_resp_429),
+            create_async_context_manager(mock_resp_success),
+        ]
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_retry_attempts = 3
+
+            result = await provider._fetch_json("https://api.example.com/test")
+
+            assert result["id"] == 1
+            assert mock_session.get.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_json_rate_limit_raises_on_final_attempt(provider, mock_response):
+    """Test _fetch_json raises RateLimitError when rate limited on final attempt."""
+    from unittest.mock import MagicMock
+
+    from soliplex.agents.scm import RateLimitError
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+
+        # All attempts return 429
+        mock_resp_429 = mock_response(429, {})
+        mock_resp_429.headers = {"Retry-After": "60"}
+
+        mock_session.get.side_effect = [
+            create_async_context_manager(mock_resp_429),
+            create_async_context_manager(mock_resp_429),
+        ]
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_retry_attempts = 2
+
+            with pytest.raises(RateLimitError) as exc_info:
+                await provider._fetch_json("https://api.example.com/test")
+
+            assert exc_info.value.retry_after == 60
+
+
+@pytest.mark.asyncio
+async def test_fetch_json_timeout_error(provider, mock_response):
+    """Test _fetch_json handles TimeoutError."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    json_data = {"id": 1}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+
+        # First attempt times out, second succeeds
+        mock_resp_success = mock_response(200, json_data)
+        mock_session.get.side_effect = [
+            TimeoutError("Request timed out"),
+            create_async_context_manager(mock_resp_success),
+        ]
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_retry_attempts = 3
+            mock_settings.scm_retry_backoff_base = 0.01
+            mock_settings.scm_retry_backoff_max = 0.1
+
+            result = await provider._fetch_json("https://api.example.com/test")
+
+            assert result["id"] == 1
+
+
+# ==================== Tests for list_issue_comments ====================
+
+
+@pytest.mark.asyncio
+async def test_list_issue_comments_success(provider, mock_response, sample_comment):
+    """Test list_issue_comments returns comments."""
+    with patch.object(provider, "_fetch_json") as mock_fetch:
+        mock_fetch.return_value = [sample_comment]
+
+        result = await provider.list_issue_comments("test_owner", "test_repo", 1)
+
+        assert len(result) == 1
+        assert result[0]["body"] == "Test comment"
+        mock_fetch.assert_called_once_with("https://api.example.com/repos/test_owner/test_repo/issues/1/comments")
+
+
+@pytest.mark.asyncio
+async def test_list_issue_comments_default_owner(provider, mock_response, sample_comment):
+    """Test list_issue_comments uses default owner when None."""
+    with patch.object(provider, "_fetch_json") as mock_fetch:
+        mock_fetch.return_value = [sample_comment]
+
+        result = await provider.list_issue_comments(None, "test_repo", 42)
+
+        assert len(result) == 1
+        # Should use provider's default owner "test_owner"
+        mock_fetch.assert_called_once_with("https://api.example.com/repos/test_owner/test_repo/issues/42/comments")
+
+
+@pytest.mark.asyncio
+async def test_list_issue_comments_empty(provider, mock_response):
+    """Test list_issue_comments returns empty list when no comments."""
+    with patch.object(provider, "_fetch_json") as mock_fetch:
+        mock_fetch.return_value = []
+
+        result = await provider.list_issue_comments("test_owner", "test_repo", 1)
+
+        assert result == []
+
+
+@pytest.mark.asyncio
+async def test_list_issue_comments_multiple(provider, mock_response):
+    """Test list_issue_comments returns multiple comments."""
+    comments = [
+        {"id": 1, "body": "First comment", "user": {"login": "user1"}},
+        {"id": 2, "body": "Second comment", "user": {"login": "user2"}},
+        {"id": 3, "body": "Third comment", "user": {"login": "user1"}},
+    ]
+
+    with patch.object(provider, "_fetch_json") as mock_fetch:
+        mock_fetch.return_value = comments
+
+        result = await provider.list_issue_comments("owner", "repo", 123)
+
+        assert len(result) == 3
+        assert result[0]["body"] == "First comment"
+        assert result[1]["body"] == "Second comment"
+        assert result[2]["body"] == "Third comment"
+
+
+# ==================== Tests for list_issues with since and add_comments ====================
+
+
+@pytest.mark.asyncio
+async def test_list_issues_with_since_and_add_comments(provider, mock_response, sample_issue):
+    """Test list_issues with since parameter and add_comments=True fetches comments per issue."""
+    import datetime
+
+    since_date = datetime.datetime(2024, 6, 15, 10, 30, 0)
+    issue_with_number = {**sample_issue, "number": 42}
+
+    with patch.object(provider, "paginate") as mock_paginate:
+        with patch.object(provider, "list_issue_comments") as mock_list_comments:
+            mock_paginate.return_value = [issue_with_number]
+            mock_list_comments.return_value = [{"body": "Comment 1"}, {"body": "Comment 2"}]
+
+            result = await provider.list_issues("test_repo", add_comments=True, since=since_date)
+
+            assert len(result) == 1
+            assert result[0]["comments"] == [{"body": "Comment 1"}, {"body": "Comment 2"}]
+            assert result[0]["comment_count"] == 2
+            mock_list_comments.assert_called_once_with("test_owner", "test_repo", 42)
+
+
+# ==================== Tests for list_commits_since ====================
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_basic(provider, mock_response):
+    """Test list_commits_since returns commits."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    commits_data = [
+        {"sha": "abc123", "message": "Commit 1"},
+        {"sha": "def456", "message": "Commit 2"},
+    ]
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, commits_data)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.list_commits_since("test_repo")
+
+        assert len(result) == 2
+        assert result[0]["sha"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_with_marker(provider, mock_response):
+    """Test list_commits_since stops at marker SHA."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    commits_data = [
+        {"sha": "abc123", "message": "Commit 1"},
+        {"sha": "marker_sha", "message": "Marker commit"},
+        {"sha": "def456", "message": "Commit 2"},
+    ]
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, commits_data)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.list_commits_since("test_repo", since_commit_sha="marker_sha")
+
+        # Should only return commits before the marker
+        assert len(result) == 1
+        assert result[0]["sha"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_empty_response(provider, mock_response):
+    """Test list_commits_since handles empty response."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, [])
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.list_commits_since("test_repo")
+
+        assert result == []
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_with_owner(provider, mock_response):
+    """Test list_commits_since with explicit owner."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    commits_data = [{"sha": "abc123", "message": "Commit 1"}]
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, commits_data)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.list_commits_since("test_repo", owner="custom_owner")
+
+        assert len(result) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_dict_response(provider, mock_response):
+    """Test list_commits_since handles dict response (non-list)."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    # API might return a dict instead of list in error cases
+    dict_response = {"message": "not a list"}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, dict_response)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.list_commits_since("test_repo")
+
+        # Should treat non-list as empty
+        assert result == []
+
+
+# ==================== Tests for get_commit_details ====================
+
+
+@pytest.mark.asyncio
+async def test_get_commit_details_success(provider, mock_response):
+    """Test get_commit_details returns commit info."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    commit_data = {
+        "sha": "abc123",
+        "message": "Test commit",
+        "files": [{"filename": "test.py", "status": "modified"}],
+    }
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, commit_data)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.get_commit_details("test_repo", commit_sha="abc123")
+
+        assert result["sha"] == "abc123"
+        assert result["message"] == "Test commit"
+
+
+@pytest.mark.asyncio
+async def test_get_commit_details_with_owner(provider, mock_response):
+    """Test get_commit_details with explicit owner."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    commit_data = {"sha": "abc123", "message": "Test commit"}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, commit_data)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.get_commit_details("test_repo", owner="custom_owner", commit_sha="abc123")
+
+        assert result["sha"] == "abc123"
+
+
+# ==================== Tests for get_single_file ====================
+
+
+@pytest.mark.asyncio
+async def test_get_single_file_success(provider, mock_response, sample_file_record):
+    """Test get_single_file returns parsed file."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, sample_file_record)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.get_single_file("test_repo", file_path="docs/test.md")
+
+        assert result["name"] == "test.md"
+        assert "file_bytes" in result
+
+
+@pytest.mark.asyncio
+async def test_get_single_file_with_owner(provider, mock_response, sample_file_record):
+    """Test get_single_file with explicit owner."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, sample_file_record)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.get_single_file("test_repo", owner="custom_owner", file_path="test.md")
+
+        assert result["name"] == "test.md"
+
+
+@pytest.mark.asyncio
+async def test_get_single_file_with_branch(provider, mock_response, sample_file_record):
+    """Test get_single_file with custom branch."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(200, sample_file_record)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.get_single_file("test_repo", file_path="test.md", branch="develop")
+
+        assert result["name"] == "test.md"
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_multiple_pages(provider, mock_response):
+    """Test list_commits_since with multiple pages of commits."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    # Page 1: 100 commits (limit)
+    page1_commits = [{"sha": f"sha_{i}", "message": f"Commit {i}"} for i in range(100)]
+    # Page 2: 50 commits (less than limit, indicating last page)
+    page2_commits = [{"sha": f"sha_{100 + i}", "message": f"Commit {100 + i}"} for i in range(50)]
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp1 = mock_response(200, page1_commits)
+        mock_resp2 = mock_response(200, page2_commits)
+
+        mock_session.get.side_effect = [
+            create_async_context_manager(mock_resp1),
+            create_async_context_manager(mock_resp2),
+        ]
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.list_commits_since("test_repo", limit=100)
+
+        # Should have fetched both pages
+        assert len(result) == 150
+        assert mock_session.get.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_marker_on_second_page(provider, mock_response):
+    """Test list_commits_since finds marker SHA on second page."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    # Page 1: Full page
+    page1_commits = [{"sha": f"sha_{i}", "message": f"Commit {i}"} for i in range(100)]
+    # Page 2: Contains marker
+    page2_commits = [
+        {"sha": "new_commit_1", "message": "New 1"},
+        {"sha": "marker_sha", "message": "Marker"},
+        {"sha": "old_commit", "message": "Old"},
+    ]
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp1 = mock_response(200, page1_commits)
+        mock_resp2 = mock_response(200, page2_commits)
+
+        mock_session.get.side_effect = [
+            create_async_context_manager(mock_resp1),
+            create_async_context_manager(mock_resp2),
+        ]
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await provider.list_commits_since("test_repo", since_commit_sha="marker_sha", limit=100)
+
+        # Should have page 1 (100) + 1 commit from page 2 before marker
+        assert len(result) == 101
+
+
+# ==================== Tests for base class methods ====================
+
+
+def test_base_get_default_owner():
+    """Test BaseSCMProvider.get_default_owner returns settings value."""
+    from soliplex.agents.scm.base import BaseSCMProvider
+
+    class MinimalProvider(BaseSCMProvider):
+        def get_last_updated(self, rec):
+            return None
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_owner = "settings_owner"
+        provider = MinimalProvider()
+        assert provider.get_default_owner() == "settings_owner"
+
+
+def test_base_get_base_url():
+    """Test BaseSCMProvider.get_base_url returns settings value."""
+    from soliplex.agents.scm.base import BaseSCMProvider
+
+    class MinimalProvider(BaseSCMProvider):
+        def get_last_updated(self, rec):
+            return None
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_owner = "owner"
+        mock_settings.scm_base_url = "https://api.test.com"
+        provider = MinimalProvider()
+        assert provider.get_base_url() == "https://api.test.com"
+
+
+def test_base_get_auth_token():
+    """Test BaseSCMProvider.get_auth_token returns settings value."""
+    from soliplex.agents.scm.base import BaseSCMProvider
+
+    class MinimalProvider(BaseSCMProvider):
+        def get_last_updated(self, rec):
+            return None
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_owner = "owner"
+        mock_settings.scm_auth_token = "test_token_123"
+        provider = MinimalProvider()
+        assert provider.get_auth_token() == "test_token_123"
+
+
+def test_base_get_auth_headers_basic_auth():
+    """Test BaseSCMProvider.get_auth_headers with basic auth."""
+    from pydantic import SecretStr
+
+    from soliplex.agents.scm.base import BaseSCMProvider
+
+    class MinimalProvider(BaseSCMProvider):
+        def get_last_updated(self, rec):
+            return None
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_owner = "owner"
+        mock_settings.scm_auth_token = None
+        mock_settings.scm_auth_username = "testuser"
+        mock_settings.scm_auth_password = SecretStr("testpass")
+
+        provider = MinimalProvider()
+        headers = provider.get_auth_headers()
+
+        # base64("testuser:testpass") = "dGVzdHVzZXI6dGVzdHBhc3M="
+        assert headers == {"Authorization": "Basic dGVzdHVzZXI6dGVzdHBhc3M="}
+
+
+def test_base_get_auth_headers_raises_no_auth():
+    """Test BaseSCMProvider.get_auth_headers raises when no auth configured."""
+    from soliplex.agents.scm import AuthenticationConfigError
+    from soliplex.agents.scm.base import BaseSCMProvider
+
+    class MinimalProvider(BaseSCMProvider):
+        def get_last_updated(self, rec):
+            return None
+
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_owner = "owner"
+        mock_settings.scm_auth_token = None
+        mock_settings.scm_auth_username = None
+        mock_settings.scm_auth_password = None
+
+        provider = MinimalProvider()
+
+        with pytest.raises(AuthenticationConfigError):
+            provider.get_auth_headers()

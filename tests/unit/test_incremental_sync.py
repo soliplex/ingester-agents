@@ -29,6 +29,7 @@ async def test_incremental_sync_no_state():
         mock_client.find_batch_for_source = AsyncMock(return_value=None)
         mock_client.create_batch = AsyncMock(return_value=1)
         mock_client.check_status = AsyncMock(return_value=[])
+        mock_client.update_sync_state = AsyncMock(return_value={"last_commit_sha": None})
 
         with patch("soliplex.agents.scm.app.get_scm") as mock_get_scm:
             mock_provider = MagicMock()
@@ -98,6 +99,9 @@ async def test_incremental_sync_with_changes():
                 }
             )
 
+            # Mock list_issues (called by get_issues)
+            mock_provider.list_issues = AsyncMock(return_value=[])
+
             mock_get_scm.return_value = mock_provider
 
             from soliplex.agents.config import SCM
@@ -125,6 +129,9 @@ async def test_incremental_sync_up_to_date():
 
             # No new commits
             mock_provider.list_commits_since = AsyncMock(return_value=[])
+
+            # Mock list_issues (called by get_issues)
+            mock_provider.list_issues = AsyncMock(return_value=[])
 
             mock_get_scm.return_value = mock_provider
 
@@ -178,6 +185,32 @@ async def test_get_sync_state_not_found(mock_response):
         # Should return default state when 404
         assert result["source_id"] == "gitea:admin:test"
         assert result["last_commit_sha"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_sync_state_with_null_last_sync_date(mock_response):
+    """Test getting sync state with null last_sync_date."""
+    mock_resp = mock_response(
+        200,
+        {
+            "source_id": "gitea:admin:test",
+            "last_commit_sha": "abc123",
+            "last_sync_date": None,
+            "branch": "main",
+        },
+    )
+
+    mock_sess = MagicMock()
+    mock_sess.get = MagicMock(return_value=create_async_context_manager(mock_resp))
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_get_session.return_value = create_async_context_manager(mock_sess)
+
+        result = await client.get_sync_state("gitea:admin:test")
+
+        assert result["source_id"] == "gitea:admin:test"
+        assert result["last_commit_sha"] == "abc123"
+        assert result["last_sync_date"] is None
 
 
 @pytest.mark.asyncio
@@ -413,6 +446,7 @@ async def test_get_single_file(mock_response):
             "path": "docs/test.md",
             "url": "http://test/repos/admin/test/contents/docs/test.md",
             "content": content,
+            "last_commit_sha": "abc123",
         },
     )
 

@@ -196,10 +196,15 @@ class BaseSCMProvider(ABC):
         issues = await self.paginate(url_template, owner, repo)
 
         if add_comments:
-            comments = await self.list_repo_comments(owner, repo)
-            for issue in issues:
-                issue["comments"] = [comment["body"] for comment in comments if comment["issue_url"] == issue["url"]]
-                issue["comment_count"] = len(issue["comments"])
+            if since is None:
+                comments = await self.list_repo_comments(owner, repo)
+                for issue in issues:
+                    issue["comments"] = [comment["body"] for comment in comments if comment["issue_url"] == issue["url"]]
+                    issue["comment_count"] = len(issue["comments"])
+            else:
+                for issue in issues:
+                    issue["comments"] = await self.list_issue_comments(owner, repo, issue["number"])
+                    issue["comment_count"] = len(issue["comments"])
 
         return issues
 
@@ -217,6 +222,22 @@ class BaseSCMProvider(ABC):
         owner = owner or self.owner
         url_template = self.build_url("/repos/{owner}/{repo}/issues/comments?page={page}")
         return await self.paginate(url_template, owner, repo)
+
+    async def list_issue_comments(self, owner: str | None, repo: str, issue_number: int) -> list[dict[str, Any]]:
+        """
+        List comments for a specific issue.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            issue_number: Issue number
+
+        Returns:
+            List of comment dictionaries
+        """
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}/issues/{issue_number}/comments")
+        return await self._fetch_json(url)
 
     def parse_file_rec(self, rec: dict[str, Any]) -> dict[str, Any]:
         """
@@ -241,6 +262,7 @@ class BaseSCMProvider(ABC):
             "sha256": file_hash,
             "content-type": mimetypes.guess_type(rec["name"])[0],
             "last_updated": self.get_last_updated(rec),
+            "last_commit_sha": rec["last_commit_sha"],
         }
 
     @abstractmethod
@@ -314,6 +336,53 @@ class BaseSCMProvider(ABC):
                 return True
 
         return False
+
+    async def _fetch_json(self, url: str) -> dict[str, Any] | list[dict[str, Any]]:
+        """
+        Fetch JSON from URL with retry logic and rate limiting.
+
+        This is a simple helper for fetching JSON data from API endpoints
+        that don't require pagination or complex processing.
+
+        Args:
+            url: Full API URL to fetch
+
+        Returns:
+            Parsed JSON response (dict or list)
+
+        Raises:
+            aiohttp.ClientError: If request fails after all retries
+            TimeoutError: If request times out after all retries
+        """
+        logger.debug(f"_fetch_json url={url}")
+
+        async with self.get_session() as session:
+            for attempt in range(settings.scm_retry_attempts):
+                try:
+                    # Add small jitter to avoid thundering herd
+                    await asyncio.sleep(random.uniform(0.01, 0.05))
+
+                    async with session.get(url) as response:
+                        if await self._should_retry_response(response, url, attempt):
+                            continue
+
+                        response.raise_for_status()
+                        return await response.json()
+
+                except (aiohttp.ClientError, TimeoutError) as e:
+                    backoff = min(
+                        settings.scm_retry_backoff_base * (2**attempt),
+                        settings.scm_retry_backoff_max,
+                    )
+                    logger.warning(f"Request failed for {url}: {e}, retrying in {backoff}s (attempt {attempt + 1})")
+
+                    if attempt < settings.scm_retry_attempts - 1:
+                        await asyncio.sleep(backoff)
+                    else:
+                        raise
+
+        # This should never be reached - loop always returns or raises
+        raise APIFetchError  # pragma: no cover
 
     async def get_data_from_url(
         self,

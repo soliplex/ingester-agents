@@ -263,7 +263,9 @@ async def get_sync_state(source: str) -> dict[str, Any]:
 
                 response.raise_for_status()
                 resp = await response.json()
-                resp["last_sync_date"] = datetime.datetime.fromisoformat(resp["last_sync_date"])
+                if resp["last_sync_date"] is not None:
+                    resp["last_sync_date"] = datetime.datetime.fromisoformat(resp["last_sync_date"])
+
                 return resp
 
     except Exception as e:
