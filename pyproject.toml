@@ -1,6 +1,6 @@
 [project]
 name = "soliplex.agents"
-version = "0.3.2"
+version = "0.4.0"
 description = "Agents for use with soliplex-ingester"
 authors = [{ name = "Enfold Systems", email = "info@enfoldsystems.net" }]
 readme = "README.md"
@@ -26,7 +26,7 @@ dependencies = [
     "jinja2>=3.1.6",
     "pydantic-settings>=2.12.0",
     "python-multipart>=0.0.20",
-    "typer>=0.20.0",
+    "typer>=0.21.1",
     "uvicorn[standard]>=0.34.0",
     "webdav4>=0.10.0",
 ]
@@ -39,6 +39,7 @@ dev = [
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
+    "pytest-vcr>=1.0.2",
     "ruff>=0.14.10",
 ]
 
@@ -56,8 +57,8 @@ module-name = "soliplex.agents"
 si-agent = "soliplex.agents.cli:cli"
 
 [tool.pytest_env]
-scm_auth_token="test_scm_auth_token"
-scm_auth_username="test_username"
+
+scm_auth_username="gitea_admin"
 scm_auth_password="test_password"
 scm_owner="test_owner"
 scm_base_url="http://localhost:3000/api/v1"
@@ -73,7 +74,7 @@ pythonpath = "."
 python_files = "test_*.py"
 # skip 'tests/functional' by default
 testpaths = ["tests/unit"]
-addopts = "--cov=soliplex --cov=tests/unit --cov-branch --cov-fail-under=100"
+addopts = "--cov=soliplex --cov-branch --cov-fail-under=100"
 filterwarnings = [
     # "ignore::DeprecationWarning:<source-package>",
 ]

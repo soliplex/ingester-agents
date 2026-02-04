@@ -1,0 +1,52 @@
+interactions:
+- request:
+    body:
+      description: Test repository created by VCR test
+      name: vcr-test-create-repo
+      private: false
+    headers: {}
+    method: POST
+    uri: http://localhost:3000/api/v1/user/repos
+  response:
+    body:
+      string: '{"id":3,"owner":{"id":1,"login":"gitea_admin","login_name":"","source_id":0,"full_name":"","email":"bryantd95@gmail.com","avatar_url":"http://localhost:3000/avatar/93330982c2376665c83d2a392baaaab5","html_url":"http://localhost:3000/gitea_admin","language":"","is_admin":false,"last_login":"0001-01-01T00:00:00Z","created":"2026-01-16T21:34:12Z","restricted":false,"active":false,"prohibit_login":false,"location":"","website":"","description":"","visibility":"public","followers_count":0,"following_count":0,"starred_repos_count":0,"username":"gitea_admin"},"name":"vcr-test-create-repo","full_name":"gitea_admin/vcr-test-create-repo","description":"Test
+        repository created by VCR test","empty":true,"private":false,"fork":false,"template":false,"mirror":false,"size":22,"language":"","languages_url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-create-repo/languages","html_url":"http://localhost:3000/gitea_admin/vcr-test-create-repo","url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-create-repo","link":"","ssh_url":"git@127.0.0.1:gitea_admin/vcr-test-create-repo.git","clone_url":"http://localhost:3000/gitea_admin/vcr-test-create-repo.git","original_url":"","website":"","stars_count":0,"forks_count":0,"watchers_count":1,"open_issues_count":0,"open_pr_counter":0,"release_counter":0,"default_branch":"main","archived":false,"created_at":"2026-02-03T23:15:45Z","updated_at":"2026-02-03T23:15:45Z","archived_at":"1970-01-01T00:00:00Z","permissions":{"admin":true,"push":true,"pull":true},"has_code":false,"has_issues":true,"internal_tracker":{"enable_time_tracker":true,"allow_only_contributors_to_track_time":true,"enable_issue_dependencies":true},"has_wiki":true,"has_pull_requests":true,"has_projects":true,"projects_mode":"all","has_releases":true,"has_packages":true,"has_actions":true,"ignore_whitespace_conflicts":false,"allow_merge_commits":true,"allow_rebase":true,"allow_rebase_explicit":true,"allow_squash_merge":true,"allow_fast_forward_only_merge":true,"allow_rebase_update":true,"allow_manual_merge":false,"autodetect_manual_merge":false,"default_delete_branch_after_merge":false,"default_merge_style":"merge","default_allow_maintainer_edit":false,"avatar_url":"","internal":false,"mirror_interval":"","object_format_name":"sha1","mirror_updated":"0001-01-01T00:00:00Z","topics":[],"licenses":[]}
+
+        '
+    headers:
+      Cache-Control:
+      - max-age=0, private, must-revalidate, no-transform
+      Content-Type:
+      - application/json;charset=utf-8
+      Date:
+      - Tue, 03 Feb 2026 23:15:45 GMT
+      Transfer-Encoding:
+      - chunked
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+    status:
+      code: 201
+      message: Created
+- request:
+    body: null
+    headers: {}
+    method: DELETE
+    uri: http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-create-repo
+  response:
+    body:
+      string: ''
+    headers:
+      Cache-Control:
+      - max-age=0, private, must-revalidate, no-transform
+      Date:
+      - Tue, 03 Feb 2026 23:15:46 GMT
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+    status:
+      code: 204
+      message: No Content
+version: 1

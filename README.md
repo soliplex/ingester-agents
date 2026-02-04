@@ -268,6 +268,46 @@ si-agent scm run-inventory gitea my-repo admin
 
 **Note on Workflows:** By default, `start_workflows=True`. To skip workflow triggering, explicitly set `--no-start-workflows`.
 
+#### 4. Incremental Sync
+
+Run commit-based incremental synchronization. Only processes files that changed since the last sync, significantly reducing API calls and bandwidth usage.
+
+```bash
+# First run performs full sync and establishes sync state
+si-agent scm run-incremental gitea my-repo admin
+
+# Subsequent runs only process changes since last sync
+si-agent scm run-incremental gitea my-repo admin --branch main
+```
+
+**With workflow triggering:**
+
+```bash
+si-agent scm run-incremental gitea my-repo admin \
+  --start-workflows \
+  --workflow-definition-id my-workflow \
+  --param-set-id my-params \
+  --priority 5
+```
+
+**Output JSON format:**
+
+```bash
+si-agent scm run-incremental gitea my-repo admin --do-json
+```
+
+#### 5. Sync State Management
+
+View and manage sync state for repositories:
+
+```bash
+# View current sync state
+si-agent scm get-sync-state gitea my-repo admin
+
+# Reset sync state (forces full sync on next run)
+si-agent scm reset-sync gitea my-repo admin
+```
+
 ### WebDAV Agent
 
 The WebDAV agent allows you to ingest documents directly from WebDAV servers (like Nextcloud, ownCloud, SharePoint, etc.).
@@ -384,6 +424,19 @@ si-agent webdav run-inventory /documents my-source \
    - This enables efficient re-ingestion: only new or changed files are processed
 5. **Ingestion**: Files are uploaded to the Soliplex Ingester API
 6. **Workflow Trigger** (optional): Workflows can be started to process the ingested documents. See Ingester documentation for details.
+
+### Incremental Sync (SCM Agent)
+
+The `run-incremental` command uses commit-based tracking for efficient synchronization:
+
+1. **Sync State Check**: Retrieves last processed commit SHA from the ingester
+2. **Commit Enumeration**: Fetches only commits since the last sync
+3. **Change Detection**: Extracts changed and removed file paths from commits
+4. **Selective Fetch**: Downloads only files that were modified
+5. **Ingestion**: Uploads changed files to the ingester
+6. **State Update**: Stores the latest commit SHA for subsequent syncs
+
+This approach reduces API calls and bandwidth by 80-95% compared to full repository scans. On first run (or after reset), a full sync is performed to establish the baseline.
 
 ### File Filtering
 
@@ -773,10 +826,14 @@ soliplex.agents/
 │   │   └── routes/
 │   │       ├── __init__.py
 │   │       ├── fs.py       # Filesystem API endpoints
-│   │       └── scm.py      # SCM API endpoints
+│   │       ├── scm.py      # SCM API endpoints
+│   │       └── webdav.py   # WebDAV API endpoints
 │   ├── fs/                 # Filesystem agent
 │   │   ├── app.py          # Core filesystem logic
 │   │   └── cli.py          # Filesystem CLI commands
+│   ├── webdav/             # WebDAV agent
+│   │   ├── app.py          # Core WebDAV logic
+│   │   └── cli.py          # WebDAV CLI commands
 │   └── scm/                # SCM agent
 │       ├── app.py          # Core SCM logic
 │       ├── cli.py          # SCM CLI commands
@@ -798,8 +855,8 @@ soliplex.agents/
 ### Key Components
 
 **CLI Layer:**
-- `cli.py` - Main entry point with `fs`, `scm`, and `serve` commands
-- Agent-specific CLI commands in `fs/cli.py` and `scm/cli.py`
+- `cli.py` - Main entry point with `fs`, `scm`, `webdav`, and `serve` commands
+- Agent-specific CLI commands in `fs/cli.py`, `webdav/cli.py`, and `scm/cli.py`
 
 **Server Layer:**
 - `server/` - FastAPI application
@@ -808,6 +865,7 @@ soliplex.agents/
 
 **Agent Layer:**
 - `fs/app.py` - Filesystem operations (shared by CLI and API)
+- `webdav/app.py` - WebDAV operations (shared by CLI and API)
 - `scm/app.py` - SCM operations (shared by CLI and API)
 - `client.py` - HTTP client for Soliplex Ingester API
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import datetime
 import logging
 import mimetypes
 import random
@@ -174,7 +175,9 @@ class BaseSCMProvider(ABC):
 
         return ret
 
-    async def list_issues(self, repo: str, owner: str | None = None, add_comments: bool = False) -> list[dict[str, Any]]:
+    async def list_issues(
+        self, repo: str, owner: str | None = None, add_comments: bool = False, since: datetime.datetime | None = None
+    ) -> list[dict[str, Any]]:
         """
         List all issues for a repository.
 
@@ -188,13 +191,20 @@ class BaseSCMProvider(ABC):
         """
         owner = owner or self.owner
         url_template = self.build_url("/repos/{owner}/{repo}/issues?page={page}&status=all")
+        if since:
+            url_template += f"&since={since.isoformat()}Z"
         issues = await self.paginate(url_template, owner, repo)
 
         if add_comments:
-            comments = await self.list_repo_comments(owner, repo)
-            for issue in issues:
-                issue["comments"] = [comment["body"] for comment in comments if comment["issue_url"] == issue["url"]]
-                issue["comment_count"] = len(issue["comments"])
+            if since is None:
+                comments = await self.list_repo_comments(owner, repo)
+                for issue in issues:
+                    issue["comments"] = [comment["body"] for comment in comments if comment["issue_url"] == issue["url"]]
+                    issue["comment_count"] = len(issue["comments"])
+            else:
+                for issue in issues:
+                    issue["comments"] = await self.list_issue_comments(owner, repo, issue["number"])
+                    issue["comment_count"] = len(issue["comments"])
 
         return issues
 
@@ -212,6 +222,22 @@ class BaseSCMProvider(ABC):
         owner = owner or self.owner
         url_template = self.build_url("/repos/{owner}/{repo}/issues/comments?page={page}")
         return await self.paginate(url_template, owner, repo)
+
+    async def list_issue_comments(self, owner: str | None, repo: str, issue_number: int) -> list[dict[str, Any]]:
+        """
+        List comments for a specific issue.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            issue_number: Issue number
+
+        Returns:
+            List of comment dictionaries
+        """
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}/issues/{issue_number}/comments")
+        return await self._fetch_json(url)
 
     def parse_file_rec(self, rec: dict[str, Any]) -> dict[str, Any]:
         """
@@ -236,6 +262,7 @@ class BaseSCMProvider(ABC):
             "sha256": file_hash,
             "content-type": mimetypes.guess_type(rec["name"])[0],
             "last_updated": self.get_last_updated(rec),
+            "last_commit_sha": rec["last_commit_sha"],
         }
 
     @abstractmethod
@@ -309,6 +336,53 @@ class BaseSCMProvider(ABC):
                 return True
 
         return False
+
+    async def _fetch_json(self, url: str) -> dict[str, Any] | list[dict[str, Any]]:
+        """
+        Fetch JSON from URL with retry logic and rate limiting.
+
+        This is a simple helper for fetching JSON data from API endpoints
+        that don't require pagination or complex processing.
+
+        Args:
+            url: Full API URL to fetch
+
+        Returns:
+            Parsed JSON response (dict or list)
+
+        Raises:
+            aiohttp.ClientError: If request fails after all retries
+            TimeoutError: If request times out after all retries
+        """
+        logger.debug(f"_fetch_json url={url}")
+
+        async with self.get_session() as session:
+            for attempt in range(settings.scm_retry_attempts):
+                try:
+                    # Add small jitter to avoid thundering herd
+                    await asyncio.sleep(random.uniform(0.01, 0.05))
+
+                    async with session.get(url) as response:
+                        if await self._should_retry_response(response, url, attempt):
+                            continue
+
+                        response.raise_for_status()
+                        return await response.json()
+
+                except (aiohttp.ClientError, TimeoutError) as e:
+                    backoff = min(
+                        settings.scm_retry_backoff_base * (2**attempt),
+                        settings.scm_retry_backoff_max,
+                    )
+                    logger.warning(f"Request failed for {url}: {e}, retrying in {backoff}s (attempt {attempt + 1})")
+
+                    if attempt < settings.scm_retry_attempts - 1:
+                        await asyncio.sleep(backoff)
+                    else:
+                        raise
+
+        # This should never be reached - loop always returns or raises
+        raise APIFetchError  # pragma: no cover
 
     async def get_data_from_url(
         self,
@@ -431,6 +505,18 @@ class BaseSCMProvider(ABC):
                     logger.error(f"Unexpected response type: {response.content_type} - response: {response.text}")
                 resp = await response.json()
 
+                # Handle empty repositories (no commits on branch yet)
+                # Gitea returns 404 with "object does not exist" for repos with no commits
+                if response.status == 404:
+                    if isinstance(resp, dict) and "errors" in resp:
+                        errors = resp.get("errors", [])
+                        if any("object does not exist" in str(e) for e in errors):
+                            logger.info(
+                                f"Repository {owner}/{repo} has no commits on branch {branch}, returning empty file list"
+                            )
+                            return []
+                    # If it's a different 404 error, let validate_response handle it
+
                 await self.validate_response(response, resp)
 
                 files = [x for x in resp if x["type"] == "file"]
@@ -476,6 +562,15 @@ class BaseSCMProvider(ABC):
             async with session.get(url) as response:
                 resp = await response.json()
 
+                # Handle empty repositories (no commits on branch yet)
+                # Gitea returns 404 with "object does not exist" for repos with no commits
+                if response.status == 404:
+                    if isinstance(resp, dict) and "errors" in resp:
+                        errors = resp.get("errors", [])
+                        if any("object does not exist" in str(e) for e in errors):
+                            logger.info(f"Repository {owner}/{repo} has no commits on branch {branch}, returning empty")
+                            return
+
                 await self.validate_response(response, resp)
 
                 files = [x for x in resp if x["type"] == "file"]
@@ -512,3 +607,324 @@ class BaseSCMProvider(ABC):
         """
         if isinstance(resp, dict) and "errors" in resp:
             raise SCMException(str(resp))
+
+    async def list_commits_since(
+        self,
+        repo: str,
+        owner: str | None = None,
+        since_commit_sha: str | None = None,
+        branch: str = "main",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """
+        List commits since a specific commit SHA.
+
+        Args:
+            repo: Repository name
+            owner: Repository owner
+            since_commit_sha: SHA of last processed commit (None = get all recent)
+            branch: Branch to fetch from
+            limit: Maximum commits to fetch per page
+
+        Returns:
+            List of commit objects, newest first
+        """
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}/commits?sha={branch}&limit={limit}")
+
+        logger.debug(f"Fetching commits from {url}")
+
+        commits = []
+        found_marker = False
+
+        async with self.get_session() as session:
+            # Fetch commits (paginated if needed)
+            page = 1
+            max_pages = 10  # Safety limit
+
+            while page <= max_pages and not found_marker:
+                paginated_url = f"{url}&page={page}"
+
+                async with session.get(paginated_url) as response:
+                    resp = await response.json()
+                    await self.validate_response(response, resp)
+
+                    page_commits = resp if isinstance(resp, list) else []
+
+                    if not page_commits:
+                        break  # No more commits
+
+                    for commit in page_commits:
+                        # If we have a marker and found it, stop collecting
+                        if since_commit_sha and commit.get("sha") == since_commit_sha:
+                            found_marker = True
+                            break
+                        # Add commits until we hit the marker
+                        commits.append(commit)
+
+                    # Stop if got fewer commits than limit (last page)
+                    if len(page_commits) < limit:
+                        break
+
+                    page += 1
+
+        logger.info(f"Found {len(commits)} new commits since {since_commit_sha or 'beginning'}")
+        return commits
+
+    async def get_commit_details(self, repo: str, owner: str | None = None, commit_sha: str = None) -> dict[str, Any]:
+        """
+        Get detailed commit information including file changes.
+
+        Args:
+            repo: Repository name
+            owner: Repository owner
+            commit_sha: Commit SHA
+
+        Returns:
+            Commit object with files list
+        """
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}/git/commits/{commit_sha}")
+
+        async with self.get_session() as session:
+            async with session.get(url) as response:
+                resp = await response.json()
+                await self.validate_response(response, resp)
+                return resp
+
+    async def get_single_file(
+        self, repo: str, owner: str | None = None, file_path: str = "", branch: str = "main"
+    ) -> dict[str, Any]:
+        """
+        Get a single file from repository.
+
+        Args:
+            repo: Repository name
+            owner: Repository owner
+            file_path: Path to file in repository
+            branch: Branch name
+
+        Returns:
+            Parsed file object with content
+        """
+        owner = owner or self.owner
+        # URL encode the file path
+        from urllib.parse import quote
+
+        encoded_path = quote(file_path, safe="")
+        url = self.build_url(f"/repos/{owner}/{repo}/contents/{encoded_path}?ref={branch}")
+
+        async with self.get_session() as session:
+            async with session.get(url) as response:
+                resp = await response.json()
+                await self.validate_response(response, resp)
+
+                # Parse and return
+                return self.parse_file_rec(resp)
+
+    async def create_repository(
+        self,
+        name: str,
+        description: str = "",
+        private: bool = False,
+        organization: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Create a new repository.
+
+        If owner is specified and differs from the authenticated user, creates the repository
+        under that organization. Otherwise creates it under the authenticated user.
+
+        Args:
+            name: Repository name
+            description: Repository description
+            private: Whether the repository should be private
+            organization: Organization name to create repo under (optional)
+
+        Returns:
+            Dictionary containing the created repository information
+
+        Raises:
+            SCMException: If repository creation fails
+        """
+
+        # Build the appropriate URL based on whether we're creating for an org or user
+        if organization:
+            url = self.build_url(f"/orgs/{organization}/repos")
+        else:
+            url = self.build_url("/user/repos")
+
+        payload = {
+            "name": name,
+            "description": description,
+            "private": private,
+        }
+        owner = self.owner
+
+        async with self.get_session() as session:
+            async with session.post(url, json=payload) as response:
+                resp = await response.json()
+
+                if response.status == 201:
+                    logger.info(f"Created repository: {name}")
+                    return resp
+                elif response.status == 409:
+                    msg = f"Repository '{name}' already exists"
+                    raise SCMException(msg)
+                elif response.status == 404:
+                    msg = f"Organization '{organization}' or user '{owner}' not found"
+                    raise SCMException(msg)
+                elif response.status == 403:
+                    msg = f"Permission denied to create repository under '{owner}'"
+                    raise SCMException(msg)
+                else:
+                    if isinstance(resp, dict) and "message" in resp:
+                        raise SCMException(resp["message"])
+                    raise SCMException(f"Failed to create repository: {response.status}")
+
+    async def delete_repository(self, repo: str, owner: str | None = None) -> bool:
+        """
+        Delete a repository.
+
+        Args:
+            repo: Repository name
+            owner: Repository owner (defaults to instance owner)
+
+        Returns:
+            True if deletion was successful
+
+        Raises:
+            SCMException: If repository deletion fails
+        """
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}")
+
+        async with self.get_session() as session:
+            async with session.delete(url) as response:
+                if response.status == 204:
+                    logger.info(f"Deleted repository: {owner}/{repo}")
+                    return True
+                elif response.status == 404:
+                    msg = f"Repository '{owner}/{repo}' not found"
+                    raise SCMException(msg)
+                elif response.status == 403:
+                    msg = f"Permission denied to delete repository '{owner}/{repo}'"
+                    raise SCMException(msg)
+                else:
+                    resp = await response.json()
+                    if isinstance(resp, dict) and "message" in resp:
+                        raise SCMException(resp["message"])
+                    raise SCMException(f"Failed to delete repository: {response.status}")
+
+    async def create_issue(
+        self,
+        repo: str,
+        title: str,
+        body: str = "",
+        owner: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Create a new issue in a repository.
+
+        Args:
+            repo: Repository name
+            title: Issue title
+            body: Issue body/description
+            owner: Repository owner (defaults to instance owner)
+
+        Returns:
+            Dictionary containing the created issue information
+
+        Raises:
+            SCMException: If issue creation fails
+        """
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}/issues")
+
+        payload = {
+            "title": title,
+            "body": body,
+        }
+
+        async with self.get_session() as session:
+            async with session.post(url, json=payload) as response:
+                resp = await response.json()
+
+                if response.status == 201:
+                    logger.info(f"Created issue '{title}' in {owner}/{repo}")
+                    return resp
+                elif response.status == 404:
+                    msg = f"Repository '{owner}/{repo}' not found"
+                    raise SCMException(msg)
+                elif response.status == 403:
+                    msg = f"Permission denied to create issue in '{owner}/{repo}'"
+                    raise SCMException(msg)
+                else:
+                    if isinstance(resp, dict) and "message" in resp:
+                        raise SCMException(resp["message"])
+                    raise SCMException(f"Failed to create issue: {response.status}")
+
+    async def create_file(
+        self,
+        repo: str,
+        file_path: str,
+        content: bytes | str,
+        message: str = "Add file",
+        branch: str = "main",
+        owner: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Create or update a file in a repository.
+
+        Args:
+            repo: Repository name
+            file_path: Path to the file in the repository
+            content: File content (bytes or string)
+            message: Commit message
+            branch: Branch name (default: main)
+            owner: Repository owner (defaults to instance owner)
+
+        Returns:
+            Dictionary containing the commit information
+
+        Raises:
+            SCMException: If file creation fails
+        """
+        import base64
+
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}/contents/{file_path}")
+
+        # Encode content to base64
+        if isinstance(content, str):
+            content_bytes = content.encode("utf-8")
+        else:
+            content_bytes = content
+        content_b64 = base64.b64encode(content_bytes).decode("ascii")
+
+        payload = {
+            "content": content_b64,
+            "message": message,
+            "branch": branch,
+        }
+
+        async with self.get_session() as session:
+            async with session.post(url, json=payload) as response:
+                resp = await response.json()
+
+                if response.status in (200, 201):
+                    logger.info(f"Created file '{file_path}' in {owner}/{repo}")
+                    return resp
+                elif response.status == 404:
+                    msg = f"Repository '{owner}/{repo}' not found"
+                    raise SCMException(msg)
+                elif response.status == 403:
+                    msg = f"Permission denied to create file in '{owner}/{repo}'"
+                    raise SCMException(msg)
+                elif response.status == 422:
+                    msg = f"File '{file_path}' already exists or invalid request"
+                    raise SCMException(msg)
+                else:
+                    if isinstance(resp, dict) and "message" in resp:
+                        raise SCMException(resp["message"])
+                    raise SCMException(f"Failed to create file: {response.status}")

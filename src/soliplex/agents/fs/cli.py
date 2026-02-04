@@ -83,10 +83,16 @@ def run(
 
     If a file is provided, it will be treated as an inventory.json config file.
     If a directory is provided, a config will be built from the directory contents.
-    The config_file parameter now handles both cases internally via resolve_config_path.
     """
+    if start_workflows:
+        if workflow_definition_id is None:
+            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
+        if param_set_id is None:
+            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
     print(f"loading {config_file} source={source}")
-    # Note: Path resolution now handled by app.load_inventory via resolve_config_path
+    if os.path.exists(config_file) and os.path.isdir(config_file):
+        print(f"build config file for {config_file}")
+        config_file = _build_config(config_file)
     res = asyncio.run(
         app.load_inventory(
             config_file,

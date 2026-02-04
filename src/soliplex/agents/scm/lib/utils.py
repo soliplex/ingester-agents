@@ -26,7 +26,7 @@ def flatten_list(nested_list: list[Any]) -> list[Any]:
 
 def compute_file_hash(content: bytes) -> str:
     """
-    Compute SHA3-256 hash of file content.
+    Compute SHA-256 hash of file content.
 
     Args:
         content: File content as bytes
@@ -34,7 +34,7 @@ def compute_file_hash(content: bytes) -> str:
     Returns:
         Hexadecimal hash string
     """
-    return hashlib.sha3_256(content, usedforsecurity=False).hexdigest()
+    return hashlib.sha256(content, usedforsecurity=False).hexdigest()
 
 
 def decode_base64_if_needed(content: bytes | str) -> bytes:

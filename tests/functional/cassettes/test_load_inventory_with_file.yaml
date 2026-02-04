@@ -1,0 +1,472 @@
+interactions:
+- request:
+    body:
+      description: Repository with file for load_inventory test
+      name: vcr-test-inventory-file
+      private: false
+    headers: {}
+    method: POST
+    uri: http://localhost:3000/api/v1/user/repos
+  response:
+    body:
+      string: '{"id":8,"owner":{"id":1,"login":"gitea_admin","login_name":"","source_id":0,"full_name":"","email":"bryantd95@gmail.com","avatar_url":"http://localhost:3000/avatar/93330982c2376665c83d2a392baaaab5","html_url":"http://localhost:3000/gitea_admin","language":"","is_admin":false,"last_login":"0001-01-01T00:00:00Z","created":"2026-01-16T21:34:12Z","restricted":false,"active":false,"prohibit_login":false,"location":"","website":"","description":"","visibility":"public","followers_count":0,"following_count":0,"starred_repos_count":0,"username":"gitea_admin"},"name":"vcr-test-inventory-file","full_name":"gitea_admin/vcr-test-inventory-file","description":"Repository
+        with file for load_inventory test","empty":true,"private":false,"fork":false,"template":false,"mirror":false,"size":22,"language":"","languages_url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/languages","html_url":"http://localhost:3000/gitea_admin/vcr-test-inventory-file","url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file","link":"","ssh_url":"git@127.0.0.1:gitea_admin/vcr-test-inventory-file.git","clone_url":"http://localhost:3000/gitea_admin/vcr-test-inventory-file.git","original_url":"","website":"","stars_count":0,"forks_count":0,"watchers_count":1,"open_issues_count":0,"open_pr_counter":0,"release_counter":0,"default_branch":"main","archived":false,"created_at":"2026-02-03T23:15:53Z","updated_at":"2026-02-03T23:15:53Z","archived_at":"1970-01-01T00:00:00Z","permissions":{"admin":true,"push":true,"pull":true},"has_code":false,"has_issues":true,"internal_tracker":{"enable_time_tracker":true,"allow_only_contributors_to_track_time":true,"enable_issue_dependencies":true},"has_wiki":true,"has_pull_requests":true,"has_projects":true,"projects_mode":"all","has_releases":true,"has_packages":true,"has_actions":true,"ignore_whitespace_conflicts":false,"allow_merge_commits":true,"allow_rebase":true,"allow_rebase_explicit":true,"allow_squash_merge":true,"allow_fast_forward_only_merge":true,"allow_rebase_update":true,"allow_manual_merge":false,"autodetect_manual_merge":false,"default_delete_branch_after_merge":false,"default_merge_style":"merge","default_allow_maintainer_edit":false,"avatar_url":"","internal":false,"mirror_interval":"","object_format_name":"sha1","mirror_updated":"0001-01-01T00:00:00Z","topics":[],"licenses":[]}
+
+        '
+    headers:
+      Cache-Control:
+      - max-age=0, private, must-revalidate, no-transform
+      Content-Type:
+      - application/json;charset=utf-8
+      Date:
+      - Tue, 03 Feb 2026 23:15:53 GMT
+      Transfer-Encoding:
+      - chunked
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+    status:
+      code: 201
+      message: Created
+- request:
+    body:
+      branch: main
+      content: dGhpcyBpcyBhIHRlc3QgZmlsZQ==
+      message: Add test file
+    headers: {}
+    method: POST
+    uri: http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/contents/test.md
+  response:
+    body:
+      string: '{"content":{"name":"test.md","path":"test.md","sha":"68a4528a66e893157754557f235a5088de0fb74f","last_commit_sha":"1333d7de908ef94664cd2915d4c285500d3f8d89","last_committer_date":"2026-02-03T23:15:53Z","last_author_date":"2026-02-03T23:15:53Z","type":"file","size":19,"encoding":"base64","content":"dGhpcyBpcyBhIHRlc3QgZmlsZQ==","target":null,"url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/contents/test.md?ref=main","html_url":"http://localhost:3000/gitea_admin/vcr-test-inventory-file/src/branch/main/test.md","git_url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/git/blobs/68a4528a66e893157754557f235a5088de0fb74f","download_url":"http://localhost:3000/gitea_admin/vcr-test-inventory-file/raw/branch/main/test.md","submodule_git_url":null,"_links":{"self":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/contents/test.md?ref=main","git":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/git/blobs/68a4528a66e893157754557f235a5088de0fb74f","html":"http://localhost:3000/gitea_admin/vcr-test-inventory-file/src/branch/main/test.md"}},"commit":{"url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/git/commits/1333d7de908ef94664cd2915d4c285500d3f8d89","sha":"1333d7de908ef94664cd2915d4c285500d3f8d89","created":"0001-01-01T00:00:00Z","html_url":"http://localhost:3000/gitea_admin/vcr-test-inventory-file/commit/1333d7de908ef94664cd2915d4c285500d3f8d89","author":{"name":"gitea_admin","email":"bryantd95@gmail.com","date":"2026-02-03T23:15:53Z"},"committer":{"name":"gitea_admin","email":"bryantd95@gmail.com","date":"2026-02-03T23:15:53Z"},"parents":[],"message":"Add
+        test file\n","tree":{"url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/git/trees/fa9cb52ce09e47e67fd743e80ec22199c6538953","sha":"fa9cb52ce09e47e67fd743e80ec22199c6538953","created":"0001-01-01T00:00:00Z"}},"verification":{"verified":false,"reason":"gpg.error.not_signed_commit","signature":"","signer":null,"payload":""}}
+
+        '
+    headers:
+      Cache-Control:
+      - max-age=0, private, must-revalidate, no-transform
+      Content-Length:
+      - '2048'
+      Content-Type:
+      - application/json;charset=utf-8
+      Date:
+      - Tue, 03 Feb 2026 23:15:54 GMT
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+    status:
+      code: 201
+      message: Created
+- request:
+    body: null
+    headers: {}
+    method: GET
+    uri: http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/contents?ref=main
+  response:
+    body:
+      string: '[{"name":"test.md","path":"test.md","sha":"68a4528a66e893157754557f235a5088de0fb74f","last_commit_sha":"1333d7de908ef94664cd2915d4c285500d3f8d89","last_committer_date":"2026-02-03T23:15:53Z","last_author_date":"2026-02-03T23:15:53Z","type":"file","size":19,"encoding":null,"content":null,"target":null,"url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/contents/test.md?ref=main","html_url":"http://localhost:3000/gitea_admin/vcr-test-inventory-file/src/branch/main/test.md","git_url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/git/blobs/68a4528a66e893157754557f235a5088de0fb74f","download_url":"http://localhost:3000/gitea_admin/vcr-test-inventory-file/raw/branch/main/test.md","submodule_git_url":null,"_links":{"self":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/contents/test.md?ref=main","git":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/git/blobs/68a4528a66e893157754557f235a5088de0fb74f","html":"http://localhost:3000/gitea_admin/vcr-test-inventory-file/src/branch/main/test.md"}}]
+
+        '
+    headers:
+      Cache-Control:
+      - max-age=0, private, must-revalidate, no-transform
+      Content-Length:
+      - '1100'
+      Content-Type:
+      - application/json;charset=utf-8
+      Date:
+      - Tue, 03 Feb 2026 23:15:54 GMT
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers: {}
+    method: GET
+    uri: http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/contents/test.md?ref=main
+  response:
+    body:
+      string: '{"name":"test.md","path":"test.md","sha":"68a4528a66e893157754557f235a5088de0fb74f","last_commit_sha":"1333d7de908ef94664cd2915d4c285500d3f8d89","last_committer_date":"2026-02-03T23:15:53Z","last_author_date":"2026-02-03T23:15:53Z","type":"file","size":19,"encoding":"base64","content":"dGhpcyBpcyBhIHRlc3QgZmlsZQ==","target":null,"url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/contents/test.md?ref=main","html_url":"http://localhost:3000/gitea_admin/vcr-test-inventory-file/src/branch/main/test.md","git_url":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/git/blobs/68a4528a66e893157754557f235a5088de0fb74f","download_url":"http://localhost:3000/gitea_admin/vcr-test-inventory-file/raw/branch/main/test.md","submodule_git_url":null,"_links":{"self":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/contents/test.md?ref=main","git":"http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/git/blobs/68a4528a66e893157754557f235a5088de0fb74f","html":"http://localhost:3000/gitea_admin/vcr-test-inventory-file/src/branch/main/test.md"}}
+
+        '
+    headers:
+      Cache-Control:
+      - max-age=0, private, must-revalidate, no-transform
+      Content-Length:
+      - '1128'
+      Content-Type:
+      - application/json;charset=utf-8
+      Date:
+      - Tue, 03 Feb 2026 23:15:54 GMT
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers: {}
+    method: GET
+    uri: http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/issues?page=1&status=all
+  response:
+    body:
+      string: '[]
+
+        '
+    headers:
+      Access-Control-Expose-Headers:
+      - X-Total-Count
+      Cache-Control:
+      - max-age=0, private, must-revalidate, no-transform
+      Content-Length:
+      - '3'
+      Content-Type:
+      - application/json;charset=utf-8
+      Date:
+      - Tue, 03 Feb 2026 23:15:54 GMT
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+      X-Total-Count:
+      - '0'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers: {}
+    method: GET
+    uri: http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file/issues/comments?page=1
+  response:
+    body:
+      string: '[]
+
+        '
+    headers:
+      Access-Control-Expose-Headers:
+      - X-Total-Count
+      Cache-Control:
+      - max-age=0, private, must-revalidate, no-transform
+      Content-Length:
+      - '3'
+      Content-Type:
+      - application/json;charset=utf-8
+      Date:
+      - Tue, 03 Feb 2026 23:15:55 GMT
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+      X-Total-Count:
+      - '0'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: !!python/object:aiohttp.formdata.FormData
+      _charset: null
+      _fields:
+      - !!python/tuple
+        - !!python/object/apply:multidict._multidict.MultiDict
+          - - !!python/tuple
+              - name
+              - source
+        - {}
+        - gitea:gitea_admin:vcr-test-inventory-file
+      - !!python/tuple
+        - !!python/object/apply:multidict._multidict.MultiDict
+          - - !!python/tuple
+              - name
+              - hashes
+        - {}
+        - '{"test.md": "5881707e54b0112f901bc83a1ffbacac8fab74ea46a6f706a3efc5f7d4c1c625"}'
+      _is_multipart: false
+      _quote_fields: true
+      _writer: !!python/object:aiohttp.multipart.MultipartWriter
+        _boundary: !!binary |
+          ZjlkMThhYTRiYjc0NDA5YTk0MTA1NGU4MjllMzYwNGM=
+        _encoding: null
+        _filename: null
+        _headers: !!python/object/apply:multidict._multidict.CIMultiDict
+        - - !!python/tuple
+            - !!python/object/apply:multidict._multidict.istr
+              - Content-Type
+            - multipart/form-data; boundary=f9d18aa4bb74409a941054e829e3604c
+        _is_form_data: true
+        _parts: []
+        _value: null
+    headers:
+      User-Agent:
+      - soliplex-agent
+    method: POST
+    uri: http://localhost:8000/api/v1/source-status
+  response:
+    body:
+      string: '{"test.md":{"hash":"5881707e54b0112f901bc83a1ffbacac8fab74ea46a6f706a3efc5f7d4c1c625","status":"new"}}'
+    headers:
+      Content-Length:
+      - '102'
+      Content-Type:
+      - application/json
+      Date:
+      - Tue, 03 Feb 2026 23:15:54 GMT
+      Server:
+      - uvicorn
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      User-Agent:
+      - soliplex-agent
+    method: GET
+    uri: http://localhost:8000/api/v1/batch/
+  response:
+    body:
+      string: '[{"source":"gitea:gitea_admin:test-repo","name":"gitea:gitea_admin:test-repo","completed_date":null,"id":1,"start_date":"2026-02-03T21:24:53.437774","batch_params":{},"duration":null},{"source":"gitea:gitea_admin:issues_only","name":"gitea:gitea_admin:issues_only","completed_date":null,"id":2,"start_date":"2026-02-03T23:06:56.048060","batch_params":{},"duration":null}]'
+    headers:
+      Content-Length:
+      - '371'
+      Content-Type:
+      - application/json
+      Date:
+      - Tue, 03 Feb 2026 23:15:54 GMT
+      Server:
+      - uvicorn
+    status:
+      code: 200
+      message: OK
+- request:
+    body: !!python/object:aiohttp.formdata.FormData
+      _charset: null
+      _fields:
+      - !!python/tuple
+        - !!python/object/apply:multidict._multidict.MultiDict
+          - - !!python/tuple
+              - name
+              - source
+        - {}
+        - gitea:gitea_admin:vcr-test-inventory-file
+      - !!python/tuple
+        - !!python/object/apply:multidict._multidict.MultiDict
+          - - !!python/tuple
+              - name
+              - name
+        - {}
+        - gitea:gitea_admin:vcr-test-inventory-file
+      _is_multipart: false
+      _quote_fields: true
+      _writer: !!python/object:aiohttp.multipart.MultipartWriter
+        _boundary: !!binary |
+          NTc0ZDkxYWY4YzE0NDdmZWEzZDg1YmNkZjVlNjAwNTQ=
+        _encoding: null
+        _filename: null
+        _headers: !!python/object/apply:multidict._multidict.CIMultiDict
+        - - !!python/tuple
+            - !!python/object/apply:multidict._multidict.istr
+              - Content-Type
+            - multipart/form-data; boundary=574d91af8c1447fea3d85bcdf5e60054
+        _is_form_data: true
+        _parts: []
+        _value: null
+    headers:
+      User-Agent:
+      - soliplex-agent
+    method: POST
+    uri: http://localhost:8000/api/v1/batch/
+  response:
+    body:
+      string: '{"batch_id":3}'
+    headers:
+      Content-Length:
+      - '14'
+      Content-Type:
+      - application/json
+      Date:
+      - Tue, 03 Feb 2026 23:15:54 GMT
+      Server:
+      - uvicorn
+    status:
+      code: 201
+      message: Created
+- request:
+    body: !!python/object:aiohttp.formdata.FormData
+      _charset: null
+      _fields: []
+      _is_multipart: true
+      _quote_fields: true
+      _writer: !!python/object:aiohttp.multipart.MultipartWriter
+        _boundary: !!binary |
+          NWM5NmY5NWE5MzkzNDYxZDhmNjA3ZTkxODI2MzMwZDQ=
+        _consumed: true
+        _encoding: null
+        _filename: null
+        _headers: !!python/object/apply:multidict._multidict.CIMultiDict
+        - - !!python/tuple
+            - !!python/object/apply:multidict._multidict.istr
+              - Content-Type
+            - multipart/form-data; boundary=5c96f95a9393461d8f607e91826330d4
+        _is_form_data: true
+        _parts:
+        - !!python/tuple
+          - !!python/object:aiohttp.payload.StringPayload
+            _encoding: utf-8
+            _filename: null
+            _headers: !!python/object/apply:multidict._multidict.CIMultiDict
+            - - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Type
+                - text/plain; charset=utf-8
+              - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Disposition
+                - form-data; name="source"
+            _size: 41
+            _value: !!binary |
+              Z2l0ZWE6Z2l0ZWFfYWRtaW46dmNyLXRlc3QtaW52ZW50b3J5LWZpbGU=
+          - null
+          - null
+        - !!python/tuple
+          - !!python/object:aiohttp.payload.StringPayload
+            _encoding: utf-8
+            _filename: null
+            _headers: !!python/object/apply:multidict._multidict.CIMultiDict
+            - - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Type
+                - text/plain; charset=utf-8
+              - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Disposition
+                - form-data; name="source_uri"
+            _size: 7
+            _value: !!binary |
+              dGVzdC5tZA==
+          - null
+          - null
+        - !!python/tuple
+          - !!python/object:aiohttp.payload.StringPayload
+            _encoding: utf-8
+            _filename: null
+            _headers: !!python/object/apply:multidict._multidict.CIMultiDict
+            - - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Type
+                - text/plain; charset=utf-8
+              - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Disposition
+                - form-data; name="batch_id"
+            _size: 1
+            _value: !!binary |
+              Mw==
+          - null
+          - null
+        - !!python/tuple
+          - !!python/object:aiohttp.payload.StringPayload
+            _encoding: utf-8
+            _filename: null
+            _headers: !!python/object/apply:multidict._multidict.CIMultiDict
+            - - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Type
+                - text/plain; charset=utf-8
+              - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Disposition
+                - form-data; name="doc_meta"
+            _size: 142
+            _value: !!binary |
+              eyJsYXN0X21vZGlmaWVkX2RhdGUiOiAiMjAyNi0wMi0wM1QyMzoxNTo1M1oiLCAiY29udGVudC10
+              eXBlIjogInRleHQvbWFya2Rvd24iLCAibGFzdF9jb21taXRfc2hhIjogIjEzMzNkN2RlOTA4ZWY5
+              NDY2NGNkMjkxNWQ0YzI4NTUwMGQzZjhkODkifQ==
+          - null
+          - null
+        - !!python/tuple
+          - !!python/object:aiohttp.payload.StringPayload
+            _encoding: utf-8
+            _filename: null
+            _headers: !!python/object/apply:multidict._multidict.CIMultiDict
+            - - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Type
+                - text/plain; charset=utf-8
+              - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Disposition
+                - form-data; name="mime_type"
+            _size: 13
+            _value: !!binary |
+              dGV4dC9tYXJrZG93bg==
+          - null
+          - null
+        - !!python/tuple
+          - !!python/object:aiohttp.payload.BytesPayload
+            _encoding: null
+            _filename: null
+            _headers: !!python/object/apply:multidict._multidict.CIMultiDict
+            - - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Type
+                - binary/octet-stream
+              - !!python/tuple
+                - !!python/object/apply:multidict._multidict.istr
+                  - Content-Disposition
+                - form-data; name="file"; filename="test.md"
+            _size: 19
+            _value: !!binary |
+              dGhpcyBpcyBhIHRlc3QgZmlsZQ==
+          - null
+          - null
+        _value: null
+    headers:
+      User-Agent:
+      - soliplex-agent
+    method: POST
+    uri: http://localhost:8000/api/v1/document/ingest-document
+  response:
+    body:
+      string: '{"batch_id":3,"document_uri":"test.md","document_hash":"sha256-5881707e54b0112f901bc83a1ffbacac8fab74ea46a6f706a3efc5f7d4c1c625","source":"gitea:gitea_admin:vcr-test-inventory-file","uri_id":20}'
+    headers:
+      Content-Length:
+      - '194'
+      Content-Type:
+      - application/json
+      Date:
+      - Tue, 03 Feb 2026 23:15:56 GMT
+      Server:
+      - uvicorn
+    status:
+      code: 201
+      message: Created
+- request:
+    body: null
+    headers: {}
+    method: DELETE
+    uri: http://localhost:3000/api/v1/repos/gitea_admin/vcr-test-inventory-file
+  response:
+    body:
+      string: ''
+    headers:
+      Cache-Control:
+      - max-age=0, private, must-revalidate, no-transform
+      Date:
+      - Tue, 03 Feb 2026 23:15:56 GMT
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - SAMEORIGIN
+    status:
+      code: 204
+      message: No Content
+version: 1

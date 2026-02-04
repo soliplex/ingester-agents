@@ -1,6 +1,6 @@
+import datetime
 import hashlib
 import logging
-from pathlib import Path
 
 from soliplex.agents.scm.base import BaseSCMProvider
 
@@ -37,8 +37,10 @@ async def load_inventory(
     data = await get_data(scm, repo_name, owner)
 
     source = f"{scm.value}:{owner}:{repo_name}"
+
     to_process = await client.check_status(data, source)
-    ret = {"inventory": data, "to_process": to_process}
+    ingested = []
+    ret = {"inventory": data, "to_process": to_process, "ingested": ingested}
     logger.info(f"found {len(to_process)} to process")
     if len(to_process) == 0:
         logger.info("nothing to process. exiting")
@@ -54,8 +56,9 @@ async def load_inventory(
             source,
         )
     logger.info(f"batch_id={batch_id}")
+
     errors = []
-    ingested = []
+
     for row in to_process:
         meta = row["metadata"].copy()
         for k in [
@@ -74,7 +77,7 @@ async def load_inventory(
             mime_type = row["metadata"]["content-type"]
 
         res = await client.do_ingest(
-            row["body"],
+            row["file_bytes"],
             row["uri"],
             meta,
             source,
@@ -98,41 +101,25 @@ async def load_inventory(
             param_set_id,
             priority,
         )
+
     ret["ingested"] = ingested
     ret["errors"] = errors
     ret["workflow_result"] = wf_res
     return ret
 
 
-async def get_data(scm: str, repo_name: str, owner: str = None):
+async def get_issues(scm: str, repo_name: str, owner: str = None, since: datetime.datetime | None = None):
+    """
+    Get all issues for a repository formatted for ingestion
+
+    """
     impl = get_scm(scm)
-
-    allowed_extensions = settings.extensions
-    files0 = await impl.list_repo_files(repo_name, owner, allowed_extensions=allowed_extensions)
-    logger.debug(f"found {len(files0)} ")
-    files = [x for x in files0 if "uri" in x and x["uri"] is not None]
-    logger.debug(f"after uri check found {len(files)} ")
-    issues = await impl.list_issues(repo=repo_name, owner=owner, add_comments=True)
-    doc_data = []
-
-    filtered_files = [x for x in files if Path(x["uri"]).suffix.lstrip(".") in allowed_extensions]
-    for f in filtered_files:
-        txt = f["file_bytes"]
-        row = {
-            "body": txt,
-            "uri": f["uri"],
-            "sha256": hashlib.sha256(f["file_bytes"], usedforsecurity=False).hexdigest(),
-            "metadata": {
-                "last_modified_date": f["last_updated"],
-                "content-type": f["content-type"],
-            },
-        }
-        doc_data.append(row)
+    issues = await impl.list_issues(repo=repo_name, owner=owner, add_comments=True, since=since)
+    formatted = []
     for issue in issues:
         txt = await templates.render_issue(issue, owner, repo_name)
-
         row = {
-            "body": txt,
+            "file_bytes": txt.encode("utf-8"),
             "uri": f"/{owner}/{repo_name}/issues/{issue['number']}",
             "title": issue["title"],
             "metadata": {
@@ -144,8 +131,243 @@ async def get_data(scm: str, repo_name: str, owner: str = None):
                 "content-type": "text/markdown",
             },
         }
-        row["sha256"] = hashlib.sha256(row["body"].encode("utf-8"), usedforsecurity=False).hexdigest()
+        row["sha256"] = hashlib.sha256(row["file_bytes"], usedforsecurity=False).hexdigest()
+        formatted.append(row)
+    return formatted
 
+
+async def get_data(scm: str, repo_name: str, owner: str = None):
+    impl = get_scm(scm)
+
+    allowed_extensions = settings.extensions
+    files = await impl.list_repo_files(repo_name, owner, allowed_extensions=allowed_extensions)
+    files = sorted(files, key=lambda x: x["last_updated"], reverse=True)
+    doc_data = []
+    filtered_files = [x for x in files if x["name"].split(".")[-1] in allowed_extensions]
+    for f in filtered_files:
+        row = {
+            "file_bytes": f["file_bytes"],
+            "uri": f["uri"],
+            "sha256": f["sha256"],
+            "metadata": {
+                "last_modified_date": f["last_updated"],
+                "content-type": f["content-type"],
+                "last_commit_sha": f["last_commit_sha"],
+            },
+        }
         doc_data.append(row)
 
+    doc_data.extend(await get_issues(scm, repo_name, owner))
     return doc_data
+
+
+async def incremental_sync(
+    scm: str,
+    repo_name: str,
+    owner: str = None,
+    branch: str = "main",
+    priority: int = 0,
+    start_workflows: bool = False,
+    workflow_definition_id: str | None = None,
+    param_set_id: str | None = None,
+):
+    """
+    Perform incremental sync based on commit history.
+
+    Only fetches and processes files that changed since last sync.
+    Falls back to full sync if no sync state exists.
+
+    Args:
+        scm: SCM type (gitea/github)
+        repo_name: Repository name
+        owner: Repository owner
+        branch: Branch to sync
+        priority: Workflow priority
+        start_workflows: Whether to start workflows after ingestion
+        workflow_definition_id: Optional workflow ID
+        param_set_id: Optional parameter set ID
+
+    Returns:
+        Sync result dict with statistics
+    """
+    impl = get_scm(scm)
+    source = f"{scm.value}:{owner}:{repo_name}"
+
+    logger.info(f"Starting incremental sync for {source}")
+
+    # Get last sync state
+    sync_state = await client.get_sync_state(source)
+
+    if "error" in sync_state:
+        logger.error(f"Error getting sync state: {sync_state['error']}")
+        return {"error": sync_state["error"]}
+
+    last_commit_sha = sync_state.get("last_commit_sha")
+
+    if not last_commit_sha:
+        logger.info("No previous sync state found, performing full sync")
+        inventory_res = await load_inventory(
+            scm,
+            repo_name,
+            owner,
+            priority=priority,
+            start_workflows=start_workflows,
+            workflow_definition_id=workflow_definition_id,
+            param_set_id=param_set_id,
+        )
+
+        latest_commit_sha = None
+
+        if len(inventory_res["inventory"]) > 0:
+            for i in inventory_res["inventory"]:
+                if "metadata" in i:
+                    meta = i.get("metadata")
+                    if meta and "last_commit_sha" in meta:
+                        latest_commit_sha = meta["last_commit_sha"]
+                        break
+
+        update_result = await client.update_sync_state(source, latest_commit_sha, branch=branch, metadata={})
+
+        return inventory_res
+
+    issues = await get_issues(scm, repo_name, owner, since=sync_state.get("last_sync_date"))
+    logger.info(f"found {len(issues)} files to ingest")
+    # Fetch commits since last sync
+    logger.info(f"Last sync was at commit {last_commit_sha}")
+
+    new_commits = await impl.list_commits_since(repo_name, owner, since_commit_sha=last_commit_sha, branch=branch)
+
+    if not new_commits and not issues:
+        logger.info("No new commits since last sync, repository is up to date")
+        return {
+            "status": "up-to-date",
+            "commits_processed": 0,
+            "files_changed": 0,
+            "ingested": [],
+            "errors": [],
+        }
+
+    logger.info(f"Found {len(new_commits)} new commits to process")
+
+    # Extract changed file paths from commits
+    changed_files = set()
+    removed_files = set()
+
+    for commit in new_commits:
+        # Get detailed commit info with file list
+        try:
+            commit_detail = await impl.get_commit_details(repo_name, owner, commit["sha"])
+
+            # Extract file changes (format varies by SCM, handle both)
+            files_list = commit_detail.get("files", [])
+
+            for file in files_list:
+                file_path = file.get("filename") or file.get("path") or file.get("name")
+                status = file.get("status", "")
+
+                if status in ("removed", "deleted"):
+                    removed_files.add(file_path)
+                    changed_files.discard(file_path)  # Don't fetch if removed
+                else:
+                    if file_path:
+                        changed_files.add(file_path)
+
+        except Exception as e:
+            logger.exception(f"Error processing commit {commit.get('sha')}", exc_info=e)
+            continue
+
+    logger.info(f"Files changed: {len(changed_files)}, removed: {len(removed_files)}")
+
+    # Fetch only changed files
+    allowed_extensions = settings.extensions
+    file_data = []
+
+    for file_path in changed_files:
+        # Check if extension is allowed
+        ext = file_path.split(".")[-1] if "." in file_path else ""
+        if ext not in allowed_extensions:
+            logger.debug(f"Skipping {file_path} - extension '{ext}' not in allowed list")
+            continue
+
+        try:
+            file = await impl.get_single_file(repo_name, owner, file_path, branch)
+            file_data.append(file)
+        except Exception as e:
+            logger.exception(f"Failed to fetch {file_path}", exc_info=e)
+
+    logger.info(f"Fetched {len(file_data)} changed files with allowed extensions")
+
+    # Get or create batch
+    found_batch_id = await client.find_batch_for_source(source)
+    if found_batch_id:
+        logger.info(f"Using existing batch {found_batch_id}")
+        batch_id = found_batch_id
+    else:
+        logger.info("Creating new batch")
+        batch_id = await client.create_batch(source, source)
+
+    # Ingest changed files
+    errors = []
+    ingested = []
+
+    file_data.extend(issues)
+
+    for file in file_data:
+        try:
+            meta = file.get("metadata", {}).copy()
+            # Clean metadata
+            for k in ["path", "sha256", "size", "source", "batch_id", "source_uri"]:
+                meta.pop(k, None)
+
+            mime_type = file.get("content-type") or meta.get("content-type", "application/octet-stream")
+
+            res = await client.do_ingest(file["file_bytes"], file["uri"], meta, source, batch_id, mime_type)
+
+            if "error" in res:
+                logger.error(f"Error ingesting {file['uri']}: {res['error']}")
+                errors.append({"uri": file["uri"], "error": res["error"]})
+            else:
+                ingested.append(file["uri"])
+                logger.info(f"Ingested {file['uri']}")
+
+        except Exception as e:
+            logger.exception(f"Failed to ingest {file.get('uri', 'unknown')}")
+            errors.append({"uri": file.get("uri", "unknown"), "error": str(e)})
+
+    # Start workflows if requested and no errors
+    wf_res = None
+    if len(errors) == 0 and start_workflows and len(ingested) > 0:
+        logger.info("Starting workflows")
+        wf_res = await client.do_start_workflows(batch_id, workflow_definition_id, param_set_id, priority)
+
+    # Update sync state with latest commit
+    latest_commit_sha = last_commit_sha
+    if new_commits:
+        latest_commit_sha = new_commits[0]["sha"]
+    update_result = await client.update_sync_state(
+        source,
+        latest_commit_sha,
+        branch=branch,
+        metadata={
+            "commits_processed": len(new_commits),
+            "files_changed": len(changed_files),
+            "files_removed": len(removed_files),
+            "files_ingested": len(ingested),
+        },
+    )
+
+    if "error" in update_result:
+        logger.error(f"Error updating sync state: {update_result['error']}")
+    else:
+        logger.info(f"Incremental sync complete. Updated sync state to {latest_commit_sha}")
+
+    return {
+        "status": "synced",
+        "commits_processed": len(new_commits),
+        "files_changed": len(changed_files),
+        "files_removed": len(removed_files),
+        "ingested": ingested,
+        "errors": errors,
+        "workflow_result": wf_res,
+        "new_commit_sha": latest_commit_sha,
+    }
