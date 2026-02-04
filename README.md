@@ -826,10 +826,14 @@ soliplex.agents/
 │   │   └── routes/
 │   │       ├── __init__.py
 │   │       ├── fs.py       # Filesystem API endpoints
-│   │       └── scm.py      # SCM API endpoints
+│   │       ├── scm.py      # SCM API endpoints
+│   │       └── webdav.py   # WebDAV API endpoints
 │   ├── fs/                 # Filesystem agent
 │   │   ├── app.py          # Core filesystem logic
 │   │   └── cli.py          # Filesystem CLI commands
+│   ├── webdav/             # WebDAV agent
+│   │   ├── app.py          # Core WebDAV logic
+│   │   └── cli.py          # WebDAV CLI commands
 │   └── scm/                # SCM agent
 │       ├── app.py          # Core SCM logic
 │       ├── cli.py          # SCM CLI commands
@@ -851,8 +855,8 @@ soliplex.agents/
 ### Key Components
 
 **CLI Layer:**
-- `cli.py` - Main entry point with `fs`, `scm`, and `serve` commands
-- Agent-specific CLI commands in `fs/cli.py` and `scm/cli.py`
+- `cli.py` - Main entry point with `fs`, `scm`, `webdav`, and `serve` commands
+- Agent-specific CLI commands in `fs/cli.py`, `webdav/cli.py`, and `scm/cli.py`
 
 **Server Layer:**
 - `server/` - FastAPI application
@@ -861,6 +865,7 @@ soliplex.agents/
 
 **Agent Layer:**
 - `fs/app.py` - Filesystem operations (shared by CLI and API)
+- `webdav/app.py` - WebDAV operations (shared by CLI and API)
 - `scm/app.py` - SCM operations (shared by CLI and API)
 - `client.py` - HTTP client for Soliplex Ingester API
 
