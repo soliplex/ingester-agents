@@ -141,7 +141,10 @@ async def get_data(scm: str, repo_name: str, owner: str = None):
 
     allowed_extensions = settings.extensions
     files = await impl.list_repo_files(repo_name, owner, allowed_extensions=allowed_extensions)
-    files = sorted(files, key=lambda x: x["last_updated"], reverse=True)
+    try:
+        files = sorted(files, key=lambda x: x.get("last_updated", datetime.datetime.utcnow()), reverse=True)
+    except Exception as e:
+        logger.exception("Error sorting files", exc_info=e)
     doc_data = []
     filtered_files = [x for x in files if x["name"].split(".")[-1] in allowed_extensions]
     for f in filtered_files:
