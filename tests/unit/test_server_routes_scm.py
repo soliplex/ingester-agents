@@ -424,3 +424,245 @@ def test_invalid_scm_value_run_inventory(client):
         },
     )
     assert response.status_code == 422
+
+
+# Tests for /api/v1/scm/incremental-sync endpoint
+
+
+def test_incremental_sync_github_success(client):
+    """Test successful GitHub incremental sync."""
+    with patch("soliplex.agents.server.routes.scm.scm_app") as mock_scm_app:
+        mock_scm_app.incremental_sync = AsyncMock(
+            return_value={
+                "status": "synced",
+                "commits_processed": 3,
+                "files_changed": 5,
+                "files_removed": 1,
+                "ingested": ["/owner/repo/doc.md", "/owner/repo/guide.md"],
+                "errors": [],
+                "workflow_result": {"status": "started", "run_group_id": 456},
+                "new_commit_sha": "abc123def456",
+            }
+        )
+
+        response = client.post(
+            "/api/v1/scm/incremental-sync",
+            data={
+                "scm": "github",
+                "repo_name": "test-repo",
+                "owner": "test-owner",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "synced"
+        assert data["scm"] == "github"
+        assert data["repo"] == "test-repo"
+        assert data["owner"] == "test-owner"
+        assert data["branch"] == "main"
+        assert data["commits_processed"] == 3
+        assert data["files_changed"] == 5
+        assert data["files_removed"] == 1
+        assert data["ingested_count"] == 2
+        assert data["error_count"] == 0
+        assert data["new_commit_sha"] == "abc123def456"
+
+
+def test_incremental_sync_gitea_success(client):
+    """Test successful Gitea incremental sync."""
+    with patch("soliplex.agents.server.routes.scm.scm_app") as mock_scm_app:
+        mock_scm_app.incremental_sync = AsyncMock(
+            return_value={
+                "status": "synced",
+                "commits_processed": 1,
+                "files_changed": 2,
+                "files_removed": 0,
+                "ingested": ["/admin/repo/config.md"],
+                "errors": [],
+                "workflow_result": None,
+                "new_commit_sha": "xyz789",
+            }
+        )
+
+        response = client.post(
+            "/api/v1/scm/incremental-sync",
+            data={
+                "scm": "gitea",
+                "repo_name": "test-repo",
+                "owner": "admin",
+                "branch": "develop",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["scm"] == "gitea"
+        assert data["branch"] == "develop"
+
+
+def test_incremental_sync_up_to_date(client):
+    """Test incremental sync when repo is up to date."""
+    with patch("soliplex.agents.server.routes.scm.scm_app") as mock_scm_app:
+        mock_scm_app.incremental_sync = AsyncMock(
+            return_value={
+                "status": "up-to-date",
+                "commits_processed": 0,
+                "files_changed": 0,
+                "ingested": [],
+                "errors": [],
+            }
+        )
+
+        response = client.post(
+            "/api/v1/scm/incremental-sync",
+            data={
+                "scm": "github",
+                "repo_name": "test-repo",
+                "owner": "test-owner",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "up-to-date"
+        assert data["commits_processed"] == 0
+        assert data["ingested_count"] == 0
+
+
+def test_incremental_sync_with_errors(client):
+    """Test incremental sync with some errors."""
+    with patch("soliplex.agents.server.routes.scm.scm_app") as mock_scm_app:
+        mock_scm_app.incremental_sync = AsyncMock(
+            return_value={
+                "status": "synced",
+                "commits_processed": 2,
+                "files_changed": 3,
+                "files_removed": 0,
+                "ingested": ["/owner/repo/doc1.md"],
+                "errors": [{"uri": "/owner/repo/doc2.md", "error": "API error"}],
+                "workflow_result": None,
+                "new_commit_sha": "abc123",
+            }
+        )
+
+        response = client.post(
+            "/api/v1/scm/incremental-sync",
+            data={
+                "scm": "github",
+                "repo_name": "test-repo",
+                "owner": "test-owner",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["error_count"] == 1
+        assert len(data["errors"]) == 1
+
+
+def test_incremental_sync_error_response(client):
+    """Test incremental sync when an error occurs."""
+    with patch("soliplex.agents.server.routes.scm.scm_app") as mock_scm_app:
+        mock_scm_app.incremental_sync = AsyncMock(
+            return_value={
+                "error": "Failed to get sync state: connection timeout",
+            }
+        )
+
+        response = client.post(
+            "/api/v1/scm/incremental-sync",
+            data={
+                "scm": "github",
+                "repo_name": "test-repo",
+                "owner": "test-owner",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "error"
+        assert "connection timeout" in data["error"]
+
+
+def test_incremental_sync_with_all_options(client):
+    """Test incremental sync with all optional parameters."""
+    with patch("soliplex.agents.server.routes.scm.scm_app") as mock_scm_app:
+        mock_scm_app.incremental_sync = AsyncMock(
+            return_value={
+                "status": "synced",
+                "commits_processed": 1,
+                "files_changed": 1,
+                "files_removed": 0,
+                "ingested": ["/owner/repo/doc.md"],
+                "errors": [],
+                "workflow_result": {"status": "started"},
+                "new_commit_sha": "abc123",
+            }
+        )
+
+        response = client.post(
+            "/api/v1/scm/incremental-sync",
+            data={
+                "scm": "github",
+                "repo_name": "test-repo",
+                "owner": "test-owner",
+                "branch": "feature-branch",
+                "start_workflows": "false",
+                "workflow_definition_id": "wf-custom",
+                "param_set_id": "params-custom",
+                "priority": "5",
+            },
+        )
+
+        assert response.status_code == 200
+        mock_scm_app.incremental_sync.assert_called_once()
+        call_kwargs = mock_scm_app.incremental_sync.call_args[1]
+        assert call_kwargs["branch"] == "feature-branch"
+        assert call_kwargs["start_workflows"] is False
+        assert call_kwargs["workflow_definition_id"] == "wf-custom"
+        assert call_kwargs["param_set_id"] == "params-custom"
+        assert call_kwargs["priority"] == 5
+
+
+def test_incremental_sync_falls_back_to_full_sync(client):
+    """Test incremental sync falls back to full sync when no sync state exists."""
+    with patch("soliplex.agents.server.routes.scm.scm_app") as mock_scm_app:
+        # When no sync state exists, incremental_sync calls load_inventory internally
+        # and returns the full inventory result
+        mock_scm_app.incremental_sync = AsyncMock(
+            return_value={
+                "inventory": [{"uri": "/owner/repo/doc.md"}],
+                "to_process": [{"uri": "/owner/repo/doc.md"}],
+                "ingested": ["/owner/repo/doc.md"],
+                "errors": [],
+                "workflow_result": None,
+            }
+        )
+
+        response = client.post(
+            "/api/v1/scm/incremental-sync",
+            data={
+                "scm": "github",
+                "repo_name": "test-repo",
+                "owner": "test-owner",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        # Should return ok status and include ingested files
+        assert data["ingested_count"] == 1
+
+
+def test_invalid_scm_value_incremental_sync(client):
+    """Test invalid SCM value returns 422 for incremental sync."""
+    response = client.post(
+        "/api/v1/scm/incremental-sync",
+        data={
+            "scm": "invalid-scm",
+            "repo_name": "test-repo",
+            "owner": "test-owner",
+        },
+    )
+    assert response.status_code == 422

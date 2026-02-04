@@ -118,3 +118,55 @@ async def run_inventory(
         "errors": result.get("errors", []),
         "workflow_result": result.get("workflow_result"),
     }
+
+
+@scm_router.post("/incremental-sync")
+async def run_incremental_sync(
+    scm: SCM = Form(..., description="SCM provider (github/gitea)"),
+    repo_name: str = Form(..., description="Repository name"),
+    owner: str = Form(..., description="Repository owner"),
+    branch: str = Form("main", description="Branch to sync"),
+    start_workflows: bool = Form(True, description="Start workflows after ingestion"),
+    workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
+    param_set_id: str | None = Form(None, description="Parameter set ID"),
+    priority: int = Form(0, description="Workflow priority"),
+):
+    """
+    Run incremental sync from a SCM repository.
+
+    Only fetches and processes files that changed since last sync.
+    Falls back to full sync if no sync state exists.
+    """
+    result = await scm_app.incremental_sync(
+        scm,
+        repo_name,
+        owner,
+        branch=branch,
+        start_workflows=start_workflows,
+        workflow_definition_id=workflow_definition_id,
+        param_set_id=param_set_id,
+        priority=priority,
+    )
+
+    if "error" in result:
+        return {
+            "status": "error",
+            "error": result["error"],
+        }
+
+    return {
+        "status": result.get("status", "ok"),
+        "scm": scm.value,
+        "repo": repo_name,
+        "owner": owner,
+        "branch": branch,
+        "commits_processed": result.get("commits_processed", 0),
+        "files_changed": result.get("files_changed", 0),
+        "files_removed": result.get("files_removed", 0),
+        "ingested_count": len(result.get("ingested", [])),
+        "ingested": result.get("ingested", []),
+        "error_count": len(result.get("errors", [])),
+        "errors": result.get("errors", []),
+        "workflow_result": result.get("workflow_result"),
+        "new_commit_sha": result.get("new_commit_sha"),
+    }

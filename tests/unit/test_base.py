@@ -2154,3 +2154,161 @@ def test_base_get_auth_headers_raises_no_auth():
 
         with pytest.raises(AuthenticationConfigError):
             provider.get_auth_headers()
+
+
+# ==================== Tests for empty repository 404 handling ====================
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_empty_repo_404_object_does_not_exist(provider, mock_response):
+    """Test list_repo_files returns empty list for empty repo with 404 'object does not exist' error."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    # Gitea returns 404 with "object does not exist" for repos with no commits
+    error_response = {"errors": ["object does not exist [id: refs/heads/main, rel_path: ]"]}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(404, error_response)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_max_concurrent_requests = 5
+            mock_settings.extensions = ["md", "txt"]
+
+            result = await provider.list_repo_files("test_repo", owner="test_owner", branch="main")
+
+            # Should return empty list for empty repository
+            assert result == []
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_404_non_dict_response_passed_to_validate(provider, mock_response):
+    """Test list_repo_files with 404 non-dict response passes to validate_response."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    # Non-dict response should skip the errors check and go to validate_response
+    error_response = ["not a dict"]
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        with patch.object(provider, "validate_response") as mock_validate:
+            mock_session = MagicMock()
+            mock_resp = mock_response(404, error_response)
+            mock_session.get.return_value = create_async_context_manager(mock_resp)
+            mock_get_session.return_value = create_async_context_manager(mock_session)
+            mock_validate.side_effect = SCMException("not found")
+
+            with patch("soliplex.agents.scm.base.settings") as mock_settings:
+                mock_settings.scm_max_concurrent_requests = 5
+                mock_settings.extensions = ["md", "txt"]
+
+                with pytest.raises(SCMException, match="not found"):
+                    await provider.list_repo_files("nonexistent_repo", owner="test_owner", branch="main")
+
+
+@pytest.mark.asyncio
+async def test_iter_repo_files_empty_repo_404_object_does_not_exist(provider, mock_response):
+    """Test iter_repo_files returns empty for empty repo with 404 'object does not exist' error."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    # Gitea returns 404 with "object does not exist" for repos with no commits
+    error_response = {"errors": ["object does not exist [id: refs/heads/main, rel_path: ]"]}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(404, error_response)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_max_concurrent_requests = 5
+
+            files = []
+            async for file in provider.iter_repo_files("test_repo", owner="test_owner", branch="main"):
+                files.append(file)
+
+            # Should return empty for empty repository
+            assert files == []
+
+
+@pytest.mark.asyncio
+async def test_iter_repo_files_404_non_dict_response_passed_to_validate(provider, mock_response):
+    """Test iter_repo_files with 404 non-dict response passes to validate_response."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    # Non-dict response should skip the errors check and go to validate_response
+    error_response = ["not a dict"]
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        with patch.object(provider, "validate_response") as mock_validate:
+            mock_session = MagicMock()
+            mock_resp = mock_response(404, error_response)
+            mock_session.get.return_value = create_async_context_manager(mock_resp)
+            mock_get_session.return_value = create_async_context_manager(mock_session)
+            mock_validate.side_effect = SCMException("not found")
+
+            with patch("soliplex.agents.scm.base.settings") as mock_settings:
+                mock_settings.scm_max_concurrent_requests = 5
+
+                with pytest.raises(SCMException, match="not found"):
+                    async for _ in provider.iter_repo_files("nonexistent_repo", owner="test_owner", branch="main"):
+                        pass
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_404_with_errors_list_but_different_error(provider, mock_response):
+    """Test list_repo_files raises when 404 has errors list but not 'object does not exist'."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    # 404 with errors list but different error message
+    error_response = {"errors": ["some other error"]}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(404, error_response)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_max_concurrent_requests = 5
+            mock_settings.extensions = ["md", "txt"]
+
+            # Should call validate_response which raises SCMException for 404 with errors
+            with pytest.raises(SCMException):
+                await provider.list_repo_files("test_repo", owner="test_owner", branch="main")
+
+
+@pytest.mark.asyncio
+async def test_iter_repo_files_404_with_errors_list_but_different_error(provider, mock_response):
+    """Test iter_repo_files raises when 404 has errors list but not 'object does not exist'."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    # 404 with errors list but different error message
+    error_response = {"errors": ["some other error"]}
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_resp = mock_response(404, error_response)
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_max_concurrent_requests = 5
+
+            # Should call validate_response which raises SCMException for 404 with errors
+            with pytest.raises(SCMException):
+                async for _ in provider.iter_repo_files("test_repo", owner="test_owner", branch="main"):
+                    pass
