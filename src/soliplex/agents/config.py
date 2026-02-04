@@ -4,7 +4,7 @@ from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
 
-class SCM(str, enum.Enum):
+class SCM(enum.StrEnum):
     GITHUB = "github"
     GITEA = "gitea"
 
