@@ -107,6 +107,11 @@ WEBDAV_PASSWORD=pass
 # File filtering
 EXTENSIONS=md,pdf,doc,docx
 
+# Git CLI mode (alternative to API for file operations)
+scm_use_git_cli=true
+scm_git_cli_timeout=300
+scm_git_repo_base_dir=/path/to/repos
+
 # Server settings
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8001

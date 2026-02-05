@@ -54,5 +54,10 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = False  # turn on scheduler
     scheduler_modules: list[str] | None = None  # list of scheduler modules example: '["soliplex.agents.example"]'
 
+    # Git CLI settings
+    scm_use_git_cli: bool = False  # Use git CLI instead of API for file operations
+    scm_git_cli_timeout: int = 300  # Timeout for git operations (seconds)
+    scm_git_repo_base_dir: str | None = None  # Base directory for cloned repos (default: tempdir)
+
 
 settings = Settings()

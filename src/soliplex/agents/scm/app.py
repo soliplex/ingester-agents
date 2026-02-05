@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import logging
 
+from soliplex.agents.common.config import detect_mime_type
 from soliplex.agents.scm.base import BaseSCMProvider
 
 from .. import client
@@ -16,11 +17,19 @@ logger = logging.getLogger(__name__)
 
 def get_scm(scm) -> BaseSCMProvider:
     if scm == SCM.GITEA:
-        return gitea.GiteaProvider()
+        provider = gitea.GiteaProvider()
     elif scm == SCM.GITHUB:
-        return github.GitHubProvider()
+        provider = github.GitHubProvider()
     else:
         raise ValueError(scm)
+
+    # Apply git CLI decorator if enabled
+    if settings.scm_use_git_cli:
+        from .git_cli import GitCliDecorator
+
+        provider = GitCliDecorator(provider)
+
+    return provider
 
 
 async def load_inventory(
@@ -72,8 +81,8 @@ async def load_inventory(
             if k in meta:
                 del meta[k]
         logger.info(f"starting ingest for {row['uri']}")
-        mime_type = None
-        if "metadata" in row and "content-type" in row["metadata"]:
+        mime_type = detect_mime_type(row["uri"])
+        if "metadata" in row and "content-type" in row["metadata"] and row["metadata"]["content-type"]:
             mime_type = row["metadata"]["content-type"]
 
         res = await client.do_ingest(
@@ -142,7 +151,17 @@ async def get_data(scm: str, repo_name: str, owner: str = None):
     allowed_extensions = settings.extensions
     files = await impl.list_repo_files(repo_name, owner, allowed_extensions=allowed_extensions)
     try:
-        files = sorted(files, key=lambda x: x.get("last_updated", datetime.datetime.utcnow()), reverse=True)
+        # Sort files by last updated
+        for f in files:
+            if f["last_updated"] is None:
+                f["last_updated"] = datetime.datetime.now(datetime.UTC)
+            elif isinstance(f["last_updated"], str):
+                # Handle ISO 8601 format (with Z or +00:00 timezone)
+                date_str = f["last_updated"]
+                if date_str.endswith("Z"):
+                    date_str = date_str[:-1] + "+00:00"
+                f["last_updated"] = datetime.datetime.fromisoformat(date_str)
+        files = sorted(files, key=lambda x: x.get("last_updated"), reverse=True)
     except Exception as e:
         logger.exception("Error sorting files", exc_info=e)
     doc_data = []

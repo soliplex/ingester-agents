@@ -127,6 +127,37 @@ API_KEY_ENABLED=false
 AUTH_TRUST_PROXY_HEADERS=false
 ```
 
+### Git CLI Mode
+
+For large repositories or rate-limited APIs, you can use the git command-line for file synchronization instead of API calls. This clones the repository locally and reads files from the filesystem.
+
+```bash
+# Enable git CLI mode
+scm_use_git_cli=true
+
+# Optional: Custom directory for cloned repos (default: system temp directory)
+scm_git_repo_base_dir=/var/lib/soliplex/repos
+
+# Optional: Timeout for git operations in seconds (default: 300)
+scm_git_cli_timeout=600
+```
+
+**How it works:**
+
+1. **First sync**: Clones the repository to a local temp directory (shallow clone, single branch)
+2. **Subsequent syncs**: Pulls latest changes using `git pull --ff-only`
+3. **Pull failure**: If pull fails, deletes the local clone and re-clones
+4. **After sync**: Runs `git clean -fd` to remove untracked files
+
+**Notes:**
+
+- Issues are still fetched via API (git doesn't provide issue data)
+- Requires git to be installed in the runtime environment
+- The Docker image includes git by default
+- All credentials are masked in log output for security
+
+**Security:** Git CLI mode uses strict input sanitization to prevent command injection. Only alphanumeric characters, dashes, underscores, dots, and forward slashes are allowed in repository names and paths.
+
 ## Usage
 
 The CLI tool `si-agent` provides four main modes of operation:
