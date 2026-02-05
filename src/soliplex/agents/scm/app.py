@@ -154,8 +154,13 @@ async def get_data(scm: str, repo_name: str, owner: str = None):
         # Sort files by last updated
         for f in files:
             if f["last_updated"] is None:
-                f["last_updated"] = datetime.datetime.now(datetime.timezone.UTC)
-            f["last_updated"] = datetime.datetime.strptime(f["last_updated"], "%Y-%m-%dT%H:%M:%SZ")
+                f["last_updated"] = datetime.datetime.now(datetime.UTC)
+            elif isinstance(f["last_updated"], str):
+                # Handle ISO 8601 format (with Z or +00:00 timezone)
+                date_str = f["last_updated"]
+                if date_str.endswith("Z"):
+                    date_str = date_str[:-1] + "+00:00"
+                f["last_updated"] = datetime.datetime.fromisoformat(date_str)
         files = sorted(files, key=lambda x: x.get("last_updated"), reverse=True)
     except Exception as e:
         logger.exception("Error sorting files", exc_info=e)
