@@ -35,3 +35,24 @@ class RateLimitError(SCMException):
 class UnexpectedResponseError(Exception):
     def __init__(self) -> None:
         super().__init__("Unexpected response status")
+
+
+# Git CLI classes - imported lazily to avoid circular imports
+def __getattr__(name: str):
+    """Lazy import for git_cli module to avoid circular imports."""
+    git_cli_exports = {
+        "GitCliDecorator",
+        "GitCliError",
+        "GitCloneError",
+        "GitPullError",
+        "GitCleanError",
+        "InputSanitizationError",
+        "GitCliWrapper",
+        "sanitize_input",
+        "mask_credentials",
+    }
+    if name in git_cli_exports:
+        from soliplex.agents.scm import git_cli
+
+        return getattr(git_cli, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

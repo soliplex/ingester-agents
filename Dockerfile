@@ -21,6 +21,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Stage 2: Runtime
 FROM python:3.13-slim-trixie
 
+# Install git for CLI mode
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 # OCI metadata labels
 LABEL org.opencontainers.image.title="soliplex-agents" \
       org.opencontainers.image.description="Agents for use with soliplex-ingester" \

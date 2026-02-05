@@ -16,11 +16,19 @@ logger = logging.getLogger(__name__)
 
 def get_scm(scm) -> BaseSCMProvider:
     if scm == SCM.GITEA:
-        return gitea.GiteaProvider()
+        provider = gitea.GiteaProvider()
     elif scm == SCM.GITHUB:
-        return github.GitHubProvider()
+        provider = github.GitHubProvider()
     else:
         raise ValueError(scm)
+
+    # Apply git CLI decorator if enabled
+    if settings.scm_use_git_cli:
+        from .git_cli import GitCliDecorator
+
+        provider = GitCliDecorator(provider)
+
+    return provider
 
 
 async def load_inventory(

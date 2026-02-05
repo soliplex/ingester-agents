@@ -16,33 +16,87 @@ def init():
     logging.basicConfig(level=settings.log_level)
 
 
+def resolve_owner(owner: str | None) -> str:
+    """
+    Resolve owner from CLI argument or environment setting.
+
+    Args:
+        owner: Owner from CLI argument (may be None)
+
+    Returns:
+        Resolved owner string
+
+    Raises:
+        typer.BadParameter: If owner is not provided and not in environment
+    """
+    resolved = owner or settings.scm_owner
+    if not resolved:
+        raise typer.BadParameter("Owner is required. Provide it as an argument or set scm_owner environment variable.")
+    return resolved
+
+
 cli = typer.Typer(no_args_is_help=True)
 
 
 @cli.command("list-issues")
-def ingest_issues(scm: SCM, repo_name: str, owner: str = None):
-    issues = asyncio.run(app.get_scm(scm).list_issues(repo_name, owner, add_comments=True))
+def ingest_issues(
+    scm: Annotated[SCM, typer.Argument(help="scm provider")],
+    repo_name: Annotated[str, typer.Argument(help="repo name")],
+    owner: Annotated[str, typer.Option(help="repo owner (or set scm_owner env var)")] = None,
+):
+    """
+    List issues from a repository.
+
+    Example:
+        si-agent scm list-issues gitea myrepo --owner admin
+        si-agent scm list-issues gitea myrepo  # uses scm_owner from env
+    """
+    init()
+    resolved_owner = resolve_owner(owner)
+    issues = asyncio.run(app.get_scm(scm).list_issues(repo_name, resolved_owner, add_comments=True))
     for issue in issues:
         print(issue["title"])
         print(issue["body"])
 
 
 @cli.command("get-repo")
-def get_repo(scm: SCM, repo_name: str, owner: str = None):
-    print(asyncio.run(app.get_scm(scm).list_repo_files(repo_name, owner, settings.extensions)))
+def get_repo(
+    scm: Annotated[SCM, typer.Argument(help="scm provider")],
+    repo_name: Annotated[str, typer.Argument(help="repo name")],
+    owner: Annotated[str, typer.Option(help="repo owner (or set scm_owner env var)")] = None,
+):
+    """
+    Get repository files.
+
+    Example:
+        si-agent scm get-repo gitea myrepo --owner admin
+        si-agent scm get-repo gitea myrepo  # uses scm_owner from env
+    """
+    init()
+    resolved_owner = resolve_owner(owner)
+    print(asyncio.run(app.get_scm(scm).list_repo_files(repo_name, resolved_owner, settings.extensions)))
 
 
 @cli.command("run-inventory")
 def run_inventory(
     scm: Annotated[SCM, typer.Argument(help="scm provider")],
     repo_name: Annotated[str, typer.Argument(help="repo name")],
-    owner: Annotated[str, typer.Argument(help="repo owner")],
+    owner: Annotated[str, typer.Option(help="repo owner (or set scm_owner env var)")] = None,
     start_workflows: Annotated[bool, typer.Option(help="start workflows")] = False,
     workflow_definition_id: Annotated[str, typer.Option(help="workflow definition id")] = None,
     param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
 ):
+    """
+    Run full inventory sync for a repository.
+
+    Example:
+        si-agent scm run-inventory gitea myrepo --owner admin
+        si-agent scm run-inventory gitea myrepo  # uses scm_owner from env
+    """
+    init()
+    resolved_owner = resolve_owner(owner)
     if start_workflows:
         if workflow_definition_id is None:
             raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
@@ -52,7 +106,7 @@ def run_inventory(
         app.load_inventory(
             scm,
             repo_name,
-            owner,
+            resolved_owner,
             start_workflows=start_workflows,
             workflow_definition_id=workflow_definition_id,
             param_set_id=param_set_id,
@@ -80,7 +134,7 @@ def run_inventory(
 def run_incremental(
     scm: Annotated[SCM, typer.Argument(help="scm provider")],
     repo_name: Annotated[str, typer.Argument(help="repo name")],
-    owner: Annotated[str, typer.Argument(help="repo owner")],
+    owner: Annotated[str, typer.Option(help="repo owner (or set scm_owner env var)")] = None,
     branch: Annotated[str, typer.Option(help="branch name")] = "main",
     start_workflows: Annotated[bool, typer.Option(help="start workflows")] = False,
     workflow_definition_id: Annotated[str, typer.Option(help="workflow definition id")] = None,
@@ -95,14 +149,16 @@ def run_incremental(
     Falls back to full sync if no sync state exists.
 
     Example:
-        si-agent scm run-incremental gitea myrepo admin
+        si-agent scm run-incremental gitea myrepo --owner admin
+        si-agent scm run-incremental gitea myrepo  # uses scm_owner from env
     """
     init()
+    resolved_owner = resolve_owner(owner)
     res = asyncio.run(
         app.incremental_sync(
             scm,
             repo_name,
-            owner,
+            resolved_owner,
             branch=branch,
             priority=priority,
             start_workflows=start_workflows,
@@ -137,7 +193,7 @@ def run_incremental(
 def reset_sync(
     scm: Annotated[SCM, typer.Argument(help="scm provider")],
     repo_name: Annotated[str, typer.Argument(help="repo name")],
-    owner: Annotated[str, typer.Argument(help="repo owner")],
+    owner: Annotated[str, typer.Option(help="repo owner (or set scm_owner env var)")] = None,
 ):
     """
     Reset sync state for a repository.
@@ -145,12 +201,14 @@ def reset_sync(
     Next sync will be a full scan.
 
     Example:
-        si-agent scm reset-sync gitea myrepo admin
+        si-agent scm reset-sync gitea myrepo --owner admin
+        si-agent scm reset-sync gitea myrepo  # uses scm_owner from env
     """
     init()
+    resolved_owner = resolve_owner(owner)
     from ... import client
 
-    source = f"{scm.value}:{owner}:{repo_name}"
+    source = f"{scm.value}:{resolved_owner}:{repo_name}"
 
     res = asyncio.run(client.reset_sync_state(source))
 
@@ -164,18 +222,20 @@ def reset_sync(
 def get_sync_state(
     scm: Annotated[SCM, typer.Argument(help="scm provider")],
     repo_name: Annotated[str, typer.Argument(help="repo name")],
-    owner: Annotated[str, typer.Argument(help="repo owner")],
+    owner: Annotated[str, typer.Option(help="repo owner (or set scm_owner env var)")] = None,
 ):
     """
     Get current sync state for a repository.
 
     Example:
-        si-agent scm get-sync-state gitea myrepo admin
+        si-agent scm get-sync-state gitea myrepo --owner admin
+        si-agent scm get-sync-state gitea myrepo  # uses scm_owner from env
     """
     init()
+    resolved_owner = resolve_owner(owner)
     from ... import client
 
-    source = f"{scm.value}:{owner}:{repo_name}"
+    source = f"{scm.value}:{resolved_owner}:{repo_name}"
 
     res = asyncio.run(client.get_sync_state(source))
 
