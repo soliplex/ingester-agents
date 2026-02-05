@@ -806,6 +806,66 @@ class TestGitCliWrapper:
             assert len(result["files"]) == 1
             assert result["files"][0]["filename"] == "file.txt"
 
+    # get_file_last_commit tests
+
+    @pytest.mark.asyncio
+    async def test_get_file_last_commit_success(self, wrapper, temp_dir):
+        """Test getting last commit info for a file."""
+        repo_dir = temp_dir / "owner" / "repo"
+        repo_dir.mkdir(parents=True)
+
+        with patch.object(wrapper, "_run_command") as mock_run:
+            mock_run.return_value = (0, "abc123def|2024-01-15T10:30:00+00:00\n", "")
+
+            result = await wrapper.get_file_last_commit(repo_dir, "docs/readme.md")
+
+            assert result["sha"] == "abc123def"
+            assert result["date"] == "2024-01-15T10:30:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_get_file_last_commit_failure(self, wrapper, temp_dir):
+        """Test get_file_last_commit returns None values on failure."""
+        repo_dir = temp_dir / "owner" / "repo"
+        repo_dir.mkdir(parents=True)
+
+        with patch.object(wrapper, "_run_command") as mock_run:
+            mock_run.return_value = (1, "", "fatal: not a git repository")
+
+            result = await wrapper.get_file_last_commit(repo_dir, "nonexistent.txt")
+
+            assert result["sha"] is None
+            assert result["date"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_file_last_commit_empty_output(self, wrapper, temp_dir):
+        """Test get_file_last_commit returns None values for empty output."""
+        repo_dir = temp_dir / "owner" / "repo"
+        repo_dir.mkdir(parents=True)
+
+        with patch.object(wrapper, "_run_command") as mock_run:
+            # File not tracked by git - empty output
+            mock_run.return_value = (0, "", "")
+
+            result = await wrapper.get_file_last_commit(repo_dir, "untracked.txt")
+
+            assert result["sha"] is None
+            assert result["date"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_file_last_commit_malformed_output(self, wrapper, temp_dir):
+        """Test get_file_last_commit handles malformed output."""
+        repo_dir = temp_dir / "owner" / "repo"
+        repo_dir.mkdir(parents=True)
+
+        with patch.object(wrapper, "_run_command") as mock_run:
+            # Output missing the pipe separator
+            mock_run.return_value = (0, "abc123def\n", "")
+
+            result = await wrapper.get_file_last_commit(repo_dir, "file.txt")
+
+            assert result["sha"] is None
+            assert result["date"] is None
+
 
 # ====================
 # GitCliDecorator tests
@@ -1017,11 +1077,16 @@ class TestGitCliDecorator:
         test_file = temp_dir / "test.md"
         test_file.write_text("# Test Content")
 
-        result = await decorator._read_local_file(temp_dir, "test.md")
+        with patch.object(decorator._git, "get_file_last_commit") as mock_commit:
+            mock_commit.return_value = {"sha": "abc123", "date": "2024-01-15T10:30:00+00:00"}
 
-        assert result["name"] == "test.md"
-        assert result["file_bytes"] == b"# Test Content"
-        assert result["sha256"] is not None
+            result = await decorator._read_local_file(temp_dir, "test.md")
+
+            assert result["name"] == "test.md"
+            assert result["file_bytes"] == b"# Test Content"
+            assert result["sha256"] is not None
+            assert result["last_updated"] == "2024-01-15T10:30:00+00:00"
+            assert result["last_commit_sha"] == "abc123"
 
     @pytest.mark.asyncio
     async def test_read_local_file_not_found(self, decorator, temp_dir):
@@ -1047,16 +1112,19 @@ class TestGitCliDecorator:
         with patch.object(decorator, "_ensure_repo_cloned") as mock_ensure:
             mock_ensure.return_value = repo_dir
 
-            with patch("soliplex.agents.scm.git_cli.settings") as mock_settings:
-                mock_settings.extensions = ["md", "txt"]
+            with patch.object(decorator._git, "get_file_last_commit") as mock_commit:
+                mock_commit.return_value = {"sha": "abc123", "date": "2024-01-15T10:30:00+00:00"}
 
-                files = await decorator.list_repo_files("repo", "owner")
+                with patch("soliplex.agents.scm.git_cli.settings") as mock_settings:
+                    mock_settings.extensions = ["md", "txt"]
 
-            assert len(files) == 2
-            names = [f["name"] for f in files]
-            assert "doc.md" in names
-            assert "readme.txt" in names
-            assert "script.py" not in names
+                    files = await decorator.list_repo_files("repo", "owner")
+
+                assert len(files) == 2
+                names = [f["name"] for f in files]
+                assert "doc.md" in names
+                assert "readme.txt" in names
+                assert "script.py" not in names
 
     @pytest.mark.asyncio
     async def test_list_repo_files_excludes_git_directory(self, decorator, temp_dir):
@@ -1073,14 +1141,17 @@ class TestGitCliDecorator:
         with patch.object(decorator, "_ensure_repo_cloned") as mock_ensure:
             mock_ensure.return_value = repo_dir
 
-            with patch("soliplex.agents.scm.git_cli.settings") as mock_settings:
-                mock_settings.extensions = ["md"]
+            with patch.object(decorator._git, "get_file_last_commit") as mock_commit:
+                mock_commit.return_value = {"sha": "abc123", "date": "2024-01-15T10:30:00+00:00"}
 
-                files = await decorator.list_repo_files("repo", "owner")
+                with patch("soliplex.agents.scm.git_cli.settings") as mock_settings:
+                    mock_settings.extensions = ["md"]
 
-            # Only doc.md should be included, not .git/hooks/readme.md
-            assert len(files) == 1
-            assert files[0]["name"] == "doc.md"
+                    files = await decorator.list_repo_files("repo", "owner")
+
+                # Only doc.md should be included, not .git/hooks/readme.md
+                assert len(files) == 1
+                assert files[0]["name"] == "doc.md"
 
     @pytest.mark.asyncio
     async def test_list_repo_files_uses_default_owner(self, decorator, temp_dir):
@@ -1093,12 +1164,15 @@ class TestGitCliDecorator:
         with patch.object(decorator, "_ensure_repo_cloned") as mock_ensure:
             mock_ensure.return_value = repo_dir
 
-            with patch("soliplex.agents.scm.git_cli.settings") as mock_settings:
-                mock_settings.extensions = ["md"]
+            with patch.object(decorator._git, "get_file_last_commit") as mock_commit:
+                mock_commit.return_value = {"sha": "abc123", "date": "2024-01-15T10:30:00+00:00"}
 
-                await decorator.list_repo_files("repo")
+                with patch("soliplex.agents.scm.git_cli.settings") as mock_settings:
+                    mock_settings.extensions = ["md"]
 
-            mock_ensure.assert_called_with("repo", "default_owner", "main")
+                    await decorator.list_repo_files("repo")
+
+                mock_ensure.assert_called_with("repo", "default_owner", "main")
 
     @pytest.mark.asyncio
     async def test_get_single_file(self, decorator, temp_dir):
@@ -1110,10 +1184,14 @@ class TestGitCliDecorator:
         with patch.object(decorator, "_ensure_repo_cloned") as mock_ensure:
             mock_ensure.return_value = repo_dir
 
-            result = await decorator.get_single_file("repo", "owner", "doc.md")
+            with patch.object(decorator._git, "get_file_last_commit") as mock_commit:
+                mock_commit.return_value = {"sha": "abc123", "date": "2024-01-15T10:30:00+00:00"}
 
-            assert result["name"] == "doc.md"
-            assert result["file_bytes"] == b"# Single Doc"
+                result = await decorator.get_single_file("repo", "owner", "doc.md")
+
+                assert result["name"] == "doc.md"
+                assert result["file_bytes"] == b"# Single Doc"
+                assert result["last_commit_sha"] == "abc123"
 
     @pytest.mark.asyncio
     async def test_list_commits_since(self, decorator, temp_dir):
@@ -1176,11 +1254,14 @@ class TestGitCliDecorator:
         with patch.object(decorator, "_ensure_repo_cloned") as mock_ensure:
             mock_ensure.return_value = repo_dir
 
-            files = []
-            async for f in decorator.iter_repo_files("repo", "owner"):
-                files.append(f)
+            with patch.object(decorator._git, "get_file_last_commit") as mock_commit:
+                mock_commit.return_value = {"sha": "abc123", "date": "2024-01-15T10:30:00+00:00"}
 
-            assert len(files) == 2
+                files = []
+                async for f in decorator.iter_repo_files("repo", "owner"):
+                    files.append(f)
+
+                assert len(files) == 2
 
     @pytest.mark.asyncio
     async def test_iter_repo_files_skips_directories(self, decorator, temp_dir):
@@ -1194,13 +1275,16 @@ class TestGitCliDecorator:
         with patch.object(decorator, "_ensure_repo_cloned") as mock_ensure:
             mock_ensure.return_value = repo_dir
 
-            files = []
-            async for f in decorator.iter_repo_files("repo", "owner"):
-                files.append(f)
+            with patch.object(decorator._git, "get_file_last_commit") as mock_commit:
+                mock_commit.return_value = {"sha": "abc123", "date": "2024-01-15T10:30:00+00:00"}
 
-            # Only the file, not the directory
-            assert len(files) == 1
-            assert files[0]["name"] == "doc.md"
+                files = []
+                async for f in decorator.iter_repo_files("repo", "owner"):
+                    files.append(f)
+
+                # Only the file, not the directory
+                assert len(files) == 1
+                assert files[0]["name"] == "doc.md"
 
     @pytest.mark.asyncio
     async def test_list_repo_files_handles_read_errors(self, decorator, temp_dir):

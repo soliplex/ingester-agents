@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import logging
 
+from soliplex.agents.common.config import detect_mime_type
 from soliplex.agents.scm.base import BaseSCMProvider
 
 from .. import client
@@ -80,8 +81,8 @@ async def load_inventory(
             if k in meta:
                 del meta[k]
         logger.info(f"starting ingest for {row['uri']}")
-        mime_type = None
-        if "metadata" in row and "content-type" in row["metadata"]:
+        mime_type = detect_mime_type(row["uri"])
+        if "metadata" in row and "content-type" in row["metadata"] and row["metadata"]["content-type"]:
             mime_type = row["metadata"]["content-type"]
 
         res = await client.do_ingest(
@@ -150,7 +151,12 @@ async def get_data(scm: str, repo_name: str, owner: str = None):
     allowed_extensions = settings.extensions
     files = await impl.list_repo_files(repo_name, owner, allowed_extensions=allowed_extensions)
     try:
-        files = sorted(files, key=lambda x: x.get("last_updated", datetime.datetime.utcnow()), reverse=True)
+        # Sort files by last updated
+        for f in files:
+            if f["last_updated"] is None:
+                f["last_updated"] = datetime.datetime.now(datetime.timezone.UTC)
+            f["last_updated"] = datetime.datetime.strptime(f["last_updated"], "%Y-%m-%dT%H:%M:%SZ")
+        files = sorted(files, key=lambda x: x.get("last_updated"), reverse=True)
     except Exception as e:
         logger.exception("Error sorting files", exc_info=e)
     doc_data = []

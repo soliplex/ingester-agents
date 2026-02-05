@@ -440,6 +440,35 @@ class GitCliWrapper:
 
         return {"sha": commit_sha, "files": files}
 
+    async def get_file_last_commit(
+        self,
+        repo_dir: Path,
+        file_path: str,
+    ) -> dict[str, Any]:
+        """
+        Get the last commit info for a file.
+
+        Args:
+            repo_dir: Path to repository
+            file_path: Relative path to file within repo
+
+        Returns:
+            Dict with 'sha' and 'date' (ISO format) or None values if not in git
+        """
+        # git log -1 --format=%H|%aI -- <file>
+        cmd = ["git", "log", "-1", "--format=%H|%aI", "--", file_path]
+
+        returncode, stdout, stderr = await self._run_command(cmd, cwd=repo_dir)
+
+        if returncode != 0 or not stdout.strip():
+            return {"sha": None, "date": None}
+
+        parts = stdout.strip().split("|")
+        if len(parts) >= 2:
+            return {"sha": parts[0], "date": parts[1]}
+
+        return {"sha": None, "date": None}
+
 
 class GitCliDecorator(BaseSCMProvider):
     """
@@ -568,6 +597,9 @@ class GitCliDecorator(BaseSCMProvider):
         async with aiofiles.open(full_path, "rb") as f:
             content = await f.read()
 
+        # Get last commit info for this file
+        commit_info = await self._git.get_file_last_commit(repo_dir, file_path)
+
         return {
             "name": full_path.name,
             "path": file_path,
@@ -576,8 +608,8 @@ class GitCliDecorator(BaseSCMProvider):
             "file_bytes": content,
             "sha256": compute_file_hash(content),
             "content-type": mimetypes.guess_type(full_path.name)[0],
-            "last_updated": None,
-            "last_commit_sha": None,
+            "last_updated": commit_info["date"],
+            "last_commit_sha": commit_info["sha"],
         }
 
     async def list_repo_files(
