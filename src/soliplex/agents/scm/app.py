@@ -7,6 +7,7 @@ from soliplex.agents.scm.base import BaseSCMProvider
 
 from .. import client
 from ..config import SCM
+from ..config import ContentFilter
 from ..config import settings
 from . import gitea
 from . import github
@@ -41,11 +42,12 @@ async def load_inventory(
     start_workflows: bool = False,
     workflow_definition_id: str | None = None,
     param_set_id: str | None = None,
+    content_filter: ContentFilter = ContentFilter.ALL,
 ):
     client.validate_parameters(start_workflows, workflow_definition_id, param_set_id)
-    data = await get_data(scm, repo_name, owner)
+    data = await get_data(scm, repo_name, owner, content_filter=content_filter)
 
-    source = f"{scm.value}:{owner}:{repo_name}"
+    source = f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
 
     to_process = await client.check_status(data, source)
     ingested = []
@@ -145,41 +147,44 @@ async def get_issues(scm: str, repo_name: str, owner: str = None, since: datetim
     return formatted
 
 
-async def get_data(scm: str, repo_name: str, owner: str = None):
-    impl = get_scm(scm)
-
-    allowed_extensions = settings.extensions
-    files = await impl.list_repo_files(repo_name, owner, allowed_extensions=allowed_extensions)
-    try:
-        # Sort files by last updated
-        for f in files:
-            if f["last_updated"] is None:
-                f["last_updated"] = datetime.datetime.now(datetime.UTC)
-            elif isinstance(f["last_updated"], str):
-                # Handle ISO 8601 format (with Z or +00:00 timezone)
-                date_str = f["last_updated"]
-                if date_str.endswith("Z"):
-                    date_str = date_str[:-1] + "+00:00"
-                f["last_updated"] = datetime.datetime.fromisoformat(date_str)
-        files = sorted(files, key=lambda x: x.get("last_updated"), reverse=True)
-    except Exception as e:
-        logger.exception("Error sorting files", exc_info=e)
+async def get_data(scm: str, repo_name: str, owner: str = None, content_filter: ContentFilter = ContentFilter.ALL):
     doc_data = []
-    filtered_files = [x for x in files if x["name"].split(".")[-1] in allowed_extensions]
-    for f in filtered_files:
-        row = {
-            "file_bytes": f["file_bytes"],
-            "uri": f["uri"],
-            "sha256": f["sha256"],
-            "metadata": {
-                "last_modified_date": f["last_updated"],
-                "content-type": f["content-type"],
-                "last_commit_sha": f["last_commit_sha"],
-            },
-        }
-        doc_data.append(row)
 
-    doc_data.extend(await get_issues(scm, repo_name, owner))
+    if content_filter in (ContentFilter.ALL, ContentFilter.FILES):
+        impl = get_scm(scm)
+        allowed_extensions = settings.extensions
+        files = await impl.list_repo_files(repo_name, owner, allowed_extensions=allowed_extensions)
+        try:
+            # Sort files by last updated
+            for f in files:
+                if f["last_updated"] is None:
+                    f["last_updated"] = datetime.datetime.now(datetime.UTC)
+                elif isinstance(f["last_updated"], str):
+                    # Handle ISO 8601 format (with Z or +00:00 timezone)
+                    date_str = f["last_updated"]
+                    if date_str.endswith("Z"):
+                        date_str = date_str[:-1] + "+00:00"
+                    f["last_updated"] = datetime.datetime.fromisoformat(date_str)
+            files = sorted(files, key=lambda x: x.get("last_updated"), reverse=True)
+        except Exception as e:
+            logger.exception("Error sorting files", exc_info=e)
+        filtered_files = [x for x in files if x["name"].split(".")[-1] in allowed_extensions]
+        for f in filtered_files:
+            row = {
+                "file_bytes": f["file_bytes"],
+                "uri": f["uri"],
+                "sha256": f["sha256"],
+                "metadata": {
+                    "last_modified_date": f["last_updated"],
+                    "content-type": f["content-type"],
+                    "last_commit_sha": f["last_commit_sha"],
+                },
+            }
+            doc_data.append(row)
+
+    if content_filter in (ContentFilter.ALL, ContentFilter.ISSUES):
+        doc_data.extend(await get_issues(scm, repo_name, owner))
+
     return doc_data
 
 
@@ -192,6 +197,7 @@ async def incremental_sync(
     start_workflows: bool = False,
     workflow_definition_id: str | None = None,
     param_set_id: str | None = None,
+    content_filter: ContentFilter = ContentFilter.ALL,
 ):
     """
     Perform incremental sync based on commit history.
@@ -213,7 +219,7 @@ async def incremental_sync(
         Sync result dict with statistics
     """
     impl = get_scm(scm)
-    source = f"{scm.value}:{owner}:{repo_name}"
+    source = f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
 
     logger.info(f"Starting incremental sync for {source}")
 
@@ -236,6 +242,7 @@ async def incremental_sync(
             start_workflows=start_workflows,
             workflow_definition_id=workflow_definition_id,
             param_set_id=param_set_id,
+            content_filter=content_filter,
         )
 
         latest_commit_sha = None
@@ -252,15 +259,78 @@ async def incremental_sync(
 
         return inventory_res
 
-    issues = await get_issues(scm, repo_name, owner, since=sync_state.get("last_sync_date"))
-    logger.info(f"found {len(issues)} files to ingest")
+    issues = []
+    if content_filter in (ContentFilter.ALL, ContentFilter.ISSUES):
+        issues = await get_issues(scm, repo_name, owner, since=sync_state.get("last_sync_date"))
+        logger.info(f"found {len(issues)} issues to ingest")
     # Fetch commits since last sync
     logger.info(f"Last sync was at commit {last_commit_sha}")
 
-    new_commits = await impl.list_commits_since(repo_name, owner, since_commit_sha=last_commit_sha, branch=branch)
+    new_commits = []
+    changed_files = set()
+    removed_files = set()
+    file_data = []
 
-    if not new_commits and not issues:
-        logger.info("No new commits since last sync, repository is up to date")
+    if content_filter in (ContentFilter.ALL, ContentFilter.FILES):
+        new_commits = await impl.list_commits_since(repo_name, owner, since_commit_sha=last_commit_sha, branch=branch)
+
+        if not new_commits and not issues:
+            logger.info("No new commits since last sync, repository is up to date")
+            return {
+                "status": "up-to-date",
+                "commits_processed": 0,
+                "files_changed": 0,
+                "ingested": [],
+                "errors": [],
+            }
+
+        logger.info(f"Found {len(new_commits)} new commits to process")
+
+        # Extract changed file paths from commits
+        for commit in new_commits:
+            # Get detailed commit info with file list
+            try:
+                commit_detail = await impl.get_commit_details(repo_name, owner, commit["sha"])
+
+                # Extract file changes (format varies by SCM, handle both)
+                files_list = commit_detail.get("files", [])
+
+                for file in files_list:
+                    file_path = file.get("filename") or file.get("path") or file.get("name")
+                    status = file.get("status", "")
+
+                    if status in ("removed", "deleted"):
+                        removed_files.add(file_path)
+                        changed_files.discard(file_path)  # Don't fetch if removed
+                    else:
+                        if file_path:
+                            changed_files.add(file_path)
+
+            except Exception as e:
+                logger.exception(f"Error processing commit {commit.get('sha')}", exc_info=e)
+                continue
+
+        logger.info(f"Files changed: {len(changed_files)}, removed: {len(removed_files)}")
+
+        # Fetch only changed files
+        allowed_extensions = settings.extensions
+
+        for file_path in changed_files:
+            # Check if extension is allowed
+            ext = file_path.split(".")[-1] if "." in file_path else ""
+            if ext not in allowed_extensions:
+                logger.debug(f"Skipping {file_path} - extension '{ext}' not in allowed list")
+                continue
+
+            try:
+                file = await impl.get_single_file(repo_name, owner, file_path, branch)
+                file_data.append(file)
+            except Exception as e:
+                logger.exception(f"Failed to fetch {file_path}", exc_info=e)
+
+        logger.info(f"Fetched {len(file_data)} changed files with allowed extensions")
+    elif not issues:
+        logger.info("No new issues since last sync, repository is up to date")
         return {
             "status": "up-to-date",
             "commits_processed": 0,
@@ -268,56 +338,6 @@ async def incremental_sync(
             "ingested": [],
             "errors": [],
         }
-
-    logger.info(f"Found {len(new_commits)} new commits to process")
-
-    # Extract changed file paths from commits
-    changed_files = set()
-    removed_files = set()
-
-    for commit in new_commits:
-        # Get detailed commit info with file list
-        try:
-            commit_detail = await impl.get_commit_details(repo_name, owner, commit["sha"])
-
-            # Extract file changes (format varies by SCM, handle both)
-            files_list = commit_detail.get("files", [])
-
-            for file in files_list:
-                file_path = file.get("filename") or file.get("path") or file.get("name")
-                status = file.get("status", "")
-
-                if status in ("removed", "deleted"):
-                    removed_files.add(file_path)
-                    changed_files.discard(file_path)  # Don't fetch if removed
-                else:
-                    if file_path:
-                        changed_files.add(file_path)
-
-        except Exception as e:
-            logger.exception(f"Error processing commit {commit.get('sha')}", exc_info=e)
-            continue
-
-    logger.info(f"Files changed: {len(changed_files)}, removed: {len(removed_files)}")
-
-    # Fetch only changed files
-    allowed_extensions = settings.extensions
-    file_data = []
-
-    for file_path in changed_files:
-        # Check if extension is allowed
-        ext = file_path.split(".")[-1] if "." in file_path else ""
-        if ext not in allowed_extensions:
-            logger.debug(f"Skipping {file_path} - extension '{ext}' not in allowed list")
-            continue
-
-        try:
-            file = await impl.get_single_file(repo_name, owner, file_path, branch)
-            file_data.append(file)
-        except Exception as e:
-            logger.exception(f"Failed to fetch {file_path}", exc_info=e)
-
-    logger.info(f"Fetched {len(file_data)} changed files with allowed extensions")
 
     # Get or create batch
     found_batch_id = await client.find_batch_for_source(source)

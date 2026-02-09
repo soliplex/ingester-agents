@@ -9,6 +9,12 @@ class SCM(enum.StrEnum):
     GITEA = "gitea"
 
 
+class ContentFilter(enum.StrEnum):
+    ALL = "all"
+    FILES = "files"
+    ISSUES = "issues"
+
+
 class Settings(BaseSettings):
     # SCM settings
     scm_auth_token: SecretStr | None = None
