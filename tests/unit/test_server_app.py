@@ -205,7 +205,6 @@ def test_routes_work_with_valid_api_key():
         ):
             # Create a mock provider that returns a completed future for async calls
             mock_provider = MagicMock()
-            mock_provider.get_default_owner.return_value = "default"
 
             # Create a proper async return for list_issues
             async def mock_list_issues(*args, **kwargs):
@@ -216,7 +215,7 @@ def test_routes_work_with_valid_api_key():
 
             response = client.get(
                 "/api/v1/scm/github/issues",
-                params={"repo_name": "test-repo"},
+                params={"repo_name": "test-repo", "owner": "test-owner"},
                 headers={"Authorization": "Bearer valid-test-key"},
             )
             assert response.status_code == 200

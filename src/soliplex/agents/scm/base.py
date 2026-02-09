@@ -37,11 +37,7 @@ class BaseSCMProvider(ABC):
         Args:
             owner: Default repository owner
         """
-        self.owner = owner or self.get_default_owner()
-
-    def get_default_owner(self) -> str:
-        """Get the default owner from settings."""
-        return settings.scm_owner
+        self.owner = owner
 
     def get_base_url(self) -> str:
         """Get the base API URL for this provider."""

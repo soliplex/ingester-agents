@@ -83,9 +83,6 @@ The agents use unified authentication settings that work across all SCM provider
 # SCM authentication token (GitHub personal access token or Gitea API token)
 scm_auth_token=your_scm_token_here
 
-# Default repository owner (username or organization)
-scm_owner=your_username_or_org
-
 # SCM base URL (required for Gitea, optional for GitHub)
 # For Gitea: Full API URL including /api/v1
 # For GitHub: Defaults to https://api.github.com if not specified
@@ -95,16 +92,16 @@ scm_base_url=https://your-gitea-instance.com/api/v1
 **Examples:**
 
 For GitHub:
+
 ```bash
 export scm_auth_token=ghp_YourGitHubToken
-export scm_owner=your-github-username
 # scm_base_url not needed for public GitHub
 ```
 
 For Gitea:
+
 ```bash
 export scm_auth_token=your_gitea_token
-export scm_owner=admin
 export scm_base_url=https://gitea.example.com/api/v1
 ```
 
@@ -167,8 +164,6 @@ The CLI tool `si-agent` provides four main modes of operation:
 - **`serve`**: REST API server exposing agent functionality via HTTP
 
 ### Filesystem Agent
-
-
 
 #### Quick Start
 
@@ -267,10 +262,10 @@ List all issues from a repository:
 
 ```bash
 # GitHub
-si-agent scm list-issues github my-repo my-github-user
+si-agent scm list-issues github myorg/my-repo
 
 # Gitea
-si-agent scm list-issues gitea my-repo --owner admin
+si-agent scm list-issues gitea admin/my-repo
 ```
 
 #### 2. Get Repository Files
@@ -279,10 +274,10 @@ List files in a repository:
 
 ```bash
 # GitHub
-si-agent scm get-repo github my-repo my-github-user
+si-agent scm get-repo github myorg/my-repo
 
 # Gitea
-si-agent scm get-repo gitea my-repo
+si-agent scm get-repo gitea admin/my-repo
 ```
 
 #### 3. Load Inventory
@@ -291,10 +286,10 @@ Ingest **both files and issues** from a repository. Issues are rendered as Markd
 
 ```bash
 # GitHub
-si-agent scm run-inventory github my-repo my-github-user
+si-agent scm run-inventory github myorg/my-repo
 
 # Gitea
-si-agent scm run-inventory gitea my-repo admin
+si-agent scm run-inventory gitea admin/my-repo
 ```
 
 **Note on Workflows:** By default, `start_workflows=True`. To skip workflow triggering, explicitly set `--no-start-workflows`.
@@ -305,16 +300,16 @@ Run commit-based incremental synchronization. Only processes files that changed 
 
 ```bash
 # First run performs full sync and establishes sync state
-si-agent scm run-incremental gitea my-repo admin
+si-agent scm run-incremental gitea admin/my-repo
 
 # Subsequent runs only process changes since last sync
-si-agent scm run-incremental gitea my-repo admin --branch main
+si-agent scm run-incremental gitea admin/my-repo --branch main
 ```
 
 **With workflow triggering:**
 
 ```bash
-si-agent scm run-incremental gitea my-repo admin \
+si-agent scm run-incremental gitea admin/my-repo \
   --start-workflows \
   --workflow-definition-id my-workflow \
   --param-set-id my-params \
@@ -324,7 +319,7 @@ si-agent scm run-incremental gitea my-repo admin \
 **Output JSON format:**
 
 ```bash
-si-agent scm run-incremental gitea my-repo admin --do-json
+si-agent scm run-incremental gitea admin/my-repo --do-json
 ```
 
 #### 5. Sync State Management
@@ -333,10 +328,10 @@ View and manage sync state for repositories:
 
 ```bash
 # View current sync state
-si-agent scm get-sync-state gitea my-repo admin
+si-agent scm get-sync-state gitea admin/my-repo
 
 # Reset sync state (forces full sync on next run)
-si-agent scm reset-sync gitea my-repo admin
+si-agent scm reset-sync gitea admin/my-repo
 ```
 
 ### WebDAV Agent
@@ -474,6 +469,7 @@ This approach reduces API calls and bandwidth by 80-95% compared to full reposit
 Both agents filter files by the `EXTENSIONS` configuration. The default extensions are: `md`, `pdf`, `doc`, `docx`.
 
 To add more types:
+
 ```bash
 export EXTENSIONS=md,pdf,doc,docx,txt,rst
 ```
@@ -495,7 +491,6 @@ For SCM sources, issues (including their comments) are rendered as Markdown docu
 ## Examples
 
 As an example, the soliplex [documentation](https://github.com/soliplex/soliplex/tree/main/docs)) can be loaded using both the filesystem and via git.
-
 
 ### Example 1: Ingest Local Documents
 
@@ -549,10 +544,9 @@ curl -X 'GET' \
 # Set up environment
 export ENDPOINT_URL=http://localhost:8000/api/v1
 export scm_auth_token=ghp_your_token_here
-export scm_owner=mycompany
 
 # Ingest repository
-si-agent scm run-inventory github soliplex soliplex
+si-agent scm run-inventory github mycompany/soliplex
 
 #check that documents are in the ingester: (your batch id may be different)
 curl -X 'GET' \
@@ -614,12 +608,14 @@ si-agent serve --workers 4
 The server supports multiple authentication methods:
 
 #### 1. No Authentication (Default)
+
 ```bash
 si-agent serve
 # All requests allowed
 ```
 
 #### 2. API Key Authentication
+
 ```bash
 export API_KEY=your-api-key
 export API_KEY_ENABLED=true
@@ -627,11 +623,13 @@ si-agent serve
 ```
 
 Clients must include the API key in the `Authorization` header:
+
 ```bash
 curl -H "Authorization: Bearer your-api-key" http://localhost:8001/api/fs/status
 ```
 
 #### 3. OAuth2 Proxy Headers
+
 ```bash
 export AUTH_TRUST_PROXY_HEADERS=true
 si-agent serve
@@ -656,6 +654,7 @@ The server will trust authentication headers from a reverse proxy (e.g., OAuth2 
 | `POST` | `/api/v1/fs/run-inventory` | Ingest documents (file or directory) |
 
 **Examples:**
+
 ```bash
 # Build configuration from directory
 curl -X POST http://localhost:8001/api/v1/fs/build-config \
@@ -684,6 +683,7 @@ curl -X POST http://localhost:8001/api/v1/fs/run-inventory \
 | `POST` | `/api/scm/{platform}/{repo}/ingest` | Ingest repo files and issues |
 
 **Example:**
+
 ```bash
 # List GitHub issues
 curl http://localhost:8001/api/scm/github/my-repo/issues?owner=myuser
@@ -706,6 +706,7 @@ All endpoints accept both local inventory files and WebDAV paths!
 | `POST` | `/api/v1/webdav/run-inventory` | Ingest documents from WebDAV |
 
 **Examples:**
+
 ```bash
 # Build configuration from WebDAV
 curl -X POST http://localhost:8001/api/v1/webdav/build-config \
@@ -738,6 +739,7 @@ curl -X POST http://localhost:8001/api/v1/webdav/run-inventory \
 | `GET` | `/health` | Server health check |
 
 **Example:**
+
 ```bash
 curl http://localhost:8001/health
 # Returns: {"status": "healthy"}
@@ -776,22 +778,24 @@ The Docker image includes:
 - Proper signal handling
 - Production-ready uvicorn configuration
 
-
-
 ## Troubleshooting
 
 ### Authentication Errors
+
 Ensure your tokens have the required permissions:
 - **GitHub**: `repo` scope for private repositories, public access for public repos
 - **Gitea**: Access token with read permissions
 
 ### Connection Errors
+
 Verify the `ENDPOINT_URL` is correct and the Ingester API is running:
+
 ```bash
 curl http://localhost:8000/api/v1/batch/
 ```
 
 ### File Not Found Errors
+
 For SCM agents, ensure the repository name and owner are correct. Use the exact repository name, not the URL.
 
 ## Development
@@ -845,7 +849,7 @@ uv run ruff format
 
 ## Architecture
 
-```
+```text
 soliplex.agents/
 ├── src/soliplex/agents/
 │   ├── cli.py              # Main CLI entry point (includes 'serve' command)

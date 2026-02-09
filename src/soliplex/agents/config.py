@@ -15,7 +15,6 @@ class Settings(BaseSettings):
     scm_auth_username: str | None = None
     scm_auth_password: SecretStr | None = None
     scm_base_url: str | None = None
-    scm_owner: str | None = None
 
     # File settings
     extensions: list[str] = ["md", "pdf", "doc", "docx"]

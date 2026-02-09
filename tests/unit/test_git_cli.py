@@ -881,7 +881,6 @@ class TestGitCliDecorator:
         provider = MagicMock()
         provider.owner = "default_owner"
         provider.get_base_url.return_value = "https://api.github.com"
-        provider.get_default_owner.return_value = "default_owner"
         provider.get_auth_token.return_value = "token"
         provider.get_auth_headers.return_value = {"Authorization": "token xxx"}
         provider.get_session.return_value = MagicMock()
@@ -917,12 +916,6 @@ class TestGitCliDecorator:
             return GitCliDecorator(mock_inner_provider)
 
     # Delegation tests
-
-    def test_delegates_get_default_owner(self, decorator, mock_inner_provider):
-        """Test that get_default_owner is delegated."""
-        result = decorator.get_default_owner()
-        assert result == "default_owner"
-        mock_inner_provider.get_default_owner.assert_called_once()
 
     def test_delegates_get_base_url(self, decorator, mock_inner_provider):
         """Test that get_base_url is delegated."""
@@ -1347,7 +1340,6 @@ class TestGetScmWithDecorator:
             mock_settings.scm_auth_token = SecretStr("token")
             mock_settings.scm_auth_username = None
             mock_settings.scm_auth_password = None
-            mock_settings.scm_owner = "owner"
 
             from soliplex.agents.config import SCM
             from soliplex.agents.scm.app import get_scm
@@ -1360,7 +1352,6 @@ class TestGetScmWithDecorator:
         """Test that get_scm doesn't apply decorator when git CLI is disabled."""
         with patch("soliplex.agents.scm.app.settings") as mock_settings:
             mock_settings.scm_use_git_cli = False
-            mock_settings.scm_owner = "owner"
             mock_settings.scm_auth_token = SecretStr("token")
 
             from soliplex.agents.config import SCM

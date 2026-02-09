@@ -33,3 +33,14 @@ repos:
         language: system
         pass_filenames: false
         files: (^pyproject\.toml$|^uv\.lock$)
+  - repo: https://github.com/jackdewinter/pymarkdown
+    rev: v0.9.35
+    hooks:
+      - id: pymarkdown
+        args:
+          - "--set"
+          - "extensions.front-matter.enabled=$!True"
+          - "--disable-rules"
+          - "MD013,MD024,MD033,MD036,MD041,MD060"
+          - "scan"
+        exclude: ^ios/Runner/Assets\.xcassets/

@@ -275,9 +275,6 @@ async def test_list_commits_since(mock_response):
     from soliplex.agents.scm.base import BaseSCMProvider
 
     class TestProvider(BaseSCMProvider):
-        def get_default_owner(self):
-            return "admin"
-
         def get_base_url(self):
             return "http://test"
 
@@ -324,9 +321,6 @@ async def test_list_commits_since_no_marker(mock_response):
     from soliplex.agents.scm.base import BaseSCMProvider
 
     class TestProvider(BaseSCMProvider):
-        def get_default_owner(self):
-            return "admin"
-
         def get_base_url(self):
             return "http://test"
 
@@ -376,9 +370,6 @@ async def test_get_commit_details(mock_response):
     from soliplex.agents.scm.base import BaseSCMProvider
 
     class TestProvider(BaseSCMProvider):
-        def get_default_owner(self):
-            return "admin"
-
         def get_base_url(self):
             return "http://test"
 
@@ -421,9 +412,6 @@ async def test_get_single_file(mock_response):
     from soliplex.agents.scm.base import BaseSCMProvider
 
     class TestProvider(BaseSCMProvider):
-        def get_default_owner(self):
-            return "admin"
-
         def get_base_url(self):
             return "http://test"
 
@@ -542,9 +530,6 @@ async def test_list_commits_since_pagination(mock_response):
     from soliplex.agents.scm.base import BaseSCMProvider
 
     class TestProvider(BaseSCMProvider):
-        def get_default_owner(self):
-            return "admin"
-
         def get_base_url(self):
             return "http://test"
 
@@ -586,9 +571,6 @@ async def test_list_commits_since_empty_first_page(mock_response):
     from soliplex.agents.scm.base import BaseSCMProvider
 
     class TestProvider(BaseSCMProvider):
-        def get_default_owner(self):
-            return "admin"
-
         def get_base_url(self):
             return "http://test"
 
@@ -621,9 +603,6 @@ async def test_list_commits_since_max_pages_limit(mock_response):
     from soliplex.agents.scm.base import BaseSCMProvider
 
     class TestProvider(BaseSCMProvider):
-        def get_default_owner(self):
-            return "admin"
-
         def get_base_url(self):
             return "http://test"
 

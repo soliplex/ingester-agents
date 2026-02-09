@@ -30,7 +30,6 @@ def client():
 def mock_scm_provider():
     """Create a mock SCM provider."""
     provider = MagicMock()
-    provider.get_default_owner.return_value = "default-owner"
     provider.list_issues = AsyncMock(return_value=[])
     provider.list_repo_files = AsyncMock(return_value=[])
     return provider
@@ -99,10 +98,8 @@ def test_list_issues_gitea_success(client, mock_scm_provider):
         assert data["issue_count"] == 1
 
 
-def test_list_issues_default_owner(client, mock_scm_provider):
-    """Test listing issues uses default owner when not specified."""
-    mock_scm_provider.list_issues = AsyncMock(return_value=[])
-
+def test_list_issues_missing_owner(client, mock_scm_provider):
+    """Test listing issues returns 422 when owner is not specified."""
     with patch("soliplex.agents.server.routes.scm.scm_app") as mock_scm_app:
         mock_scm_app.get_scm.return_value = mock_scm_provider
 
@@ -111,9 +108,7 @@ def test_list_issues_default_owner(client, mock_scm_provider):
             params={"repo_name": "test-repo"},
         )
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["owner"] == "default-owner"
+        assert response.status_code == 422
 
 
 def test_list_issues_empty(client, mock_scm_provider):

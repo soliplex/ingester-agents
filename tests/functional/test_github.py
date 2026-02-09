@@ -23,18 +23,13 @@ def github_provider_custom_owner(mock_settings):
 
 
 def test_init_default_owner(github_provider, mock_settings):
-    """Test GitHubProvider initialization with default owner."""
-    assert github_provider.owner == "test_scm_owner"
+    """Test GitHubProvider initialization without explicit owner."""
+    assert github_provider.owner is None
 
 
 def test_init_custom_owner(github_provider_custom_owner):
     """Test GitHubProvider initialization with custom owner."""
     assert github_provider_custom_owner.owner == "custom_owner"
-
-
-def test_get_default_owner(github_provider, mock_settings):
-    """Test get_default_owner returns settings value."""
-    assert github_provider.get_default_owner() == "test_scm_owner"
 
 
 def test_get_base_url(github_provider):

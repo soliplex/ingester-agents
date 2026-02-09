@@ -3,7 +3,6 @@
 These tests use pytest-vcr to record and replay HTTP interactions.
 Environment variables are configured in pyproject.toml [tool.pytest_env]:
 - scm_auth_token: Gitea API token
-- scm_owner: Gitea organization/user
 - scm_base_url: Gitea API base URL
 
 To record cassettes:
