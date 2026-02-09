@@ -8,6 +8,7 @@ from fastapi import Form
 from fastapi import Query
 
 from soliplex.agents.config import SCM
+from soliplex.agents.config import ContentFilter
 from soliplex.agents.config import settings
 from soliplex.agents.scm import app as scm_app
 from soliplex.agents.server.auth import get_current_user
@@ -90,11 +91,12 @@ async def run_inventory(
     workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
     param_set_id: str | None = Form(None, description="Parameter set ID"),
     priority: int = Form(0, description="Workflow priority"),
+    content_filter: ContentFilter = Form(ContentFilter.ALL, description="Content filter: all, files, issues"),
 ):
     """
     Run ingestion from a SCM repository.
 
-    Ingests both files and issues from the repository.
+    Ingests files, issues, or both from the repository based on content_filter.
     """
     result = await scm_app.load_inventory(
         scm,
@@ -104,6 +106,7 @@ async def run_inventory(
         workflow_definition_id=workflow_definition_id,
         param_set_id=param_set_id,
         priority=priority,
+        content_filter=content_filter,
     )
 
     return {
@@ -130,11 +133,12 @@ async def run_incremental_sync(
     workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
     param_set_id: str | None = Form(None, description="Parameter set ID"),
     priority: int = Form(0, description="Workflow priority"),
+    content_filter: ContentFilter = Form(ContentFilter.ALL, description="Content filter: all, files, issues"),
 ):
     """
     Run incremental sync from a SCM repository.
 
-    Only fetches and processes files that changed since last sync.
+    Only fetches and processes content that changed since last sync.
     Falls back to full sync if no sync state exists.
     """
     result = await scm_app.incremental_sync(
@@ -146,6 +150,7 @@ async def run_incremental_sync(
         workflow_definition_id=workflow_definition_id,
         param_set_id=param_set_id,
         priority=priority,
+        content_filter=content_filter,
     )
 
     if "error" in result:

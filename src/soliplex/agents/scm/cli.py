@@ -6,6 +6,7 @@ from typing import Annotated
 import typer
 
 from ..config import SCM
+from ..config import ContentFilter
 from ..config import settings
 from . import app as app
 
@@ -86,6 +87,7 @@ def run_inventory(
     param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
+    content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
 ):
     """
     Run full inventory sync for a repository.
@@ -93,6 +95,7 @@ def run_inventory(
     Example:
         si-agent scm run-inventory gitea admin/myrepo
         si-agent scm run-inventory github myorg/myrepo
+        si-agent scm run-inventory github myorg/myrepo --content-filter files
     """
     init()
     owner, repo_name = parse_repo(repo)
@@ -110,6 +113,7 @@ def run_inventory(
             workflow_definition_id=workflow_definition_id,
             param_set_id=param_set_id,
             priority=priority,
+            content_filter=content_filter,
         )
     )
     if do_json:
@@ -139,6 +143,7 @@ def run_incremental(
     param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
+    content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
 ):
     """
     Run incremental sync based on commit history.
@@ -149,6 +154,7 @@ def run_incremental(
     Example:
         si-agent scm run-incremental gitea admin/myrepo
         si-agent scm run-incremental github myorg/myrepo --branch main
+        si-agent scm run-incremental github myorg/myrepo --content-filter issues
     """
     init()
     owner, repo_name = parse_repo(repo)
@@ -162,6 +168,7 @@ def run_incremental(
             start_workflows=start_workflows,
             workflow_definition_id=workflow_definition_id,
             param_set_id=param_set_id,
+            content_filter=content_filter,
         )
     )
 
@@ -191,6 +198,7 @@ def run_incremental(
 def reset_sync(
     scm: Annotated[SCM, typer.Argument(help="scm provider")],
     repo: Annotated[str, typer.Argument(help="repository in owner/repo format")],
+    content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
 ):
     """
     Reset sync state for a repository.
@@ -205,7 +213,7 @@ def reset_sync(
     owner, repo_name = parse_repo(repo)
     from ... import client
 
-    source = f"{scm.value}:{owner}:{repo_name}"
+    source = f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
 
     res = asyncio.run(client.reset_sync_state(source))
 
@@ -219,6 +227,7 @@ def reset_sync(
 def get_sync_state(
     scm: Annotated[SCM, typer.Argument(help="scm provider")],
     repo: Annotated[str, typer.Argument(help="repository in owner/repo format")],
+    content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
 ):
     """
     Get current sync state for a repository.
@@ -231,7 +240,7 @@ def get_sync_state(
     owner, repo_name = parse_repo(repo)
     from ... import client
 
-    source = f"{scm.value}:{owner}:{repo_name}"
+    source = f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
 
     res = asyncio.run(client.get_sync_state(source))
 
