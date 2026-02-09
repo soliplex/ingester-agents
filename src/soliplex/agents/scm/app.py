@@ -35,7 +35,7 @@ def get_scm(scm) -> BaseSCMProvider:
 
 def clean_meta(meta: dict):
     meta = meta.copy()
-    for k, v in meta.items():
+    for k, v in list(meta.items()):
         if v is None:
             del meta[k]
         elif isinstance(v, datetime.datetime):
