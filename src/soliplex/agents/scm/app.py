@@ -33,6 +33,16 @@ def get_scm(scm) -> BaseSCMProvider:
     return provider
 
 
+def clean_meta(meta: dict):
+    meta = meta.copy()
+    for k, v in meta.items():
+        if v is None:
+            del meta[k]
+        elif isinstance(v, datetime.datetime):
+            meta[k] = v.isoformat()
+    return meta
+
+
 async def load_inventory(
     scm: str,
     repo_name: str,
@@ -72,6 +82,7 @@ async def load_inventory(
 
     for row in to_process:
         meta = row["metadata"].copy()
+
         for k in [
             "path",
             "sha256",
@@ -82,6 +93,7 @@ async def load_inventory(
         ]:
             if k in meta:
                 del meta[k]
+        meta = clean_meta(meta)
         logger.info(f"starting ingest for {row['uri']}")
         mime_type = detect_mime_type(row["uri"])
         if "metadata" in row and "content-type" in row["metadata"] and row["metadata"]["content-type"]:
