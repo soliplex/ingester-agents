@@ -23,11 +23,10 @@ def gitea_provider_with_owner():
 # Basic provider methods tests
 
 
-def test_get_default_owner(gitea_provider):
-    """Test get_default_owner returns settings value."""
-    with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_owner = "gitea-owner"
-        assert gitea_provider.get_default_owner() == "gitea-owner"
+def test_init_no_owner():
+    """Test provider initialization without owner sets None."""
+    provider = GiteaProvider()
+    assert provider.owner is None
 
 
 def test_get_base_url(gitea_provider):
@@ -63,12 +62,10 @@ def test_get_last_updated_missing_field(gitea_provider):
 # Integration tests
 
 
-def test_initialization_with_default_owner(gitea_provider):
-    """Test Gitea provider uses default owner from settings."""
-    with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_owner = "default-gitea-owner"
-        provider = GiteaProvider()
-        assert provider.owner == "default-gitea-owner"
+def test_initialization_without_owner():
+    """Test Gitea provider has None owner when not provided."""
+    provider = GiteaProvider()
+    assert provider.owner is None
 
 
 def test_initialization_with_custom_owner(gitea_provider_with_owner):
@@ -80,9 +77,8 @@ def test_build_url(gitea_provider):
     """Test build_url constructs correct Gitea API URL."""
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
         mock_settings.scm_base_url = "https://gitea.example.com/api/v1"
-        mock_settings.scm_owner = "test-owner"
         mock_settings.scm_auth_token = "test-token"
-        provider = GiteaProvider()
+        provider = GiteaProvider(owner="test-owner")
         url = provider.build_url("/repos/owner/repo")
         assert url == "https://gitea.example.com/api/v1/repos/owner/repo"
 

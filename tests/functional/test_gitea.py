@@ -20,18 +20,13 @@ def gitea_provider_custom_owner(mock_settings):
 
 
 def test_init_default_owner(gitea_provider, mock_settings):
-    """Test GiteaProvider initialization with default owner."""
-    assert gitea_provider.owner == "test_owner"
+    """Test GiteaProvider initialization without explicit owner."""
+    assert gitea_provider.owner is None
 
 
 def test_init_custom_owner(gitea_provider_custom_owner):
     """Test GiteaProvider initialization with custom owner."""
     assert gitea_provider_custom_owner.owner == "custom_owner"
-
-
-def test_get_default_owner(gitea_provider, mock_settings):
-    """Test get_default_owner returns settings value."""
-    assert gitea_provider.get_default_owner() == "test_owner"
 
 
 def test_get_base_url(gitea_provider, mock_settings):

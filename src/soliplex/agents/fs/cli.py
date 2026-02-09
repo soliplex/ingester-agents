@@ -116,7 +116,10 @@ def run(
             print("no errors found")
             print(f"found {len(res['inventory'])} files")
             print(f"found {len(res['to_process'])} to process")
-            print(f"{len(res['ingested'])} ingested")
+            if "ingested" in res and len(res["ingested"]) > 0:
+                print(f"{len(res['ingested'])} ingested")
+            else:
+                print("no ingested files")
             if start_workflows:
                 print("workflow result")
                 print(json.dumps(res["workflow_result"], indent=2))

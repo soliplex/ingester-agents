@@ -24,17 +24,20 @@ docker-compose logs -f
 ### 2. Create Admin User
 
 **On Linux/Mac:**
+
 ```bash
 chmod +x init-admin.sh
 ./init-admin.sh
 ```
 
 **On Windows (PowerShell):**
+
 ```powershell
 .\init-admin.ps1
 ```
 
 **Or manually:**
+
 ```bash
 docker exec -it gitea gitea admin user create \
   --username admin \
@@ -45,7 +48,7 @@ docker exec -it gitea gitea admin user create \
 
 ### 3. Access Gitea
 
-Open http://localhost:3000 in your browser.
+Open <http://localhost:3000> in your browser.
 
 **Default credentials:**
 - Username: `admin`
@@ -56,6 +59,7 @@ Open http://localhost:3000 in your browser.
 The init scripts will automatically generate an API token. If you need to create additional tokens:
 
 **Via CLI:**
+
 ```bash
 docker exec gitea gitea admin user generate-access-token \
   --username admin \
@@ -64,7 +68,7 @@ docker exec gitea gitea admin user generate-access-token \
 ```
 
 **Via Web UI:**
-1. Log in to Gitea (http://localhost:3000)
+1. Log in to Gitea (<http://localhost:3000>)
 2. Click your profile → Settings → Applications
 3. Generate New Token
 4. Select scopes: `write:repository`, `write:issue`, `write:user`
@@ -81,7 +85,9 @@ export GITEA_OWNER=admin
 ```
 
 **Windows PowerShell:**
+
 ```powershell
+# Set environment variables
 $env:GITEA_URL = "http://localhost:3000"
 $env:GITEA_TOKEN = "<your-api-token>"
 $env:GITEA_OWNER = "admin"
@@ -96,6 +102,7 @@ The Gitea instance is configured to use SQLite with the following settings:
 - **Host Path**: `./gitea_data/gitea/gitea.db`
 
 SQLite configuration in `docker-compose.yml`:
+
 ```yaml
 environment:
   - GITEA__database__DB_TYPE=sqlite3
@@ -183,6 +190,7 @@ si-agent scm run-inventory gitea <repo-name> admin
 ### Port Already in Use
 
 If port 3000 is already in use, edit `docker-compose.yml`:
+
 ```yaml
 ports:
   - "3001:3000"  # Change host port to 3001
@@ -193,6 +201,7 @@ Then update `GITEA_URL=http://localhost:3001`
 ### Database Locked
 
 If you see "database is locked" errors:
+
 ```bash
 # Stop the container
 docker-compose down
@@ -207,6 +216,7 @@ docker-compose up -d
 ### Reset Everything
 
 To completely reset the Gitea instance:
+
 ```bash
 # Stop container
 docker-compose down
@@ -243,7 +253,7 @@ The `build_test_data.py` script can be used to populate test issues. It expects:
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────┐
 │   Docker Host (Windows)         │
 │                                 │

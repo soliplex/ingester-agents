@@ -496,9 +496,6 @@ class GitCliDecorator(BaseSCMProvider):
 
     # === Delegated methods (API required) ===
 
-    def get_default_owner(self) -> str:
-        return self._inner.get_default_owner()
-
     def get_base_url(self) -> str:
         return self._inner.get_base_url()
 

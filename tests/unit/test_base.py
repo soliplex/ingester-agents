@@ -15,9 +15,6 @@ from soliplex.agents.scm.base import BaseSCMProvider
 class ConcreteSCMProvider(BaseSCMProvider):
     """Concrete implementation for testing."""
 
-    def get_default_owner(self) -> str:
-        return "test_owner"
-
     def get_base_url(self) -> str:
         return "https://api.example.com"
 
@@ -41,8 +38,8 @@ def provider_with_owner():
 
 
 def test_init_default_owner(provider):
-    """Test provider initialization with default owner."""
-    assert provider.owner == "test_owner"
+    """Test provider initialization without owner."""
+    assert provider.owner is None
 
 
 def test_init_custom_owner(provider_with_owner):
@@ -565,13 +562,7 @@ async def test_create_repository_without_owner(mock_response):
 
     from tests.unit.conftest import create_async_context_manager
 
-    # Create a provider that returns None for get_default_owner
-    class NoOwnerProvider(ConcreteSCMProvider):
-        def get_default_owner(self) -> str:
-            return ""
-
-    provider = NoOwnerProvider(owner="")  # Explicitly set empty owner
-    provider.owner = None  # Override to None
+    provider = ConcreteSCMProvider()  # No owner provided
 
     created_repo = {"id": 1, "name": "user-repo"}
 
@@ -1452,16 +1443,13 @@ def test_get_base_url_raises_when_not_configured():
     from soliplex.agents.scm.base import BaseSCMProvider
 
     class TestProvider(BaseSCMProvider):
-        def get_default_owner(self):
-            return "admin"
-
         def get_auth_token(self):
             return "token"
 
         def get_last_updated(self, rec):
             return None
 
-    provider = TestProvider()
+    provider = TestProvider(owner="admin")
 
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
         mock_settings.scm_base_url = None
@@ -1716,16 +1704,17 @@ async def test_list_issue_comments_success(provider, mock_response, sample_comme
 
 
 @pytest.mark.asyncio
-async def test_list_issue_comments_default_owner(provider, mock_response, sample_comment):
-    """Test list_issue_comments uses default owner when None."""
+async def test_list_issue_comments_with_explicit_owner(mock_response, sample_comment):
+    """Test list_issue_comments uses explicit owner."""
+    provider = ConcreteSCMProvider(owner="explicit_owner")
     with patch.object(provider, "_fetch_json") as mock_fetch:
         mock_fetch.return_value = [sample_comment]
 
         result = await provider.list_issue_comments(None, "test_repo", 42)
 
         assert len(result) == 1
-        # Should use provider's default owner "test_owner"
-        mock_fetch.assert_called_once_with("https://api.example.com/repos/test_owner/test_repo/issues/42/comments")
+        # Should use provider's owner "explicit_owner"
+        mock_fetch.assert_called_once_with("https://api.example.com/repos/explicit_owner/test_repo/issues/42/comments")
 
 
 @pytest.mark.asyncio
@@ -1775,7 +1764,7 @@ async def test_list_issues_with_since_and_add_comments(provider, mock_response, 
             mock_paginate.return_value = [issue_with_number]
             mock_list_comments.return_value = [{"body": "Comment 1"}, {"body": "Comment 2"}]
 
-            result = await provider.list_issues("test_repo", add_comments=True, since=since_date)
+            result = await provider.list_issues("test_repo", owner="test_owner", add_comments=True, since=since_date)
 
             assert len(result) == 1
             assert result[0]["comments"] == [{"body": "Comment 1"}, {"body": "Comment 2"}]
@@ -2068,18 +2057,28 @@ async def test_list_commits_since_marker_on_second_page(provider, mock_response)
 # ==================== Tests for base class methods ====================
 
 
-def test_base_get_default_owner():
-    """Test BaseSCMProvider.get_default_owner returns settings value."""
+def test_base_init_no_owner():
+    """Test BaseSCMProvider.__init__ sets owner to None when not provided."""
     from soliplex.agents.scm.base import BaseSCMProvider
 
     class MinimalProvider(BaseSCMProvider):
         def get_last_updated(self, rec):
             return None
 
-    with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_owner = "settings_owner"
-        provider = MinimalProvider()
-        assert provider.get_default_owner() == "settings_owner"
+    provider = MinimalProvider()
+    assert provider.owner is None
+
+
+def test_base_init_with_owner():
+    """Test BaseSCMProvider.__init__ sets owner when provided."""
+    from soliplex.agents.scm.base import BaseSCMProvider
+
+    class MinimalProvider(BaseSCMProvider):
+        def get_last_updated(self, rec):
+            return None
+
+    provider = MinimalProvider(owner="my_owner")
+    assert provider.owner == "my_owner"
 
 
 def test_base_get_base_url():
@@ -2091,7 +2090,6 @@ def test_base_get_base_url():
             return None
 
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_owner = "owner"
         mock_settings.scm_base_url = "https://api.test.com"
         provider = MinimalProvider()
         assert provider.get_base_url() == "https://api.test.com"
@@ -2106,7 +2104,6 @@ def test_base_get_auth_token():
             return None
 
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_owner = "owner"
         mock_settings.scm_auth_token = "test_token_123"
         provider = MinimalProvider()
         assert provider.get_auth_token() == "test_token_123"
@@ -2123,7 +2120,6 @@ def test_base_get_auth_headers_basic_auth():
             return None
 
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_owner = "owner"
         mock_settings.scm_auth_token = None
         mock_settings.scm_auth_username = "testuser"
         mock_settings.scm_auth_password = SecretStr("testpass")
@@ -2145,7 +2141,6 @@ def test_base_get_auth_headers_raises_no_auth():
             return None
 
     with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_owner = "owner"
         mock_settings.scm_auth_token = None
         mock_settings.scm_auth_username = None
         mock_settings.scm_auth_password = None

@@ -24,13 +24,13 @@ si-agent fs check-status <path> <source>
 si-agent fs build-config <path>
 si-agent fs validate-config <path>
 
-# SCM agent (github/gitea)
-si-agent scm run-inventory <platform> <repo> <owner>
-si-agent scm run-incremental <platform> <repo> <owner>
-si-agent scm list-issues <platform> <repo> <owner>
-si-agent scm get-repo <platform> <repo> <owner>
-si-agent scm get-sync-state <platform> <repo> <owner>
-si-agent scm reset-sync <platform> <repo> <owner>
+# SCM agent (github/gitea) - uses owner/repo notation
+si-agent scm run-inventory <platform> <owner>/<repo>
+si-agent scm run-incremental <platform> <owner>/<repo>
+si-agent scm list-issues <platform> <owner>/<repo>
+si-agent scm get-repo <platform> <owner>/<repo>
+si-agent scm get-sync-state <platform> <owner>/<repo>
+si-agent scm reset-sync <platform> <owner>/<repo>
 
 # WebDAV agent
 si-agent webdav run-inventory <path> <source>
@@ -56,7 +56,7 @@ si-agent serve --reload
 
 ## Project Structure
 
-```
+```text
 src/soliplex/agents/
 ├── cli.py              # Main Typer entry point
 ├── client.py           # Ingester API client (batch, status, ingest, sync state)
@@ -96,7 +96,6 @@ INGESTER_API_KEY=your-key
 
 # SCM authentication
 scm_auth_token=your-token
-scm_owner=default-owner
 scm_base_url=https://gitea.example.com/api/v1  # Required for Gitea
 
 # WebDAV authentication
@@ -123,15 +122,18 @@ AUTH_TRUST_PROXY_HEADERS=false
 ## Key Patterns
 
 ### Batch Management
+
 Documents are grouped into batches by source name. The system reuses existing batches for incremental ingestion.
 
 ### Status Checking
+
 Files are hashed and compared against the Ingester database:
 - **new:** File does not exist
 - **mismatch:** File changed (hash differs)
 - **match:** File unchanged (skipped)
 
 ### Incremental Sync (SCM)
+
 The run-incremental command tracks the last processed commit SHA to only fetch changed files on subsequent runs.
 
 ## Testing

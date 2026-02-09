@@ -14,7 +14,6 @@ import pytest
 # os.environ.setdefault("scm_auth_token", "test_scm_auth_token")
 os.environ.setdefault("scm_auth_username", "gitea_admin")
 os.environ.setdefault("scm_auth_password", "test_password")
-os.environ.setdefault("scm_owner", "gitea_admin")
 os.environ.setdefault("scm_base_url", "http://localhost:3000/api/v1")
 os.environ.setdefault("LOG_LEVEL", "INFO")
 

@@ -25,7 +25,7 @@ scm_router = APIRouter(
 async def list_issues(
     scm: SCM,
     repo_name: str = Query(..., description="Repository name"),
-    owner: str | None = Query(None, description="Repository owner"),
+    owner: str = Query(..., description="Repository owner"),
 ):
     """
     List issues from a GitHub or Gitea repository.
@@ -39,7 +39,7 @@ async def list_issues(
         "status": "ok",
         "scm": scm.value,
         "repo": repo_name,
-        "owner": owner or provider.get_default_owner(),
+        "owner": owner,
         "issue_count": len(issues),
         "issues": issues,
     }
@@ -49,7 +49,7 @@ async def list_issues(
 async def get_repo(
     scm: SCM,
     repo_name: str = Query(..., description="Repository name"),
-    owner: str | None = Query(None, description="Repository owner"),
+    owner: str = Query(..., description="Repository owner"),
 ):
     """
     List files in a GitHub or Gitea repository.
@@ -75,7 +75,7 @@ async def get_repo(
         "status": "ok",
         "scm": scm.value,
         "repo": repo_name,
-        "owner": owner or provider.get_default_owner(),
+        "owner": owner,
         "file_count": len(file_list),
         "files": file_list,
     }

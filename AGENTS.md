@@ -27,12 +27,12 @@ uv run --env-file .env si-agent serve --reload
 si-agent fs run-inventory /path/to/docs my-source
 
 # SCM incremental sync
-si-agent scm run-incremental gitea myrepo myowner
+si-agent scm run-incremental gitea myowner/myrepo
 ```
 
 ## Project Structure
 
-```
+```text
 src/soliplex/agents/
 ├── cli.py              # Main Typer CLI entry point
 ├── client.py           # Ingester API client (HTTP operations)
@@ -136,18 +136,20 @@ uv run pytest tests/unit/test_client.py
 ## Configuration
 
 ### Required
+
 ```bash
 ENDPOINT_URL=http://localhost:8000/api/v1   # Ingester API
 ```
 
 ### SCM Authentication
+
 ```bash
 scm_auth_token=<token>                      # GitHub PAT or Gitea token
-scm_owner=<owner>                           # Default repo owner
 scm_base_url=https://gitea.example.com/api/v1  # Required for Gitea
 ```
 
 ### WebDAV
+
 ```bash
 WEBDAV_URL=https://webdav.example.com
 WEBDAV_USERNAME=<username>
@@ -155,6 +157,7 @@ WEBDAV_PASSWORD=<password>
 ```
 
 ### Server Authentication
+
 ```bash
 API_KEY=<key>
 API_KEY_ENABLED=false
@@ -165,7 +168,7 @@ See `config.py` for full settings reference.
 
 ## CLI Commands
 
-```
+```text
 si-agent
 ├── fs
 │   ├── build-config <path>              # Scan directory

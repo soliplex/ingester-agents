@@ -60,7 +60,6 @@ si-agent = "soliplex.agents.cli:cli"
 
 scm_auth_username="gitea_admin"
 scm_auth_password="test_password"
-scm_owner="test_owner"
 scm_base_url="http://localhost:3000/api/v1"
 LOG_LEVEL="INFO"
 INGESTER_URL="http://localhost:8000/ingest_document"

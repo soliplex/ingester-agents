@@ -29,11 +29,10 @@ def github_provider_with_owner():
 # Basic provider methods tests
 
 
-def test_get_default_owner(github_provider):
-    """Test get_default_owner returns settings value."""
-    with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_owner = "test-owner"
-        assert github_provider.get_default_owner() == "test-owner"
+def test_init_no_owner():
+    """Test provider initialization without owner sets None."""
+    provider = GitHubProvider()
+    assert provider.owner is None
 
 
 def test_get_base_url(github_provider):
@@ -219,12 +218,10 @@ async def test_get_blob_raises_on_error(github_provider, mock_response):
 # Integration tests
 
 
-def test_initialization_with_default_owner(github_provider):
-    """Test GitHub provider uses default owner from settings."""
-    with patch("soliplex.agents.scm.base.settings") as mock_settings:
-        mock_settings.scm_owner = "default-owner"
-        provider = GitHubProvider()
-        assert provider.owner == "default-owner"
+def test_initialization_without_owner():
+    """Test GitHub provider has None owner when not provided."""
+    provider = GitHubProvider()
+    assert provider.owner is None
 
 
 def test_initialization_with_custom_owner(github_provider_with_owner):
