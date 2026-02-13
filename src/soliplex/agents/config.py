@@ -2,6 +2,7 @@ import enum
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings
+from pydantic_settings import SettingsConfigDict
 
 
 class SCM(enum.StrEnum):
@@ -16,6 +17,7 @@ class ContentFilter(enum.StrEnum):
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(secrets_dir="/run/secrets")
     # SCM settings
     scm_auth_token: SecretStr | None = None
     scm_auth_username: str | None = None

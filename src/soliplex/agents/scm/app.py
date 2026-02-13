@@ -390,7 +390,7 @@ async def incremental_sync(
 
     # Start workflows if requested and no errors
     wf_res = None
-    if len(errors) == 0 and start_workflows and len(ingested) > 0:
+    if len(errors) == 0 and start_workflows:
         logger.info("Starting workflows")
         wf_res = await client.do_start_workflows(batch_id, workflow_definition_id, param_set_id, priority)
 
