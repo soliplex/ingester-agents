@@ -216,9 +216,10 @@ class GitCliWrapper:
             )
             return proc.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
         except TimeoutError as err:
+            raise GitCliError(f"Git command timed out after {self.timeout}s") from err
+        finally:
             proc.kill()
             await proc.wait()
-            raise GitCliError(f"Git command timed out after {self.timeout}s") from err
 
     async def clone(
         self,
