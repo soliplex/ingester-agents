@@ -392,7 +392,7 @@ async def incremental_sync(
     wf_res = None
     if len(errors) == 0 and start_workflows:
         logger.info("Starting workflows")
-        wf_res = await client.do_start_workflows(batch_id, workflow_definition_id, param_set_id, priority)
+        wf_res = await client.start_workflows_for_batch(batch_id, workflow_definition_id, param_set_id, priority)
 
     # Update sync state with latest commit
     latest_commit_sha = last_commit_sha
