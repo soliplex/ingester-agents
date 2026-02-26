@@ -11,6 +11,7 @@ from fastapi import APIRouter
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from soliplex.agents.config import configure_logging
 from soliplex.agents.config import settings
 
 from .routes.fs import fs_router
@@ -22,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 async def lifespan(app: FastAPI):
     """Manage app lifecycle."""
-    logging.basicConfig(level=settings.log_level)
+
+    configure_logging()
     logger.info("Starting soliplex-agents server")
     if settings.api_prefix:
         logger.info(f"API prefix: {settings.api_prefix}")

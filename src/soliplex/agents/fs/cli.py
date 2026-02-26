@@ -90,9 +90,6 @@ def run(
         if param_set_id is None:
             raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
     print(f"loading {config_file} source={source}")
-    if os.path.exists(config_file) and os.path.isdir(config_file):
-        print(f"build config file for {config_file}")
-        config_file = _build_config(config_file)
     res = asyncio.run(
         app.load_inventory(
             config_file,

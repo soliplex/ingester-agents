@@ -13,10 +13,6 @@ from . import app as app
 logger = logging.getLogger(__name__)
 
 
-def init():
-    logging.basicConfig(level=settings.log_level)
-
-
 def parse_repo(repo: str) -> tuple[str, str]:
     """
     Parse owner/repo notation into (owner, repo_name).
@@ -53,7 +49,6 @@ def ingest_issues(
         si-agent scm list-issues gitea admin/myrepo
         si-agent scm list-issues github myorg/myrepo
     """
-    init()
     owner, repo_name = parse_repo(repo)
     issues = asyncio.run(app.get_scm(scm).list_issues(repo_name, owner, add_comments=True))
     for issue in issues:
@@ -73,7 +68,6 @@ def get_repo(
         si-agent scm get-repo gitea admin/myrepo
         si-agent scm get-repo github myorg/myrepo
     """
-    init()
     owner, repo_name = parse_repo(repo)
     print(asyncio.run(app.get_scm(scm).list_repo_files(repo_name, owner, settings.extensions)))
 
@@ -97,7 +91,6 @@ def run_inventory(
         si-agent scm run-inventory github myorg/myrepo
         si-agent scm run-inventory github myorg/myrepo --content-filter files
     """
-    init()
     owner, repo_name = parse_repo(repo)
     if start_workflows:
         if workflow_definition_id is None:
@@ -156,7 +149,6 @@ def run_incremental(
         si-agent scm run-incremental github myorg/myrepo --branch main
         si-agent scm run-incremental github myorg/myrepo --content-filter issues
     """
-    init()
     owner, repo_name = parse_repo(repo)
     res = asyncio.run(
         app.incremental_sync(
@@ -209,7 +201,6 @@ def reset_sync(
         si-agent scm reset-sync gitea admin/myrepo
         si-agent scm reset-sync github myorg/myrepo
     """
-    init()
     owner, repo_name = parse_repo(repo)
     from ... import client
 
@@ -236,7 +227,6 @@ def get_sync_state(
         si-agent scm get-sync-state gitea admin/myrepo
         si-agent scm get-sync-state github myorg/myrepo
     """
-    init()
     owner, repo_name = parse_repo(repo)
     from ... import client
 

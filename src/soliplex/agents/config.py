@@ -1,4 +1,5 @@
 import enum
+import logging
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     # File settings
     extensions: list[str] = ["md", "pdf", "doc", "docx"]
     log_level: str = "INFO"
+    log_format: str = "{name}|{asctime}|{levelname}|{message}"
     endpoint_url: str = "http://localhost:8000/api/v1"
 
     # Ingester API authentication (for outgoing requests to the Ingester API)
@@ -68,3 +70,22 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def configure_logging():
+    """Configure logging from settings, with safe fallback."""
+    try:
+        logging.basicConfig(
+            level=settings.log_level,
+            format=settings.log_format,
+            datefmt="%Y-%m-%dT%H:%M:%S",
+            style="{",
+        )
+    except Exception:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="{name}|{asctime}|{levelname}|{message}",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+            style="{",
+        )
+        logging.getLogger().warning("invalid settings. environment variables might not be set. ")
