@@ -1,5 +1,6 @@
 """Tests for soliplex.agents.client module."""
 
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -14,8 +15,8 @@ from soliplex.agents.scm import UnexpectedResponseError
 async def test_get_session():
     """Test get_session creates session with correct headers."""
     async with client.get_session() as session:
-        assert isinstance(session, aiohttp.ClientSession)
-        assert session.headers["User-Agent"] == "soliplex-agent"
+        assert isinstance(session, client._RetrySession)
+        assert session._session.headers["User-Agent"] == "soliplex-agent"
 
 
 @pytest.mark.asyncio
@@ -25,9 +26,9 @@ async def test_get_session_with_api_key():
         mock_settings.ingester_api_key = "your-api-key"
 
         async with client.get_session() as session:
-            assert isinstance(session, aiohttp.ClientSession)
-            assert session.headers["User-Agent"] == "soliplex-agent"
-            assert session.headers["Authorization"] == "Bearer your-api-key"
+            assert isinstance(session, client._RetrySession)
+            assert session._session.headers["User-Agent"] == "soliplex-agent"
+            assert session._session.headers["Authorization"] == "Bearer your-api-key"
 
 
 @pytest.mark.asyncio
@@ -37,9 +38,9 @@ async def test_get_session_without_api_key():
         mock_settings.ingester_api_key = None
 
         async with client.get_session() as session:
-            assert isinstance(session, aiohttp.ClientSession)
-            assert session.headers["User-Agent"] == "soliplex-agent"
-            assert "Authorization" not in session.headers
+            assert isinstance(session, client._RetrySession)
+            assert session._session.headers["User-Agent"] == "soliplex-agent"
+            assert "Authorization" not in session._session.headers
 
 
 def test_build_url():
@@ -460,3 +461,90 @@ def test_constants():
     assert client.STATUS_NEW == "new"
     assert client.STATUS_MISMATCH == "mismatch"
     assert client.PROCESSABLE_STATUSES == {"new", "mismatch"}
+
+
+# --- Retry / 429 tests ---
+
+
+@pytest.mark.asyncio
+async def test_retry_session_delegates_methods():
+    """Test _RetrySession wraps get/post/put/delete as _RetryRequestContext."""
+    mock_session = MagicMock()
+    retry_session = client._RetrySession(mock_session)
+
+    for method_name in ("get", "post", "put", "delete"):
+        ctx = getattr(retry_session, method_name)("http://example.com")
+        assert isinstance(ctx, client._RetryRequestContext)
+
+
+@pytest.mark.asyncio
+async def test_retry_request_context_no_retry_on_success():
+    """Test _RetryRequestContext returns immediately on non-429 status."""
+    mock_method = AsyncMock()
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.release = MagicMock()
+    mock_method.return_value = mock_resp
+
+    ctx = client._RetryRequestContext(mock_method, "http://example.com")
+    async with ctx as response:
+        assert response.status == 200
+
+    mock_method.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_retry_request_context_retries_on_429(monkeypatch):
+    """Test _RetryRequestContext retries on 429 and succeeds."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_method = AsyncMock()
+
+    def make_429():
+        r = MagicMock()
+        r.status = 429
+        r.release = MagicMock()
+        return r
+
+    resp_200 = MagicMock()
+    resp_200.status = 200
+    resp_200.release = MagicMock()
+
+    mock_method.side_effect = [make_429(), make_429(), resp_200]
+
+    ctx = client._RetryRequestContext(mock_method, "http://example.com")
+    async with ctx as response:
+        assert response.status == 200
+
+    assert mock_method.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_request_context_exhausts_retries(monkeypatch):
+    """Test _RetryRequestContext raises RateLimitError after max retries exhausted."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_method = AsyncMock()
+
+    resp_429 = MagicMock()
+    resp_429.status = 429
+    resp_429.release = MagicMock()
+
+    mock_method.return_value = resp_429
+
+    ctx = client._RetryRequestContext(mock_method, "http://example.com")
+    with pytest.raises(client.RateLimitError):
+        async with ctx as _response:
+            pass
+
+    assert mock_method.call_count == client.RETRY_MAX_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_retry_request_context_aexit_with_no_response():
+    """Test __aexit__ handles the case where _response is None (e.g., __aenter__ never completed)."""
+    mock_method = AsyncMock()
+    ctx = client._RetryRequestContext(mock_method, "http://example.com")
+    # Call __aexit__ directly without ever calling __aenter__
+    await ctx.__aexit__(None, None, None)
+    assert ctx._response is None
