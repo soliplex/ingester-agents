@@ -5,6 +5,10 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import aiohttp
+from tenacity import AsyncRetrying
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_attempt
+from tenacity import wait_exponential
 
 from .config import settings
 from .scm import UnexpectedResponseError
@@ -19,10 +23,73 @@ STATUS_NEW = "new"
 STATUS_MISMATCH = "mismatch"
 PROCESSABLE_STATUSES = {STATUS_NEW, STATUS_MISMATCH}
 
+# Retry settings for 429 Too Many Requests
+RETRY_MAX_ATTEMPTS = 5
+RETRY_MAX_DELAY = 60
+
+
+class RateLimitError(Exception):
+    """Raised when the server returns 429 Too Many Requests."""
+
+    pass
+
 
 def validate_parameters(start_workflows: bool, workflow_definition_id: str | None, param_set_id: str | None) -> None:
     if start_workflows and (workflow_definition_id is None or param_set_id is None):
         raise ValueError("start_workflows requires both workflow_definition_id and param_set_id")
+
+
+class _RetrySession:
+    """Wraps an aiohttp.ClientSession to retry on 429 Too Many Requests with exponential backoff."""
+
+    def __init__(self, session: aiohttp.ClientSession) -> None:
+        self._session = session
+
+    def get(self, url, **kwargs):
+        return _RetryRequestContext(self._session.get, url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return _RetryRequestContext(self._session.post, url, **kwargs)
+
+    def put(self, url, **kwargs):
+        return _RetryRequestContext(self._session.put, url, **kwargs)
+
+    def delete(self, url, **kwargs):
+        return _RetryRequestContext(self._session.delete, url, **kwargs)
+
+
+class _RetryRequestContext:
+    """Async context manager that retries the request on 429 responses using tenacity."""
+
+    def __init__(self, method, url, **kwargs) -> None:
+        self._method = method
+        self._url = url
+        self._kwargs = kwargs
+        self._response: aiohttp.ClientResponse | None = None
+
+    async def __aenter__(self) -> aiohttp.ClientResponse:
+        async for attempt in AsyncRetrying(
+            retry=retry_if_exception_type(RateLimitError),
+            wait=wait_exponential(multiplier=1, max=RETRY_MAX_DELAY),
+            stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+            reraise=True,
+        ):
+            with attempt:
+                self._response = await self._method(self._url, **self._kwargs)
+                if self._response.status == 429:
+                    logger.warning(
+                        "Rate limited (429) on %s (attempt %d/%d)",
+                        self._url,
+                        attempt.retry_state.attempt_number,
+                        RETRY_MAX_ATTEMPTS,
+                    )
+                    self._response.release()
+                    raise RateLimitError(f"429 Too Many Requests on {self._url}")
+        return self._response  # type: ignore[return-value]
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._response is not None:
+            self._response.release()
 
 
 @asynccontextmanager
@@ -31,7 +98,7 @@ async def get_session():
     if settings.ingester_api_key:
         headers["Authorization"] = f"Bearer {settings.ingester_api_key}"
     async with aiohttp.ClientSession(headers=headers) as session:
-        yield session
+        yield _RetrySession(session)
 
 
 def _build_url(path: str) -> str:
