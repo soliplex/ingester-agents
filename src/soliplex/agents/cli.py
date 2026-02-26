@@ -1,17 +1,17 @@
 import logging
-import os
 
 import typer
 
 import soliplex.agents.fs.cli as fs
 import soliplex.agents.scm.cli as scm
 import soliplex.agents.webdav.cli as webdav
+from soliplex.agents.config import configure_logging
 
 logger = logging.getLogger(__name__)
 
 
 def init():
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+    configure_logging()
 
 
 cli = typer.Typer(no_args_is_help=True, callback=init)
