@@ -32,13 +32,17 @@ def validate(
         str,
         typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
     ] = None,
+    export_urls: Annotated[
+        str,
+        typer.Option(help="Export discovered URLs to a file (one absolute path per line)"),
+    ] = None,
 ):
     """
     Validate a configuration.
 
     Scans the specified WebDAV directory recursively and validates discovered files.
     """
-    asyncio.run(app.validate_config(config_path, webdav_url, webdav_username, webdav_password))
+    asyncio.run(app.validate_config(config_path, webdav_url, webdav_username, webdav_password, export_urls))
 
 
 @cli.command("check-status")
@@ -106,6 +110,71 @@ def run(
     res = asyncio.run(
         app.load_inventory(
             config_path,
+            source,
+            start,
+            end,
+            workflow_definition_id=workflow_definition_id,
+            param_set_id=param_set_id,
+            start_workflows=start_workflows,
+            priority=priority,
+            webdav_url=webdav_url,
+            webdav_username=webdav_username,
+            webdav_password=webdav_password,
+        )
+    )
+    if do_json:
+        print(json.dumps(res, indent=2))
+    else:
+        if "errors" in res and len(res["errors"]) > 0:
+            print(f"found {len(res['errors'])} errors:")
+            for err in res["errors"]:
+                print(err)
+        else:
+            print("no errors found")
+            print(f"found {len(res['inventory'])} files")
+            print(f"found {len(res['to_process'])} to process")
+            print(f"{len(res['ingested'])} ingested")
+            if start_workflows:
+                print("workflow result")
+                print(json.dumps(res["workflow_result"], indent=2))
+
+
+@cli.command("run-from-urls")
+def run_from_urls(
+    urls_file: Annotated[
+        str,
+        typer.Argument(help="Path to file containing WebDAV URLs (one per line)"),
+    ],
+    source: Annotated[str, typer.Argument(help="source name")],
+    start: Annotated[int, typer.Option(help="start index")] = 0,
+    end: Annotated[int, typer.Option(help="end index")] = None,
+    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = False,
+    workflow_definition_id: Annotated[str, typer.Option(help="workflow definition id")] = None,
+    param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
+    priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
+    do_json: Annotated[bool, typer.Option(help="output json")] = False,
+    webdav_url: Annotated[
+        str,
+        typer.Option(help="WebDAV server URL (uses WEBDAV_URL env var if not provided)"),
+    ] = None,
+    webdav_username: Annotated[
+        str,
+        typer.Option(help="WebDAV username (uses WEBDAV_USERNAME env var if not provided)"),
+    ] = None,
+    webdav_password: Annotated[
+        str,
+        typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
+    ] = None,
+):
+    """
+    Run ingestion from a URL list file.
+
+    Reads a file of WebDAV URLs (one per line) and ingests those specific files.
+    """
+    print(f"loading URLs from {urls_file} source={source}")
+    res = asyncio.run(
+        app.load_inventory_from_urls(
+            urls_file,
             source,
             start,
             end,

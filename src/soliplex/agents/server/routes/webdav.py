@@ -144,3 +144,56 @@ async def run_inventory(
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error running inventory: {str(e)}") from e
+
+
+@webdav_router.post("/run-from-urls")
+async def run_from_urls(
+    urls_file: str = Form(
+        ...,
+        description="Path to file containing WebDAV URLs (one per line)",
+    ),
+    source: str = Form(..., description="Source name"),
+    start: int = Form(0, description="Start index"),
+    end: int | None = Form(None, description="End index"),
+    start_workflows: bool = Form(True, description="Start workflows after ingestion"),
+    workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
+    param_set_id: str | None = Form(None, description="Parameter set ID"),
+    priority: int = Form(0, description="Workflow priority"),
+    webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
+    webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
+    webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
+):
+    """
+    Run document ingestion from a URL list file.
+
+    Reads a file of WebDAV URLs (one per line) and ingests those specific files.
+    """
+    try:
+        result = await webdav_app.load_inventory_from_urls(
+            urls_file,
+            source,
+            start,
+            end,
+            workflow_definition_id=workflow_definition_id,
+            param_set_id=param_set_id,
+            start_workflows=start_workflows,
+            priority=priority,
+            webdav_url=webdav_url,
+            webdav_username=webdav_username,
+            webdav_password=webdav_password,
+        )
+
+        return {
+            "status": "ok",
+            "inventory_count": len(result.get("inventory", [])),
+            "to_process_count": len(result.get("to_process", [])),
+            "ingested_count": len(result.get("ingested", [])),
+            "error_count": len(result.get("errors", [])),
+            "batch_id": result.get("batch_id"),
+            "errors": result.get("errors", []),
+            "workflow_result": result.get("workflow_result"),
+        }
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error running from URLs: {str(e)}") from e

@@ -45,7 +45,9 @@ def create_webdav_client(url: str = None, username: str = None, password: str = 
     return WebDAVClient(webdav_url, auth=auth, verify=settings.ssl_verify, headers=headers)
 
 
-async def validate_config(path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None):
+async def validate_config(
+    path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None, export_urls: str = None
+):
     """
     Validate a configuration and print out validation results.
 
@@ -56,6 +58,7 @@ async def validate_config(path: str, webdav_url: str = None, webdav_username: st
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
+        export_urls: Optional file path to export discovered URLs to
 
     Returns:
         None
@@ -69,6 +72,78 @@ async def validate_config(path: str, webdav_url: str = None, webdav_username: st
         print(f"Found {len(invalid)} Invalid files:")
         for row in invalid:
             print(row["path"], row["reason"], row["metadata"]["content-type"])
+    if export_urls:
+        count = await export_urls_to_file(config, path, export_urls)
+        print(f"Exported {count} URLs to {export_urls}")
+
+
+async def export_urls_to_file(config: list[dict], base_path: str, output_path: str) -> int:
+    """
+    Export discovered URLs to a file, one absolute WebDAV path per line.
+
+    Args:
+        config: Config list with relative paths
+        base_path: Base WebDAV path used during discovery
+        output_path: File path to write URLs to
+
+    Returns:
+        Number of URLs written
+    """
+    normalized_base = base_path.rstrip("/")
+    async with aiofiles.open(output_path, "w") as f:
+        for item in config:
+            absolute_path = f"{normalized_base}/{item['path']}"
+            await f.write(absolute_path + "\n")
+    return len(config)
+
+
+async def build_config_from_urls(
+    urls_file: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None
+) -> list[dict]:
+    """
+    Build config from a file containing one absolute WebDAV path per line.
+
+    Args:
+        urls_file: Path to file containing WebDAV URLs (one per line)
+        webdav_url: Optional WebDAV server URL
+        webdav_username: Optional WebDAV username
+        webdav_password: Optional WebDAV password
+
+    Returns:
+        List of file configuration dictionaries with absolute paths
+    """
+    webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
+    allowed_extensions = settings.extensions
+    config = []
+
+    async with aiofiles.open(urls_file) as f:
+        content = await f.read()
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+
+    for full_path in lines:
+        ext = Path(full_path).suffix.lstrip(".")
+        if ext not in allowed_extensions:
+            logger.info(f"skipping {full_path}")
+            continue
+
+        buffer = BytesIO()
+        webdav_client.download_fileobj(full_path, buffer)
+        content_bytes = buffer.getvalue()
+        sha256_hash = hashlib.sha256(content_bytes, usedforsecurity=False).hexdigest()
+        mime_type = detect_mime_type(full_path)
+
+        rec = {
+            "path": full_path,
+            "sha256": sha256_hash,
+            "metadata": {
+                "size": len(content_bytes),
+                "content-type": mime_type,
+            },
+        }
+        config.append(rec)
+
+    return config
 
 
 async def build_config(
@@ -197,6 +272,7 @@ async def load_inventory(
     webdav_url: str = None,
     webdav_username: str = None,
     webdav_password: str = None,
+    config: list[dict] | None = None,
 ):
     """
     Load and process an inventory for ingestion.
@@ -224,7 +300,8 @@ async def load_inventory(
     """
 
     client.validate_parameters(start_workflows, workflow_definition_id, param_set_id)
-    config = await build_config(path, webdav_url, webdav_username, webdav_password)
+    if config is None:
+        config = await build_config(path, webdav_url, webdav_username, webdav_password)
     base_path = path
     if skip_invalid:
         filtered = check_config(config)
@@ -338,7 +415,7 @@ async def do_ingest(
     logger.info(f"base_path={base_path}, uri={uri}")
 
     # Check if base_path is a local directory
-    if Path(base_path).exists():
+    if base_path and Path(base_path).exists():
         # Local file ingestion
         load_path = Path(base_path) / uri
         logger.debug(f"Loading from local path: {load_path}")
@@ -360,6 +437,61 @@ async def do_ingest(
         source,
         batch_id,
         mime_type,
+    )
+
+
+async def load_inventory_from_urls(
+    urls_file: str,
+    source: str,
+    start: int = 0,
+    end: int = None,
+    skip_invalid: bool = False,
+    workflow_definition_id: str | None = None,
+    start_workflows: bool = False,
+    param_set_id: str | None = None,
+    priority: int = 0,
+    webdav_url: str = None,
+    webdav_username: str = None,
+    webdav_password: str = None,
+):
+    """
+    Load and process an inventory from a URL list file.
+
+    Reads URLs from file, builds config, then delegates to load_inventory.
+
+    Args:
+        urls_file: Path to file containing WebDAV URLs (one per line)
+        source: Source identifier for the batch
+        start: Starting index for processing (default: 0)
+        end: Ending index for processing (default: None, processes all)
+        skip_invalid: Skip files that fail validation (default: False)
+        workflow_definition_id: Optional workflow to start after ingestion
+        start_workflows: Whether to start workflows (default: False)
+        param_set_id: Parameter set for workflows
+        priority: Workflow priority (default: 0)
+        webdav_url: Optional WebDAV server URL
+        webdav_username: Optional WebDAV username
+        webdav_password: Optional WebDAV password
+
+    Returns:
+        Dictionary with inventory, to_process, batch_id, ingested, errors,
+        and workflow_result
+    """
+    config = await build_config_from_urls(urls_file, webdav_url, webdav_username, webdav_password)
+    return await load_inventory(
+        path="",
+        source=source,
+        start=start,
+        end=end,
+        skip_invalid=skip_invalid,
+        workflow_definition_id=workflow_definition_id,
+        start_workflows=start_workflows,
+        param_set_id=param_set_id,
+        priority=priority,
+        webdav_url=webdav_url,
+        webdav_username=webdav_username,
+        webdav_password=webdav_password,
+        config=config,
     )
 
 

@@ -222,6 +222,18 @@ class TestRunInventoryRoute:
             assert data["error_count"] == 1
             assert len(data["errors"]) == 1
 
+    def test_run_inventory_server_error(self, client):
+        """Test inventory run with server error."""
+        with patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app:
+            mock_app.load_inventory = AsyncMock(side_effect=Exception("Connection failed"))
+
+            response = client.post(
+                "/api/v1/webdav/run-inventory",
+                data={"config_path": "/documents", "source": "test-source"},
+            )
+
+            assert response.status_code == 500
+
     def test_run_inventory_with_all_options(self, client):
         """Test inventory run with all optional parameters."""
         with patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app:
@@ -261,3 +273,58 @@ class TestRunInventoryRoute:
             # Verify positional arguments
             assert call_args[0][0] == "/documents"  # config_path
             assert call_args[0][1] == "test-source"  # source
+
+
+class TestRunFromUrlsRoute:
+    """Tests for /api/v1/webdav/run-from-urls endpoint."""
+
+    def test_run_from_urls_success(self, client):
+        """Test successful run from URLs."""
+        with patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app:
+            mock_app.load_inventory_from_urls = AsyncMock(
+                return_value={
+                    "inventory": [{"path": "/documents/doc1.md"}],
+                    "to_process": [{"path": "/documents/doc1.md"}],
+                    "batch_id": 456,
+                    "ingested": [{"path": "/documents/doc1.md"}],
+                    "errors": [],
+                    "workflow_result": None,
+                }
+            )
+
+            response = client.post(
+                "/api/v1/webdav/run-from-urls",
+                data={"urls_file": "/tmp/urls.txt", "source": "test-source"},
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "ok"
+            assert data["inventory_count"] == 1
+            assert data["ingested_count"] == 1
+            assert data["batch_id"] == 456
+            mock_app.load_inventory_from_urls.assert_called_once()
+
+    def test_run_from_urls_error(self, client):
+        """Test run from URLs with error."""
+        with patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app:
+            mock_app.load_inventory_from_urls = AsyncMock(side_effect=FileNotFoundError("URLs file not found"))
+
+            response = client.post(
+                "/api/v1/webdav/run-from-urls",
+                data={"urls_file": "/tmp/missing.txt", "source": "test-source"},
+            )
+
+            assert response.status_code == 404
+
+    def test_run_from_urls_server_error(self, client):
+        """Test run from URLs with server error."""
+        with patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app:
+            mock_app.load_inventory_from_urls = AsyncMock(side_effect=Exception("Connection failed"))
+
+            response = client.post(
+                "/api/v1/webdav/run-from-urls",
+                data={"urls_file": "/tmp/urls.txt", "source": "test-source"},
+            )
+
+            assert response.status_code == 500

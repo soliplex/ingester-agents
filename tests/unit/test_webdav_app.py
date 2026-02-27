@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import aiofiles
 import pytest
 
 from soliplex.agents.webdav import app as webdav_app
@@ -103,6 +104,88 @@ class TestRecursiveListdirWebdav:
         assert len(files) == 2  # file1.md and file2.md
 
 
+class TestExportUrls:
+    """Tests for export_urls_to_file function."""
+
+    @pytest.mark.asyncio
+    async def test_export_urls_to_file(self, tmp_path):
+        """Test writing URLs to file with absolute path reconstruction."""
+        config = [
+            {"path": "report.md"},
+            {"path": "sub/readme.pdf"},
+        ]
+        output_file = str(tmp_path / "urls.txt")
+
+        count = await webdav_app.export_urls_to_file(config, "/documents", output_file)
+
+        assert count == 2
+        async with aiofiles.open(output_file) as f:
+            content = await f.read()
+        lines = [line for line in content.splitlines() if line.strip()]
+        assert lines == ["/documents/report.md", "/documents/sub/readme.pdf"]
+
+    @pytest.mark.asyncio
+    async def test_export_urls_to_file_trailing_slash(self, tmp_path):
+        """Test that trailing slashes on base_path are handled."""
+        config = [{"path": "file.md"}]
+        output_file = str(tmp_path / "urls.txt")
+
+        await webdav_app.export_urls_to_file(config, "/documents/", output_file)
+
+        async with aiofiles.open(output_file) as f:
+            content = await f.read()
+        assert "/documents/file.md" in content
+
+
+class TestBuildConfigFromUrls:
+    """Tests for build_config_from_urls function."""
+
+    @pytest.mark.asyncio
+    async def test_build_config_from_urls(self, tmp_path, mock_webdav_client):
+        """Test building config from URL file."""
+        urls_file = str(tmp_path / "urls.txt")
+        async with aiofiles.open(urls_file, "w") as f:
+            await f.write("/documents/test.md\n/documents/readme.pdf\n")
+
+        with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client):
+            config = await webdav_app.build_config_from_urls(urls_file)
+
+        assert len(config) == 2
+        assert config[0]["path"] == "/documents/test.md"
+        assert config[1]["path"] == "/documents/readme.pdf"
+        assert all("sha256" in item for item in config)
+        assert all("metadata" in item for item in config)
+        assert all("size" in item["metadata"] for item in config)
+        assert all("content-type" in item["metadata"] for item in config)
+
+    @pytest.mark.asyncio
+    async def test_build_config_from_urls_extension_filtering(self, tmp_path, mock_webdav_client):
+        """Test that extension filtering works."""
+        urls_file = str(tmp_path / "urls.txt")
+        async with aiofiles.open(urls_file, "w") as f:
+            await f.write("/documents/test.md\n/documents/archive.zip\n")
+
+        with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client):
+            config = await webdav_app.build_config_from_urls(urls_file)
+
+        # Only .md should pass (zip is not in default extensions)
+        paths = [item["path"] for item in config]
+        assert "/documents/test.md" in paths
+        assert "/documents/archive.zip" not in paths
+
+    @pytest.mark.asyncio
+    async def test_build_config_from_urls_blank_lines(self, tmp_path, mock_webdav_client):
+        """Test that blank lines are skipped."""
+        urls_file = str(tmp_path / "urls.txt")
+        async with aiofiles.open(urls_file, "w") as f:
+            await f.write("/documents/test.md\n\n  \n/documents/readme.pdf\n")
+
+        with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client):
+            config = await webdav_app.build_config_from_urls(urls_file)
+
+        assert len(config) == 2
+
+
 class TestValidateConfig:
     """Tests for validate_config function."""
 
@@ -121,6 +204,26 @@ class TestValidateConfig:
 
             captured = capsys.readouterr()
             assert "Total files: 1" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_validate_config_with_export_urls(self, mock_webdav_client, capsys, tmp_path):
+        """Test validate_config with export_urls parameter."""
+        output_file = str(tmp_path / "exported.txt")
+        with (
+            patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client),
+            patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build,
+        ):
+            mock_build.return_value = [
+                {"path": "test.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}}
+            ]
+
+            await webdav_app.validate_config("/documents", export_urls=output_file)
+
+            captured = capsys.readouterr()
+            assert "Exported 1 URLs" in captured.out
+            async with aiofiles.open(output_file) as f:
+                content = await f.read()
+            assert "/documents/test.md" in content
 
 
 class TestLoadInventory:
@@ -156,6 +259,57 @@ class TestLoadInventory:
 
             assert "inventory" in result
             assert len(result["inventory"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_load_inventory_with_prebuilt_config(self, mock_webdav_client, monkeypatch):
+        """Test load_inventory with pre-built config skips build_config."""
+        mock_check_status = AsyncMock(return_value=[])
+        mock_find_batch = AsyncMock(return_value=None)
+        mock_create_batch = AsyncMock(return_value=123)
+
+        monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
+        monkeypatch.setattr("soliplex.agents.client.find_batch_for_source", mock_find_batch)
+        monkeypatch.setattr("soliplex.agents.client.create_batch", mock_create_batch)
+
+        prebuilt_config = [
+            {"path": "/docs/test.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}}
+        ]
+
+        with patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build:
+            result = await webdav_app.load_inventory(
+                "",
+                "test-source",
+                start_workflows=False,
+                config=prebuilt_config,
+            )
+
+            mock_build.assert_not_called()
+            assert result["inventory"] == prebuilt_config
+
+
+class TestLoadInventoryFromUrls:
+    """Tests for load_inventory_from_urls function."""
+
+    @pytest.mark.asyncio
+    async def test_load_inventory_from_urls(self, mock_webdav_client, monkeypatch, tmp_path):
+        """Test delegation to build_config_from_urls + load_inventory."""
+        mock_check_status = AsyncMock(return_value=[])
+        monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
+
+        urls_file = str(tmp_path / "urls.txt")
+        async with aiofiles.open(urls_file, "w") as f:
+            await f.write("/documents/test.md\n")
+
+        with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client):
+            result = await webdav_app.load_inventory_from_urls(
+                urls_file,
+                "test-source",
+                start_workflows=False,
+            )
+
+        assert "inventory" in result
+        assert len(result["inventory"]) == 1
+        assert result["inventory"][0]["path"] == "/documents/test.md"
 
 
 class TestStatusReport:
