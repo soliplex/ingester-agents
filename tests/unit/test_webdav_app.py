@@ -1,8 +1,5 @@
 """Tests for soliplex.agents.webdav.app module."""
 
-import json
-import tempfile
-from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -10,28 +7,6 @@ from unittest.mock import patch
 import pytest
 
 from soliplex.agents.webdav import app as webdav_app
-
-
-@pytest.fixture
-def temp_inventory_file():
-    """Create a temporary inventory file for testing."""
-    inventory = [
-        {
-            "path": "doc1.md",
-            "sha256": "abc123",
-            "metadata": {"size": 100, "content-type": "text/markdown"},
-        },
-        {
-            "path": "doc2.pdf",
-            "sha256": "def456",
-            "metadata": {"size": 200, "content-type": "application/pdf"},
-        },
-    ]
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(inventory, f)
-        temp_path = f.name
-    yield temp_path
-    Path(temp_path).unlink()
 
 
 @pytest.fixture
@@ -66,39 +41,6 @@ class TestCreateWebDAVClient:
             mock_settings.webdav_url = None
             with pytest.raises(ValueError, match="WebDAV URL is required"):
                 webdav_app.create_webdav_client()
-
-
-class TestResolveConfigPath:
-    """Tests for resolve_config_path function."""
-
-    @pytest.mark.asyncio
-    async def test_resolve_config_path_with_local_file(self, temp_inventory_file):
-        """Test resolve_config_path with a local file path."""
-        config, base_path = await webdav_app.resolve_config_path(temp_inventory_file)
-
-        assert isinstance(config, list)
-        assert len(config) == 2
-        assert config[0]["path"] == "doc1.md"
-        assert config[1]["path"] == "doc2.pdf"
-        assert base_path == str(Path(temp_inventory_file).parent)
-
-    @pytest.mark.asyncio
-    async def test_resolve_config_path_with_webdav_path(self, mock_webdav_client):
-        """Test resolve_config_path with a WebDAV path."""
-        with (
-            patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client),
-            patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build,
-        ):
-            mock_build.return_value = [
-                {"path": "test.md", "sha256": "abc123", "metadata": {"size": 100, "content-type": "text/markdown"}}
-            ]
-
-            config, base_path = await webdav_app.resolve_config_path("/documents")
-
-            assert isinstance(config, list)
-            assert len(config) == 1
-            assert base_path == "/documents"
-            mock_build.assert_called_once()
 
 
 class TestBuildConfig:
@@ -165,15 +107,6 @@ class TestValidateConfig:
     """Tests for validate_config function."""
 
     @pytest.mark.asyncio
-    async def test_validate_config_with_file(self, temp_inventory_file, capsys):
-        """Test validate_config with local inventory file."""
-        await webdav_app.validate_config(temp_inventory_file)
-
-        captured = capsys.readouterr()
-        assert "Total files: 2" in captured.out
-        assert temp_inventory_file in captured.out
-
-    @pytest.mark.asyncio
     async def test_validate_config_with_webdav_path(self, mock_webdav_client, capsys):
         """Test validate_config with WebDAV path."""
         with (
@@ -192,30 +125,6 @@ class TestValidateConfig:
 
 class TestLoadInventory:
     """Tests for load_inventory function."""
-
-    @pytest.mark.asyncio
-    async def test_load_inventory_with_local_file(self, temp_inventory_file, monkeypatch):
-        """Test load_inventory with local inventory file."""
-        from unittest.mock import AsyncMock
-
-        # Mock client functions
-        mock_check_status = AsyncMock(return_value=[])
-        mock_find_batch = AsyncMock(return_value=None)
-        mock_create_batch = AsyncMock(return_value=123)
-
-        monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-        monkeypatch.setattr("soliplex.agents.client.find_batch_for_source", mock_find_batch)
-        monkeypatch.setattr("soliplex.agents.client.create_batch", mock_create_batch)
-
-        result = await webdav_app.load_inventory(
-            temp_inventory_file,
-            "test-source",
-            start_workflows=False,
-        )
-
-        assert "inventory" in result
-        assert len(result["inventory"]) == 2
-        assert result["to_process"] == []
 
     @pytest.mark.asyncio
     async def test_load_inventory_with_webdav_path(self, mock_webdav_client, monkeypatch):
@@ -251,20 +160,6 @@ class TestLoadInventory:
 
 class TestStatusReport:
     """Tests for status_report function."""
-
-    @pytest.mark.asyncio
-    async def test_status_report_with_file(self, temp_inventory_file, monkeypatch, capsys):
-        """Test status_report with local inventory file."""
-        from unittest.mock import AsyncMock
-
-        mock_check_status = AsyncMock(return_value=[])
-        monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-
-        await webdav_app.status_report(temp_inventory_file, "test-source")
-
-        captured = capsys.readouterr()
-        assert "Total files: 2" in captured.out
-        assert "Files to process: 0" in captured.out
 
     @pytest.mark.asyncio
     async def test_status_report_with_webdav_path(self, mock_webdav_client, monkeypatch, capsys):

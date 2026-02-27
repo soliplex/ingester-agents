@@ -33,13 +33,10 @@ async def validate_config(
     """
     Validate an inventory configuration.
 
-    If a local file is provided, it will be treated as an inventory.json config file.
-    If a WebDAV path is provided, a config will be built from the WebDAV directory contents.
-
-    Checks file support and identifies invalid files.
+    Scans the specified WebDAV directory recursively and validates discovered files.
     """
     try:
-        config, _ = await webdav_app.resolve_config_path(config_path, webdav_url, webdav_username, webdav_password)
+        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, webdav_password)
         validated = webdav_app.check_config(config)
         invalid = [row for row in validated if "valid" in row and not row["valid"]]
 
@@ -53,32 +50,6 @@ async def validate_config(
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error validating config: {str(e)}") from e
-
-
-@webdav_router.post("/build-config")
-async def build_config(
-    webdav_path: str = Form(..., description="WebDAV directory path (e.g., /documents)"),
-    webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
-    webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
-    webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
-):
-    """
-    Scan a WebDAV directory and create an inventory configuration.
-
-    Returns file metadata including paths, hashes, and MIME types.
-    """
-    try:
-        config = await webdav_app.build_config(webdav_path, webdav_url, webdav_username, webdav_password)
-
-        return {
-            "status": "ok",
-            "files_count": len(config),
-            "inventory": config,
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error building config: {str(e)}") from e
 
 
 @webdav_router.post("/check-status")
@@ -96,16 +67,13 @@ async def check_status(
     """
     Check which files need to be ingested.
 
-    If a local file is provided, it will be treated as an inventory.json config file.
-    If a WebDAV path is provided, a config will be built from the WebDAV directory contents.
-
-    Compares file hashes against the Ingester database to identify
-    new or modified files.
+    Scans the specified WebDAV directory recursively and compares file hashes
+    against the Ingester database to identify new or modified files.
     """
     try:
         from soliplex.agents import client
 
-        config, _ = await webdav_app.resolve_config_path(config_path, webdav_url, webdav_username, webdav_password)
+        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, webdav_password)
         to_process = await client.check_status(config, source)
 
         result = {
@@ -145,9 +113,7 @@ async def run_inventory(
     """
     Run document ingestion from an inventory.
 
-    If a local file is provided, it will be treated as an inventory.json config file.
-    If a WebDAV path is provided, a config will be built from the WebDAV directory contents.
-    Path resolution is handled internally by load_inventory via resolve_config_path.
+    Scans the specified WebDAV directory recursively and ingests discovered files.
     """
     try:
         result = await webdav_app.load_inventory(
