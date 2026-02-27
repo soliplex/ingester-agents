@@ -42,8 +42,8 @@ def create_webdav_client(url: str = None, username: str = None, password: str = 
     auth = None
     if webdav_username and webdav_password:
         auth = (webdav_username, webdav_password)
-
-    return WebDAVClient(webdav_url, auth=auth, verify=settings.ssl_verify)
+    headers = {"User-Agent": "soliplex-agent/curl"}
+    return WebDAVClient(webdav_url, auth=auth, verify=settings.ssl_verify, headers=headers)
 
 
 async def validate_config(path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None):
@@ -202,16 +202,6 @@ async def recursive_listdir_webdav(client: WebDAVClient, path: str) -> list[dict
         List of file info dictionaries with 'path' and 'size'
     """
     file_list = []
-
-    # Fix for Git Bash on Windows: paths starting with / get converted to Windows paths
-    # If path looks like a Windows path (contains :), it was likely converted
-    if ":" in path and path.startswith("C:"):
-        # Extract the original WebDAV path
-        # C:/Program Files/Git/Plone/docs -> /Plone/docs
-        parts = path.split("Git")
-        if len(parts) > 1:
-            path = parts[1].replace("\\", "/")
-            logger.warning(f"Detected Git Bash path conversion, using: {path}")
 
     logger.debug(f"Listing WebDAV directory: {path}")
 
