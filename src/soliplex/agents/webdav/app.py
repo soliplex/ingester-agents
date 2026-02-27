@@ -1,7 +1,10 @@
 """WebDAV agent core functionality."""
 
 import hashlib
+import json
 import logging
+from datetime import UTC
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -118,9 +121,12 @@ async def export_urls_to_file(config: list[dict], base_path: str, output_path: s
 
 async def build_config_from_urls(
     urls_file: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """
     Build config from a file containing one absolute WebDAV path per line.
+
+    Each URL is processed independently; errors are captured per-URL
+    so that one failure does not stop the whole list.
 
     Args:
         urls_file: Path to file containing WebDAV URLs (one per line)
@@ -129,11 +135,14 @@ async def build_config_from_urls(
         webdav_password: Optional WebDAV password
 
     Returns:
-        List of file configuration dictionaries with absolute paths
+        Tuple of (config list, results list). The config list contains
+        successfully processed files. The results list contains one entry
+        per URL with status and optional error_message.
     """
     webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
     allowed_extensions = settings.extensions
     config = []
+    results = []
 
     async with aiofiles.open(urls_file) as f:
         content = await f.read()
@@ -144,25 +153,31 @@ async def build_config_from_urls(
         ext = Path(full_path).suffix.lstrip(".")
         if ext not in allowed_extensions:
             logger.info(f"skipping {full_path}")
+            results.append({"url": full_path, "status": "skipped", "error_message": f"Extension .{ext} not allowed"})
             continue
 
-        buffer = BytesIO()
-        webdav_client.download_fileobj(full_path, buffer)
-        content_bytes = buffer.getvalue()
-        sha256_hash = hashlib.sha256(content_bytes, usedforsecurity=False).hexdigest()
-        mime_type = detect_mime_type(full_path)
+        try:
+            buffer = BytesIO()
+            webdav_client.download_fileobj(full_path, buffer)
+            content_bytes = buffer.getvalue()
+            sha256_hash = hashlib.sha256(content_bytes, usedforsecurity=False).hexdigest()
+            mime_type = detect_mime_type(full_path)
 
-        rec = {
-            "path": full_path,
-            "sha256": sha256_hash,
-            "metadata": {
-                "size": len(content_bytes),
-                "content-type": mime_type,
-            },
-        }
-        config.append(rec)
+            rec = {
+                "path": full_path,
+                "sha256": sha256_hash,
+                "metadata": {
+                    "size": len(content_bytes),
+                    "content-type": mime_type,
+                },
+            }
+            config.append(rec)
+            results.append({"url": full_path, "status": "success", "error_message": None})
+        except Exception as e:
+            logger.exception(f"Error processing {full_path}")
+            results.append({"url": full_path, "status": "error", "error_message": str(e)})
 
-    return config
+    return config, results
 
 
 async def list_config(
@@ -348,6 +363,7 @@ async def load_inventory(
     webdav_username: str = None,
     webdav_password: str = None,
     config: list[dict] | None = None,
+    skip_status_check: bool = False,
 ):
     """
     Load and process an inventory for ingestion.
@@ -383,8 +399,12 @@ async def load_inventory(
         config = [x for x in filtered if x["valid"]]
 
     logger.info(f"found {len(config)} files in {path}")
-    to_process = await client.check_status(config, source)
-    logger.info(f"found {len(to_process)} out of {len(config)} to process in {base_path}")
+    if skip_status_check:
+        to_process = config
+        logger.info(f"skipping status check, processing all {len(to_process)} files")
+    else:
+        to_process = await client.check_status(config, source)
+        logger.info(f"found {len(to_process)} out of {len(config)} to process in {base_path}")
     if end is None:
         end = len(config)
         to_process = to_process[start:end]
@@ -528,6 +548,7 @@ async def load_inventory_from_urls(
     webdav_url: str = None,
     webdav_username: str = None,
     webdav_password: str = None,
+    skip_hash_check: bool = False,
 ):
     """
     Load and process an inventory from a URL list file.
@@ -547,13 +568,26 @@ async def load_inventory_from_urls(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
+        skip_hash_check: Skip downloading files for hash comparison and
+            assume all URLs need ingestion (default: False)
 
     Returns:
         Dictionary with inventory, to_process, batch_id, ingested, errors,
-        and workflow_result
+        url_results, and url_results_path
     """
-    config = await build_config_from_urls(urls_file, webdav_url, webdav_username, webdav_password)
-    return await load_inventory(
+    if skip_hash_check:
+        config, url_results = await _read_urls_as_config(urls_file)
+    else:
+        config, url_results = await build_config_from_urls(urls_file, webdav_url, webdav_username, webdav_password)
+
+    # Write results to <urls_file>.results.<timestamp>.json
+    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    results_path = f"{urls_file}.results.{timestamp}.json"
+    async with aiofiles.open(results_path, "w") as f:
+        await f.write(json.dumps(url_results, indent=2))
+    logger.info(f"URL results written to {results_path}")
+
+    result = await load_inventory(
         path="",
         source=source,
         start=start,
@@ -567,7 +601,53 @@ async def load_inventory_from_urls(
         webdav_username=webdav_username,
         webdav_password=webdav_password,
         config=config,
+        skip_status_check=skip_hash_check,
     )
+    result["url_results"] = url_results
+    result["url_results_path"] = results_path
+    return result
+
+
+async def _read_urls_as_config(urls_file: str) -> tuple[list[dict], list[dict]]:
+    """
+    Read URLs from file and build lightweight config without downloading.
+
+    Filters by allowed extensions and detects MIME types from paths.
+    No WebDAV connection or file downloads are performed.
+
+    Args:
+        urls_file: Path to file containing WebDAV URLs (one per line)
+
+    Returns:
+        Tuple of (config list, results list)
+    """
+    allowed_extensions = settings.extensions
+    config = []
+    results = []
+
+    async with aiofiles.open(urls_file) as f:
+        content = await f.read()
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+
+    for full_path in lines:
+        ext = Path(full_path).suffix.lstrip(".")
+        if ext not in allowed_extensions:
+            logger.info(f"skipping {full_path}")
+            results.append({"url": full_path, "status": "skipped", "error_message": f"Extension .{ext} not allowed"})
+            continue
+
+        mime_type = detect_mime_type(full_path)
+        rec = {
+            "path": full_path,
+            "metadata": {
+                "content-type": mime_type,
+            },
+        }
+        config.append(rec)
+        results.append({"url": full_path, "status": "success", "error_message": None})
+
+    return config, results
 
 
 async def status_report(

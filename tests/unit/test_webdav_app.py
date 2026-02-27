@@ -1,5 +1,7 @@
 """Tests for soliplex.agents.webdav.app module."""
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -174,7 +176,7 @@ async def test_build_config_from_urls(tmp_path, mock_webdav_client):
         await f.write("/documents/test.md\n/documents/readme.pdf\n")
 
     with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client):
-        config = await webdav_app.build_config_from_urls(urls_file)
+        config, results = await webdav_app.build_config_from_urls(urls_file)
 
     assert len(config) == 2
     assert config[0]["path"] == "/documents/test.md"
@@ -183,22 +185,27 @@ async def test_build_config_from_urls(tmp_path, mock_webdav_client):
     assert all("metadata" in item for item in config)
     assert all("size" in item["metadata"] for item in config)
     assert all("content-type" in item["metadata"] for item in config)
+    assert len(results) == 2
+    assert all(r["status"] == "success" for r in results)
 
 
 @pytest.mark.asyncio
 async def test_build_config_from_urls_extension_filtering(tmp_path, mock_webdav_client):
-    """Test that extension filtering works."""
+    """Test that extension filtering returns skipped status."""
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n/documents/archive.zip\n")
 
     with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client):
-        config = await webdav_app.build_config_from_urls(urls_file)
+        config, results = await webdav_app.build_config_from_urls(urls_file)
 
     # Only .md should pass (zip is not in default extensions)
     paths = [item["path"] for item in config]
     assert "/documents/test.md" in paths
     assert "/documents/archive.zip" not in paths
+    assert len(results) == 2
+    assert results[0]["status"] == "success"
+    assert results[1]["status"] == "skipped"
 
 
 @pytest.mark.asyncio
@@ -209,9 +216,40 @@ async def test_build_config_from_urls_blank_lines(tmp_path, mock_webdav_client):
         await f.write("/documents/test.md\n\n  \n/documents/readme.pdf\n")
 
     with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client):
-        config = await webdav_app.build_config_from_urls(urls_file)
+        config, results = await webdav_app.build_config_from_urls(urls_file)
 
     assert len(config) == 2
+    assert len(results) == 2
+
+
+@pytest.mark.asyncio
+async def test_build_config_from_urls_download_error(tmp_path):
+    """Test that a download error is captured per-URL without stopping."""
+    urls_file = str(tmp_path / "urls.txt")
+    async with aiofiles.open(urls_file, "w") as f:
+        await f.write("/documents/good.md\n/documents/bad.md\n/documents/also_good.pdf\n")
+
+    mock_client = MagicMock()
+    call_count = 0
+
+    def mock_download_fileobj(path, buffer):
+        nonlocal call_count
+        call_count += 1
+        if "bad.md" in path:
+            raise ConnectionError("Server unavailable")
+        buffer.write(b"test content")
+
+    mock_client.download_fileobj = mock_download_fileobj
+
+    with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client):
+        config, results = await webdav_app.build_config_from_urls(urls_file)
+
+    assert len(config) == 2  # good.md and also_good.pdf
+    assert len(results) == 3
+    assert results[0]["status"] == "success"
+    assert results[1]["status"] == "error"
+    assert "Server unavailable" in results[1]["error_message"]
+    assert results[2]["status"] == "success"
 
 
 # --- validate_config ---
@@ -321,7 +359,7 @@ async def test_load_inventory_with_prebuilt_config(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_load_inventory_from_urls(mock_webdav_client, monkeypatch, tmp_path):
-    """Test delegation to build_config_from_urls + load_inventory."""
+    """Test delegation to build_config_from_urls + load_inventory with results file."""
     mock_check_status = AsyncMock(return_value=[])
     monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
 
@@ -339,6 +377,112 @@ async def test_load_inventory_from_urls(mock_webdav_client, monkeypatch, tmp_pat
     assert "inventory" in result
     assert len(result["inventory"]) == 1
     assert result["inventory"][0]["path"] == "/documents/test.md"
+    # Check url_results are included in the return value
+    assert "url_results" in result
+    assert len(result["url_results"]) == 1
+    assert result["url_results"][0]["status"] == "success"
+    # Check results file was written
+    assert "url_results_path" in result
+    results_path = result["url_results_path"]
+    assert Path(results_path).exists()
+    async with aiofiles.open(results_path) as f:
+        written = json.loads(await f.read())
+    assert len(written) == 1
+    assert written[0]["url"] == "/documents/test.md"
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_from_urls_skip_hash_check(monkeypatch, tmp_path):
+    """Test skip_hash_check skips downloads and status check."""
+    mock_find_batch = AsyncMock(return_value=42)
+    mock_do_ingest = AsyncMock(return_value={"id": 1})
+
+    monkeypatch.setattr("soliplex.agents.client.find_batch_for_source", mock_find_batch)
+    monkeypatch.setattr("soliplex.agents.webdav.app.do_ingest", mock_do_ingest)
+
+    urls_file = str(tmp_path / "urls.txt")
+    async with aiofiles.open(urls_file, "w") as f:
+        await f.write("/documents/test.md\n/documents/report.pdf\n/documents/archive.zip\n")
+
+    result = await webdav_app.load_inventory_from_urls(
+        urls_file,
+        "test-source",
+        start_workflows=False,
+        skip_hash_check=True,
+    )
+
+    # zip should be filtered out, 2 files should be ingested
+    assert len(result["inventory"]) == 2
+    assert len(result["to_process"]) == 2
+    assert len(result["ingested"]) == 2
+    assert mock_do_ingest.call_count == 2
+    # check_status should not have been called
+    assert "url_results" in result
+    assert len(result["url_results"]) == 3
+    assert result["url_results"][2]["status"] == "skipped"
+    # Results file should exist
+    assert Path(result["url_results_path"]).exists()
+
+
+# --- _read_urls_as_config ---
+
+
+@pytest.mark.asyncio
+async def test_read_urls_as_config(tmp_path):
+    """Test lightweight URL reading without downloads."""
+    urls_file = str(tmp_path / "urls.txt")
+    async with aiofiles.open(urls_file, "w") as f:
+        await f.write("/documents/test.md\n/documents/archive.zip\n\n/documents/readme.pdf\n")
+
+    config, results = await webdav_app._read_urls_as_config(urls_file)
+
+    # zip is filtered out
+    assert len(config) == 2
+    assert config[0]["path"] == "/documents/test.md"
+    assert config[1]["path"] == "/documents/readme.pdf"
+    assert all("content-type" in item["metadata"] for item in config)
+    # No sha256 or size since nothing was downloaded
+    assert all("sha256" not in item for item in config)
+    # Results track all 3 non-blank lines
+    assert len(results) == 3
+    assert results[0]["status"] == "success"
+    assert results[1]["status"] == "skipped"
+    assert results[2]["status"] == "success"
+
+
+# --- load_inventory with skip_status_check ---
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_skip_status_check(monkeypatch):
+    """Test load_inventory with skip_status_check treats all files as needing processing."""
+    mock_check_status = AsyncMock(return_value=[])
+    mock_find_batch = AsyncMock(return_value=42)
+    mock_do_ingest = AsyncMock(return_value={"id": 1})
+
+    monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
+    monkeypatch.setattr("soliplex.agents.client.find_batch_for_source", mock_find_batch)
+    monkeypatch.setattr("soliplex.agents.webdav.app.do_ingest", mock_do_ingest)
+
+    config = [
+        {"path": "/docs/a.md", "metadata": {"content-type": "text/markdown"}},
+        {"path": "/docs/b.pdf", "metadata": {"content-type": "application/pdf"}},
+    ]
+
+    result = await webdav_app.load_inventory(
+        "",
+        "test-source",
+        start_workflows=False,
+        config=config,
+        skip_status_check=True,
+    )
+
+    # check_status should NOT have been called
+    mock_check_status.assert_not_called()
+    # All files should be processed
+    assert len(result["to_process"]) == 2
+    assert len(result["ingested"]) == 2
+    assert mock_do_ingest.call_count == 2
 
 
 # --- status_report ---

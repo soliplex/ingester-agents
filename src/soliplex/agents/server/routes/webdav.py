@@ -162,6 +162,7 @@ async def run_from_urls(
     webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
     webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
     webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
+    skip_hash_check: bool = Form(False, description="Skip hash check and ingest all URLs"),
 ):
     """
     Run document ingestion from a URL list file.
@@ -181,6 +182,7 @@ async def run_from_urls(
             webdav_url=webdav_url,
             webdav_username=webdav_username,
             webdav_password=webdav_password,
+            skip_hash_check=skip_hash_check,
         )
 
         return {

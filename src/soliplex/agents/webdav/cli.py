@@ -193,6 +193,10 @@ def run_from_urls(
         str,
         typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
     ] = None,
+    skip_hash_check: Annotated[
+        bool,
+        typer.Option(help="Skip hash check and ingest all URLs (avoids downloading files twice)"),
+    ] = False,
 ):
     """
     Run ingestion from a URL list file.
@@ -213,6 +217,7 @@ def run_from_urls(
             webdav_url=webdav_url,
             webdav_username=webdav_username,
             webdav_password=webdav_password,
+            skip_hash_check=skip_hash_check,
         )
     )
     if do_json:
