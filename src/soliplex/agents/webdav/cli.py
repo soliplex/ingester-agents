@@ -32,17 +32,45 @@ def validate(
         str,
         typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
     ] = None,
-    export_urls: Annotated[
-        str,
-        typer.Option(help="Export discovered URLs to a file (one absolute path per line)"),
-    ] = None,
 ):
     """
     Validate a configuration.
 
     Scans the specified WebDAV directory recursively and validates discovered files.
     """
-    asyncio.run(app.validate_config(config_path, webdav_url, webdav_username, webdav_password, export_urls))
+    asyncio.run(app.validate_config(config_path, webdav_url, webdav_username, webdav_password))
+
+
+@cli.command("export-urls")
+def export_urls(
+    config_path: Annotated[
+        str,
+        typer.Argument(help="WebDAV directory path (e.g., /documents)"),
+    ],
+    output: Annotated[
+        str,
+        typer.Argument(help="Output file path to write URLs to"),
+    ],
+    webdav_url: Annotated[
+        str,
+        typer.Option(help="WebDAV server URL (uses WEBDAV_URL env var if not provided)"),
+    ] = None,
+    webdav_username: Annotated[
+        str,
+        typer.Option(help="WebDAV username (uses WEBDAV_USERNAME env var if not provided)"),
+    ] = None,
+    webdav_password: Annotated[
+        str,
+        typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
+    ] = None,
+):
+    """
+    Export discovered URLs to a file.
+
+    Scans the specified WebDAV directory recursively and writes one absolute
+    WebDAV path per line. No file content is downloaded.
+    """
+    asyncio.run(app.export_urls(config_path, output, webdav_url, webdav_username, webdav_password))
 
 
 @cli.command("check-status")

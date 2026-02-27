@@ -45,9 +45,7 @@ def create_webdav_client(url: str = None, username: str = None, password: str = 
     return WebDAVClient(webdav_url, auth=auth, verify=settings.ssl_verify, headers=headers)
 
 
-async def validate_config(
-    path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None, export_urls: str = None
-):
+async def validate_config(path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None):
     """
     Validate a configuration and print out validation results.
 
@@ -58,7 +56,6 @@ async def validate_config(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
-        export_urls: Optional file path to export discovered URLs to
 
     Returns:
         None
@@ -72,9 +69,31 @@ async def validate_config(
         print(f"Found {len(invalid)} Invalid files:")
         for row in invalid:
             print(row["path"], row["reason"], row["metadata"]["content-type"])
-    if export_urls:
-        count = await export_urls_to_file(config, path, export_urls)
-        print(f"Exported {count} URLs to {export_urls}")
+
+
+async def export_urls(
+    path: str, output_path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None
+):
+    """
+    Export discovered WebDAV URLs to a file without downloading content.
+
+    Uses list_config (PROPFIND only) to discover files, then writes
+    their absolute paths to the output file.
+
+    Args:
+        path: WebDAV directory path to scan (e.g., /documents)
+        output_path: File path to write URLs to
+        webdav_url: Optional WebDAV server URL
+        webdav_username: Optional WebDAV username
+        webdav_password: Optional WebDAV password
+
+    Returns:
+        None
+    """
+    config = await list_config(path, webdav_url, webdav_username, webdav_password)
+    count = await export_urls_to_file(config, path, output_path)
+    print(f"Found {len(config)} files in {path}")
+    print(f"Exported {count} URLs to {output_path}")
 
 
 async def export_urls_to_file(config: list[dict], base_path: str, output_path: str) -> int:
@@ -138,6 +157,62 @@ async def build_config_from_urls(
             "sha256": sha256_hash,
             "metadata": {
                 "size": len(content_bytes),
+                "content-type": mime_type,
+            },
+        }
+        config.append(rec)
+
+    return config
+
+
+async def list_config(
+    webdav_path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None
+) -> list[dict]:
+    """
+    List files in a WebDAV directory without downloading content.
+
+    Only uses PROPFIND to discover files. No GET requests are made.
+    Suitable for validation and URL export where file content is not needed.
+
+    Args:
+        webdav_path: Path within WebDAV server (e.g., "/documents")
+        webdav_url: Optional WebDAV server URL
+        webdav_username: Optional WebDAV username
+        webdav_password: Optional WebDAV password
+
+    Returns:
+        List of file configuration dictionaries (without sha256)
+    """
+    webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
+    allowed_extensions = settings.extensions
+    config = []
+
+    files = await recursive_listdir_webdav(webdav_client, webdav_path)
+
+    for file_info in files:
+        full_path = file_info["path"]
+        ext = Path(full_path).suffix.lstrip(".")
+
+        if ext not in allowed_extensions:
+            logger.info(f"skipping {full_path}")
+            continue
+
+        mime_type = detect_mime_type(full_path)
+
+        normalized_base = webdav_path.strip("/")
+        normalized_full = full_path.strip("/")
+
+        if normalized_full.startswith(normalized_base + "/"):
+            relative_path = normalized_full[len(normalized_base) + 1 :]
+        elif normalized_full == normalized_base:
+            relative_path = ""
+        else:
+            relative_path = normalized_full
+
+        rec = {
+            "path": relative_path,
+            "metadata": {
+                "size": file_info["size"],
                 "content-type": mime_type,
             },
         }
