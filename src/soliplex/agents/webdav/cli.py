@@ -3,8 +3,10 @@
 import asyncio
 import json
 import logging
+import sys
 from typing import Annotated
 
+import httpx
 import typer
 
 from . import app
@@ -38,7 +40,14 @@ def validate(
 
     Scans the specified WebDAV directory recursively and validates discovered files.
     """
-    asyncio.run(app.validate_config(config_path, webdav_url, webdav_username, webdav_password))
+    try:
+        asyncio.run(app.validate_config(config_path, webdav_url, webdav_username, webdav_password))
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+        print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 @cli.command("export-urls")
@@ -70,7 +79,14 @@ def export_urls(
     Scans the specified WebDAV directory recursively and writes one absolute
     WebDAV path per line. No file content is downloaded.
     """
-    asyncio.run(app.export_urls(config_path, output, webdav_url, webdav_username, webdav_password))
+    try:
+        asyncio.run(app.export_urls(config_path, output, webdav_url, webdav_username, webdav_password))
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+        print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 @cli.command("check-status")
@@ -99,7 +115,14 @@ def check_status(
 
     Scans the specified WebDAV directory recursively and checks file status.
     """
-    asyncio.run(app.status_report(config_path, source, detail, webdav_url, webdav_username, webdav_password))
+    try:
+        asyncio.run(app.status_report(config_path, source, detail, webdav_url, webdav_username, webdav_password))
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+        print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 @cli.command("run-inventory")
@@ -135,21 +158,28 @@ def run(
     Scans the specified WebDAV directory recursively and ingests discovered files.
     """
     print(f"loading {config_path} source={source}")
-    res = asyncio.run(
-        app.load_inventory(
-            config_path,
-            source,
-            start,
-            end,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            start_workflows=start_workflows,
-            priority=priority,
-            webdav_url=webdav_url,
-            webdav_username=webdav_username,
-            webdav_password=webdav_password,
+    try:
+        res = asyncio.run(
+            app.load_inventory(
+                config_path,
+                source,
+                start,
+                end,
+                workflow_definition_id=workflow_definition_id,
+                param_set_id=param_set_id,
+                start_workflows=start_workflows,
+                priority=priority,
+                webdav_url=webdav_url,
+                webdav_username=webdav_username,
+                webdav_password=webdav_password,
+            )
         )
-    )
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+        print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
     if do_json:
         print(json.dumps(res, indent=2))
     else:
@@ -204,22 +234,29 @@ def run_from_urls(
     Reads a file of WebDAV URLs (one per line) and ingests those specific files.
     """
     print(f"loading URLs from {urls_file} source={source}")
-    res = asyncio.run(
-        app.load_inventory_from_urls(
-            urls_file,
-            source,
-            start,
-            end,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            start_workflows=start_workflows,
-            priority=priority,
-            webdav_url=webdav_url,
-            webdav_username=webdav_username,
-            webdav_password=webdav_password,
-            skip_hash_check=skip_hash_check,
+    try:
+        res = asyncio.run(
+            app.load_inventory_from_urls(
+                urls_file,
+                source,
+                start,
+                end,
+                workflow_definition_id=workflow_definition_id,
+                param_set_id=param_set_id,
+                start_workflows=start_workflows,
+                priority=priority,
+                webdav_url=webdav_url,
+                webdav_username=webdav_username,
+                webdav_password=webdav_password,
+                skip_hash_check=skip_hash_check,
+            )
         )
-    )
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+        print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
     if do_json:
         print(json.dumps(res, indent=2))
     else:

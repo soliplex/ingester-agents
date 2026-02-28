@@ -9,6 +9,7 @@ from io import BytesIO
 from pathlib import Path
 
 import aiofiles
+import httpx
 from webdav4.client import Client as WebDAVClient
 
 from soliplex.agents import client
@@ -254,6 +255,7 @@ async def build_config(
     client = create_webdav_client(webdav_url, webdav_username, webdav_password)
     allowed_extensions = settings.extensions
     config = []
+    failed = 0
 
     # Recursively list all files
     files = await recursive_listdir_webdav(client, webdav_path)
@@ -267,10 +269,15 @@ async def build_config(
             continue
 
         # Get file content for hashing
-        # Use download_fileobj to get content as bytes
-        buffer = BytesIO()
-        client.download_fileobj(full_path, buffer)
-        content = buffer.getvalue()
+        try:
+            buffer = BytesIO()
+            client.download_fileobj(full_path, buffer)
+            content = buffer.getvalue()
+        except Exception:
+            logger.exception(f"Error downloading {full_path}, skipping")
+            failed += 1
+            continue
+
         sha256_hash = hashlib.sha256(content, usedforsecurity=False).hexdigest()
 
         # Detect MIME type
@@ -306,6 +313,7 @@ async def build_config(
         }
         config.append(rec)
 
+    logger.info(f"Built config: {len(config)} files succeeded, {failed} files failed")
     return config
 
 
@@ -343,6 +351,9 @@ async def recursive_listdir_webdav(client: WebDAVClient, path: str) -> list[dict
                 for key in [x for x in resource.keys() if x not in ["href", "etag", "type", "name"]]:
                     rec[key] = resource.get(key)
                 file_list.append(rec)
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException):
+        logger.exception(f"Connection error listing {path}")
+        raise
     except Exception:
         logger.exception(f"Error listing WebDAV directory {path}")
 
@@ -518,12 +529,16 @@ async def do_ingest(
             doc_body = await f.read()
     else:
         # WebDAV file ingestion
-        webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
-        full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}"
-        logger.info(f"Downloading from WebDAV: {full_path}")
-        buffer = BytesIO()
-        webdav_client.download_fileobj(full_path, buffer)
-        doc_body = buffer.getvalue()
+        try:
+            webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
+            full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}"
+            logger.info(f"Downloading from WebDAV: {full_path}")
+            buffer = BytesIO()
+            webdav_client.download_fileobj(full_path, buffer)
+            doc_body = buffer.getvalue()
+        except Exception as e:
+            logger.exception(f"Error downloading {uri} from WebDAV")
+            return {"error": str(e)}
 
     return await client.do_ingest(
         doc_body,

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import aiofiles
+import httpx
 import pytest
 
 from soliplex.agents.webdav import app as webdav_app
@@ -506,3 +507,88 @@ async def test_status_report_with_webdav_path(mock_webdav_client, monkeypatch, c
 
         captured = capsys.readouterr()
         assert "Total files: 1" in captured.out
+
+
+# --- Error handling tests ---
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_webdav_reraises_connect_timeout():
+    """Test that ConnectTimeout is re-raised instead of silently swallowed."""
+    mock_client = MagicMock()
+    mock_client.ls.side_effect = httpx.ConnectTimeout("SSL handshake timed out")
+
+    with pytest.raises(httpx.ConnectTimeout):
+        await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_webdav_reraises_connect_error():
+    """Test that ConnectError is re-raised instead of silently swallowed."""
+    mock_client = MagicMock()
+    mock_client.ls.side_effect = httpx.ConnectError("Connection refused")
+
+    with pytest.raises(httpx.ConnectError):
+        await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_webdav_swallows_other_errors():
+    """Test that non-connection errors are still caught and return empty list."""
+    mock_client = MagicMock()
+    mock_client.ls.side_effect = PermissionError("Access denied")
+
+    files = await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
+    assert files == []
+
+
+@pytest.mark.asyncio
+async def test_build_config_skips_failed_downloads():
+    """Test that build_config skips files that fail to download and returns partial results."""
+    mock_client = MagicMock()
+
+    def mock_download_fileobj(path, buffer):
+        if "bad.md" in path:
+            raise ConnectionError("Download failed")
+        buffer.write(b"test content")
+
+    mock_client.download_fileobj = mock_download_fileobj
+
+    with (
+        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
+    ):
+        mock_ls.return_value = [
+            {"path": "/documents/good.md", "size": 100},
+            {"path": "/documents/bad.md", "size": 200},
+            {"path": "/documents/also_good.pdf", "size": 300},
+        ]
+
+        config = await webdav_app.build_config("/documents")
+
+    # bad.md should be skipped, 2 files should succeed
+    assert len(config) == 2
+    paths = [item["path"] for item in config]
+    assert "good.md" in paths
+    assert "also_good.pdf" in paths
+    assert "bad.md" not in paths
+
+
+@pytest.mark.asyncio
+async def test_do_ingest_returns_error_on_download_failure():
+    """Test that do_ingest returns error dict when WebDAV download fails."""
+    mock_client = MagicMock()
+    mock_client.download_fileobj.side_effect = httpx.ConnectTimeout("Connection timed out")
+
+    with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client):
+        result = await webdav_app.do_ingest(
+            base_path="/webdav/docs",
+            uri="test.md",
+            meta={},
+            source="test-source",
+            batch_id=1,
+            mime_type="text/markdown",
+        )
+
+    assert "error" in result
+    assert "Connection timed out" in result["error"]
