@@ -46,7 +46,8 @@ def create_webdav_client(url: str = None, username: str = None, password: str = 
     if webdav_username and webdav_password:
         auth = (webdav_username, webdav_password)
     headers = {"User-Agent": "soliplex-agent/curl"}
-    return WebDAVClient(webdav_url, auth=auth, verify=settings.ssl_verify, headers=headers)
+    timeout = httpx.Timeout(5.0, connect=20.0)
+    return WebDAVClient(webdav_url, auth=auth, verify=settings.ssl_verify, headers=headers, timeout=timeout)
 
 
 async def validate_config(path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None):
