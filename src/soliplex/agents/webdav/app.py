@@ -37,7 +37,7 @@ def create_webdav_client(url: str = None, username: str = None, password: str = 
     """
     webdav_url = url or settings.webdav_url
     webdav_username = username or settings.webdav_username
-    webdav_password = password or settings.webdav_password
+    webdav_password = password or (settings.webdav_password.get_secret_value() if settings.webdav_password else None)
 
     if not webdav_url:
         raise ValueError("WebDAV URL is required (set WEBDAV_URL environment variable)")

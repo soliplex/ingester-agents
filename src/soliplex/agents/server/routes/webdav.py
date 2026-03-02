@@ -36,7 +36,8 @@ async def validate_config(
     Scans the specified WebDAV directory recursively and validates discovered files.
     """
     try:
-        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, webdav_password)
+        pwd = webdav_password.get_secret_value() if webdav_password else None
+        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, pwd)
         validated = webdav_app.check_config(config)
         invalid = [row for row in validated if "valid" in row and not row["valid"]]
 
@@ -73,7 +74,8 @@ async def check_status(
     try:
         from soliplex.agents import client
 
-        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, webdav_password)
+        pwd = webdav_password.get_secret_value() if webdav_password else None
+        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, pwd)
         to_process = await client.check_status(config, source)
 
         result = {
@@ -116,6 +118,7 @@ async def run_inventory(
     Scans the specified WebDAV directory recursively and ingests discovered files.
     """
     try:
+        pwd = webdav_password.get_secret_value() if webdav_password else None
         result = await webdav_app.load_inventory(
             config_path,
             source,
@@ -127,7 +130,7 @@ async def run_inventory(
             priority=priority,
             webdav_url=webdav_url,
             webdav_username=webdav_username,
-            webdav_password=webdav_password,
+            webdav_password=pwd,
         )
 
         return {
@@ -170,6 +173,7 @@ async def run_from_urls(
     Reads a file of WebDAV URLs (one per line) and ingests those specific files.
     """
     try:
+        pwd = webdav_password.get_secret_value() if webdav_password else None
         result = await webdav_app.load_inventory_from_urls(
             urls_file,
             source,
@@ -181,7 +185,7 @@ async def run_from_urls(
             priority=priority,
             webdav_url=webdav_url,
             webdav_username=webdav_username,
-            webdav_password=webdav_password,
+            webdav_password=pwd,
             skip_hash_check=skip_hash_check,
         )
 

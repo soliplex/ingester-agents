@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # WebDAV settings
     webdav_url: str | None = None
     webdav_username: str | None = None
-    webdav_password: str | None = None
+    webdav_password: SecretStr | None = None
 
     # File settings
     extensions: list[str] = ["md", "pdf", "doc", "docx"]
