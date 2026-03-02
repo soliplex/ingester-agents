@@ -1,10 +1,7 @@
 """WebDAV agent core functionality."""
 
 import hashlib
-import json
 import logging
-from datetime import UTC
-from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -442,7 +439,7 @@ async def load_inventory(
     ret["batch_id"] = batch_id
     ingested = []
     errors = []
-    for row in to_process:
+    for idx, row in enumerate(to_process):
         meta = row["metadata"].copy()
         for k in [
             "path",
@@ -454,7 +451,7 @@ async def load_inventory(
         ]:
             if k in meta:
                 del meta[k]
-        logger.info(f"starting ingest for {row['path']}")
+        logger.info(f"starting ingest for {row['path']} {idx}/{len(to_process)} ")
         mime_type = None
         if "metadata" in row and "content-type" in row["metadata"]:
             mime_type = row["metadata"]["content-type"]
@@ -597,11 +594,11 @@ async def load_inventory_from_urls(
         config, url_results = await build_config_from_urls(urls_file, webdav_url, webdav_username, webdav_password)
 
     # Write results to <urls_file>.results.<timestamp>.json
-    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-    results_path = f"{urls_file}.results.{timestamp}.json"
-    async with aiofiles.open(results_path, "w") as f:
-        await f.write(json.dumps(url_results, indent=2))
-    logger.info(f"URL results written to {results_path}")
+    # timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    # results_path = f"{urls_file}.results.{timestamp}.json"
+    # async with aiofiles.open(results_path, "w") as f:
+    #    await f.write(json.dumps(url_results, indent=2))
+    # logger.info(f"URL results written to {results_path}")
 
     result = await load_inventory(
         path="",
@@ -620,7 +617,7 @@ async def load_inventory_from_urls(
         skip_status_check=skip_hash_check,
     )
     result["url_results"] = url_results
-    result["url_results_path"] = results_path
+    # result["url_results_path"] = results_path
     return result
 
 
