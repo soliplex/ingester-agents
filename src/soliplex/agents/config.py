@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     scm_auth_password: SecretStr | None = None
     scm_base_url: str | None = None
 
+    # WebDAV settings
+    webdav_url: str | None = None
+    webdav_username: str | None = None
+    webdav_password: SecretStr | None = None
+
     # File settings
     extensions: list[str] = ["md", "pdf", "doc", "docx"]
     log_level: str = "INFO"
@@ -39,10 +44,6 @@ class Settings(BaseSettings):
     api_key_enabled: bool = False
     auth_trust_proxy_headers: bool = False
     ssl_verify: bool = True
-
-    # Server settings
-    server_host: str = "127.0.0.1"
-    server_port: int = 8001
 
     # HTTP timeout settings (seconds)
     http_timeout_total: int = 120

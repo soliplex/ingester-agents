@@ -18,6 +18,9 @@ Agents for loading documents into the [Soliplex Ingester](https://github.com/sol
   - MIME type detection
   - Authentication support (username/password)
   - Status checking to avoid re-ingesting unchanged files
+  - URL export for reviewing discovered files before ingestion
+  - URL-based ingestion from a curated file list with per-URL error tracking
+  - Skip hash check option for faster ingestion when re-downloading is acceptable
 
 - **SCM Agent (`scm`)**: Ingest files and issues from Git repositories
   - Support for GitHub and Gitea platforms
@@ -104,6 +107,19 @@ For Gitea:
 export scm_auth_token=your_gitea_token
 export scm_base_url=https://gitea.example.com/api/v1
 ```
+
+### WebDAV Configuration
+
+```bash
+# WebDAV server URL
+WEBDAV_URL=https://webdav.example.com
+
+# WebDAV authentication
+WEBDAV_USERNAME=your-username
+WEBDAV_PASSWORD=your-password
+```
+
+All WebDAV credentials can also be provided via command-line options (`--webdav-url`, `--webdav-username`, `--webdav-password`), which override the environment variables.
 
 ### Optional Configuration
 
@@ -361,27 +377,33 @@ That's it! The tool automatically:
 
 #### Commands
 
-**1. Build Configuration**
+**1. Export URLs**
 
-Scan a WebDAV directory and create an inventory file:
+Scan a WebDAV directory and export discovered file URLs to a file for review. This uses only directory listing (PROPFIND) and does not download file content:
 
 ```bash
-si-agent webdav build-config /documents \
+si-agent webdav export-urls /documents urls.txt \
   --webdav-url https://webdav.example.com \
   --webdav-username user \
-  --webdav-password pass \
-  --output inventory.json
+  --webdav-password pass
 ```
+
+The output file contains one absolute WebDAV path per line:
+
+```text
+/documents/report.md
+/documents/sub/readme.pdf
+/documents/notes.docx
+```
+
+Only files matching the configured `EXTENSIONS` filter are included.
 
 **2. Validate Configuration**
 
-Check if files are supported:
+Check if files are supported (downloads files to compute hashes):
 
 ```bash
-# Validate existing inventory file
-si-agent webdav validate-config inventory.json
-
-# Or validate WebDAV directory directly
+# Validate WebDAV directory directly
 si-agent webdav validate-config /documents \
   --webdav-url https://webdav.example.com \
   --webdav-username user \
@@ -403,20 +425,15 @@ Add `--detail` flag to see the full list of files.
 
 **4. Load Inventory**
 
-Ingest documents:
+Ingest documents from a WebDAV directory:
 
 ```bash
-# From WebDAV directory (recommended!)
 si-agent webdav run-inventory /documents my-source-name
-
-# Or from local inventory file
-si-agent webdav run-inventory inventory.json my-source-name
 ```
 
 **Advanced options:**
 
 ```bash
-# Override all configuration via command line
 si-agent webdav run-inventory /documents my-source \
   --start-workflows \
   --workflow-definition-id my-workflow \
@@ -424,13 +441,33 @@ si-agent webdav run-inventory /documents my-source \
   --priority 10 \
   --webdav-url https://webdav.example.com \
   --webdav-username user \
-  --webdav-password pass \
-  --endpoint-url http://custom-ingester:8000/api/v1
+  --webdav-password pass
 ```
 
-**Note:** All commands support both local inventory files and direct WebDAV paths. All configuration (WebDAV credentials, Ingester endpoint URL) can be provided via:
-- **Environment variables** (recommended for security): `WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD`, `ENDPOINT_URL`
-- **Command-line options** (useful for scripts or testing): `--webdav-url`, `--webdav-username`, `--webdav-password`, `--endpoint-url`
+**5. Run from URL List**
+
+Ingest specific files from a URL list file instead of scanning an entire directory. This is useful when you want to ingest only a curated subset of files:
+
+```bash
+si-agent webdav run-from-urls urls.txt my-source-name
+```
+
+Each URL in the file is processed independently. If a file fails to download, the error is recorded and processing continues with the remaining URLs. Results are written to a JSON file named `<input-file>.results.<timestamp>.json`:
+
+```json
+[
+  {"url": "/documents/report.md", "status": "success"},
+  {"url": "/documents/broken.pdf", "status": "error", "error_message": "404 Not Found"}
+]
+```
+
+Use `--skip-hash-check` to skip downloading files for hash comparison, which avoids downloading each file twice (once for hashing, once for ingestion):
+
+```bash
+si-agent webdav run-from-urls urls.txt my-source-name --skip-hash-check
+```
+
+**Note:** All commands support WebDAV credentials via environment variables (`WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD`) or command-line options (`--webdav-url`, `--webdav-username`, `--webdav-password`).
 
 **Git Bash on Windows:** If using Git Bash on Windows, use double slashes for WebDAV paths to prevent path conversion (e.g., `//documents` instead of `/documents`).
 
@@ -696,41 +733,38 @@ curl -X POST http://localhost:8001/api/scm/github/my-repo/ingest \
 
 #### WebDAV Routes (`/api/v1/webdav/`)
 
-All endpoints accept both local inventory files and WebDAV paths!
-
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/v1/webdav/build-config` | Build inventory from WebDAV directory |
-| `POST` | `/api/v1/webdav/validate-config` | Validate inventory (file or WebDAV path) |
+| `POST` | `/api/v1/webdav/validate-config` | Validate inventory from WebDAV path |
 | `POST` | `/api/v1/webdav/check-status` | Check which files need ingestion |
-| `POST` | `/api/v1/webdav/run-inventory` | Ingest documents from WebDAV |
+| `POST` | `/api/v1/webdav/run-inventory` | Ingest documents from WebDAV directory |
+| `POST` | `/api/v1/webdav/run-from-urls` | Ingest documents from a URL list file |
 
 **Examples:**
 
 ```bash
-# Build configuration from WebDAV
-curl -X POST http://localhost:8001/api/v1/webdav/build-config \
-  -F "webdav_path=/documents" \
-  -F "webdav_url=https://webdav.example.com" \
-  -F "webdav_username=user" \
-  -F "webdav_password=pass"
-
 # Validate using WebDAV path
 curl -X POST http://localhost:8001/api/v1/webdav/validate-config \
   -F "config_path=/documents" \
   -F "webdav_url=https://webdav.example.com"
 
-# Ingest directly from WebDAV with custom endpoint
+# Ingest from WebDAV directory
 curl -X POST http://localhost:8001/api/v1/webdav/run-inventory \
   -F "config_path=/documents" \
   -F "source=my-source" \
   -F "webdav_url=https://webdav.example.com" \
   -F "webdav_username=user" \
-  -F "webdav_password=pass" \
-  -F "endpoint_url=http://custom-ingester:8000/api/v1"
-```
+  -F "webdav_password=pass"
 
-**Note:** The `endpoint_url` parameter allows you to override the Ingester API endpoint on a per-request basis.
+# Ingest from URL list file (with skip hash check)
+curl -X POST http://localhost:8001/api/v1/webdav/run-from-urls \
+  -F "urls_file=/tmp/urls.txt" \
+  -F "source=my-source" \
+  -F "skip_hash_check=true" \
+  -F "webdav_url=https://webdav.example.com" \
+  -F "webdav_username=user" \
+  -F "webdav_password=pass"
+```
 
 #### Health Check
 

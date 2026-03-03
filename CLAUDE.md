@@ -34,8 +34,9 @@ si-agent scm reset-sync <platform> <owner>/<repo>
 
 # WebDAV agent
 si-agent webdav run-inventory <path> <source>
+si-agent webdav run-from-urls <urls-file> <source>
 si-agent webdav check-status <path> <source>
-si-agent webdav build-config <path>
+si-agent webdav export-urls <path> <output-file>
 si-agent webdav validate-config <path>
 
 # REST API server
