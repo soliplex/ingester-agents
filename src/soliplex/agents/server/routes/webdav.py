@@ -1,5 +1,6 @@
 """WebDAV agent API routes."""
 
+import json
 import logging
 
 from fastapi import APIRouter
@@ -33,13 +34,11 @@ async def validate_config(
     """
     Validate an inventory configuration.
 
-    If a local file is provided, it will be treated as an inventory.json config file.
-    If a WebDAV path is provided, a config will be built from the WebDAV directory contents.
-
-    Checks file support and identifies invalid files.
+    Scans the specified WebDAV directory recursively and validates discovered files.
     """
     try:
-        config, _ = await webdav_app.resolve_config_path(config_path, webdav_url, webdav_username, webdav_password)
+        pwd = webdav_password.get_secret_value() if webdav_password else None
+        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, pwd)
         validated = webdav_app.check_config(config)
         invalid = [row for row in validated if "valid" in row and not row["valid"]]
 
@@ -53,32 +52,6 @@ async def validate_config(
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error validating config: {str(e)}") from e
-
-
-@webdav_router.post("/build-config")
-async def build_config(
-    webdav_path: str = Form(..., description="WebDAV directory path (e.g., /documents)"),
-    webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
-    webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
-    webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
-):
-    """
-    Scan a WebDAV directory and create an inventory configuration.
-
-    Returns file metadata including paths, hashes, and MIME types.
-    """
-    try:
-        config = await webdav_app.build_config(webdav_path, webdav_url, webdav_username, webdav_password)
-
-        return {
-            "status": "ok",
-            "files_count": len(config),
-            "inventory": config,
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error building config: {str(e)}") from e
 
 
 @webdav_router.post("/check-status")
@@ -96,16 +69,14 @@ async def check_status(
     """
     Check which files need to be ingested.
 
-    If a local file is provided, it will be treated as an inventory.json config file.
-    If a WebDAV path is provided, a config will be built from the WebDAV directory contents.
-
-    Compares file hashes against the Ingester database to identify
-    new or modified files.
+    Scans the specified WebDAV directory recursively and compares file hashes
+    against the Ingester database to identify new or modified files.
     """
     try:
         from soliplex.agents import client
 
-        config, _ = await webdav_app.resolve_config_path(config_path, webdav_url, webdav_username, webdav_password)
+        pwd = webdav_password.get_secret_value() if webdav_password else None
+        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, pwd)
         to_process = await client.check_status(config, source)
 
         result = {
@@ -146,13 +117,10 @@ async def run_inventory(
     """
     Run document ingestion from an inventory.
 
-    If a local file is provided, it will be treated as an inventory.json config file.
-    If a WebDAV path is provided, a config will be built from the WebDAV directory contents.
-    Path resolution is handled internally by load_inventory via resolve_config_path.
+    Scans the specified WebDAV directory recursively and ingests discovered files.
     """
     try:
-        import json
-
+        pwd = webdav_password.get_secret_value() if webdav_password else None
         extra_metadata = json.loads(metadata) if metadata else None
         result = await webdav_app.load_inventory(
             config_path,
@@ -165,7 +133,7 @@ async def run_inventory(
             priority=priority,
             webdav_url=webdav_url,
             webdav_username=webdav_username,
-            webdav_password=webdav_password,
+            webdav_password=pwd,
             extra_metadata=extra_metadata,
         )
 
@@ -183,3 +151,62 @@ async def run_inventory(
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error running inventory: {str(e)}") from e
+
+
+@webdav_router.post("/run-from-urls")
+async def run_from_urls(
+    urls_file: str = Form(
+        ...,
+        description="Path to file containing WebDAV URLs (one per line)",
+    ),
+    source: str = Form(..., description="Source name"),
+    start: int = Form(0, description="Start index"),
+    end: int | None = Form(None, description="End index"),
+    start_workflows: bool = Form(True, description="Start workflows after ingestion"),
+    workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
+    param_set_id: str | None = Form(None, description="Parameter set ID"),
+    priority: int = Form(0, description="Workflow priority"),
+    webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
+    webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
+    webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
+    skip_hash_check: bool = Form(False, description="Skip hash check and ingest all URLs"),
+    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
+):
+    """
+    Run document ingestion from a URL list file.
+
+    Reads a file of WebDAV URLs (one per line) and ingests those specific files.
+    """
+    try:
+        pwd = webdav_password.get_secret_value() if webdav_password else None
+        extra_metadata = json.loads(metadata) if metadata else None
+        result = await webdav_app.load_inventory_from_urls(
+            urls_file,
+            source,
+            start,
+            end,
+            workflow_definition_id=workflow_definition_id,
+            param_set_id=param_set_id,
+            start_workflows=start_workflows,
+            priority=priority,
+            webdav_url=webdav_url,
+            webdav_username=webdav_username,
+            webdav_password=pwd,
+            skip_hash_check=skip_hash_check,
+            extra_metadata=extra_metadata,
+        )
+
+        return {
+            "status": "ok",
+            "inventory_count": len(result.get("inventory", [])),
+            "to_process_count": len(result.get("to_process", [])),
+            "ingested_count": len(result.get("ingested", [])),
+            "error_count": len(result.get("errors", [])),
+            "batch_id": result.get("batch_id"),
+            "errors": result.get("errors", []),
+            "workflow_result": result.get("workflow_result"),
+        }
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error running from URLs: {str(e)}") from e

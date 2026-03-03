@@ -3,8 +3,10 @@
 import asyncio
 import json
 import logging
+import sys
 from typing import Annotated
 
+import httpx
 import typer
 
 from . import app
@@ -18,7 +20,7 @@ cli = typer.Typer(no_args_is_help=True)
 def validate(
     config_path: Annotated[
         str,
-        typer.Argument(help="path to inventory file or WebDAV directory (e.g., /documents)"),
+        typer.Argument(help="WebDAV directory path (e.g., /documents)"),
     ],
     webdav_url: Annotated[
         str,
@@ -36,16 +38,28 @@ def validate(
     """
     Validate a configuration.
 
-    If a local file is provided, it will be treated as an inventory.json config file.
-    If a WebDAV path is provided (e.g., /documents), a config will be built from the
-    WebDAV directory contents.
+    Scans the specified WebDAV directory recursively and validates discovered files.
     """
-    asyncio.run(app.validate_config(config_path, webdav_url, webdav_username, webdav_password))
+    try:
+        asyncio.run(app.validate_config(config_path, webdav_url, webdav_username, webdav_password))
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+        print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
-@cli.command("build-config")
-def build_config(
-    webdav_path: Annotated[str, typer.Argument(help="WebDAV directory path (e.g., /documents)")],
+@cli.command("export-urls")
+def export_urls(
+    config_path: Annotated[
+        str,
+        typer.Argument(help="WebDAV directory path (e.g., /documents)"),
+    ],
+    output: Annotated[
+        str,
+        typer.Argument(help="Output file path to write URLs to"),
+    ],
     webdav_url: Annotated[
         str,
         typer.Option(help="WebDAV server URL (uses WEBDAV_URL env var if not provided)"),
@@ -58,28 +72,31 @@ def build_config(
         str,
         typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
     ] = None,
-    output: Annotated[str, typer.Option(help="output file path")] = "inventory.json",
 ):
     """
-    Build configuration from a WebDAV directory.
+    Export discovered URLs to a file.
 
-    Scans the specified WebDAV directory recursively and creates an inventory.json file
-    containing metadata for all discovered files.
+    Scans the specified WebDAV directory recursively and writes one absolute
+    WebDAV path per line. No file content is downloaded.
     """
-    config = asyncio.run(app.build_config(webdav_path, webdav_url, webdav_username, webdav_password))
-    with open(output, "w") as f:
-        json.dump(config, f, indent=2)
-    print(f"created {output} with {len(config)} files")
+    try:
+        asyncio.run(app.export_urls(config_path, output, webdav_url, webdav_username, webdav_password))
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+        print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 @cli.command("check-status")
 def check_status(
     config_path: Annotated[
         str,
-        typer.Argument(help="path to inventory file or WebDAV directory (e.g., /documents)"),
+        typer.Argument(help="WebDAV directory path (e.g., /documents)"),
     ],
     source: Annotated[str, typer.Argument(help="source name")],
-    detail: bool = False,
+    detail: Annotated[bool, typer.Option(help="include detailed file list")] = False,
     webdav_url: Annotated[
         str,
         typer.Option(help="WebDAV server URL (uses WEBDAV_URL env var if not provided)"),
@@ -92,30 +109,32 @@ def check_status(
         str,
         typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
     ] = None,
-    endpoint_url: Annotated[
-        str,
-        typer.Option(help="Ingester API endpoint URL (uses ENDPOINT_URL env var if not provided)"),
-    ] = None,
 ):
     """
     Check the status of files in an inventory.
 
-    If a local file is provided, it will be treated as an inventory.json config file.
-    If a WebDAV path is provided, a config will be built from the WebDAV directory contents.
+    Scans the specified WebDAV directory recursively and checks file status.
     """
-    asyncio.run(app.status_report(config_path, source, detail, webdav_url, webdav_username, webdav_password, endpoint_url))
+    try:
+        asyncio.run(app.status_report(config_path, source, detail, webdav_url, webdav_username, webdav_password))
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+        print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 @cli.command("run-inventory")
 def run(
     config_path: Annotated[
         str,
-        typer.Argument(help="path to inventory file or WebDAV directory (e.g., /documents)"),
+        typer.Argument(help="WebDAV directory path (e.g., /documents)"),
     ],
     source: Annotated[str, typer.Argument(help="source name")],
     start: Annotated[int, typer.Option(help="start index")] = 0,
     end: Annotated[int, typer.Option(help="end index")] = None,
-    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = True,
+    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = False,
     workflow_definition_id: Annotated[str, typer.Option(help="workflow definition id")] = None,
     param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
@@ -132,38 +151,43 @@ def run(
         str,
         typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
     ] = None,
-    endpoint_url: Annotated[
-        str,
-        typer.Option(help="Ingester API endpoint URL (uses ENDPOINT_URL env var if not provided)"),
-    ] = None,
     metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
 ):
     """
     Run an inventory ingestion.
 
-    If a local file is provided, it will be treated as an inventory.json config file.
-    If a WebDAV path is provided, a config will be built from the WebDAV directory contents.
-    Path resolution is handled internally via resolve_config_path.
+    Scans the specified WebDAV directory recursively and ingests discovered files.
     """
     extra_metadata = json.loads(metadata) if metadata else None
+    if start_workflows:
+        if workflow_definition_id is None:
+            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
+        if param_set_id is None:
+            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
     print(f"loading {config_path} source={source}")
-    res = asyncio.run(
-        app.load_inventory(
-            config_path,
-            source,
-            start,
-            end,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            start_workflows=start_workflows,
-            priority=priority,
-            webdav_url=webdav_url,
-            webdav_username=webdav_username,
-            webdav_password=webdav_password,
-            endpoint_url=endpoint_url,
-            extra_metadata=extra_metadata,
+    try:
+        res = asyncio.run(
+            app.load_inventory(
+                config_path,
+                source,
+                start,
+                end,
+                workflow_definition_id=workflow_definition_id,
+                param_set_id=param_set_id,
+                start_workflows=start_workflows,
+                priority=priority,
+                webdav_url=webdav_url,
+                webdav_username=webdav_username,
+                webdav_password=webdav_password,
+                extra_metadata=extra_metadata,
+            )
         )
-    )
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+        print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
     if do_json:
         print(json.dumps(res, indent=2))
     else:
@@ -175,7 +199,98 @@ def run(
             print("no errors found")
             print(f"found {len(res['inventory'])} files")
             print(f"found {len(res['to_process'])} to process")
-            print(f"{len(res['ingested'])} ingested")
+            if "ingested" in res and len(res["ingested"]) > 0:
+                print(f"{len(res['ingested'])} ingested")
+            else:
+                print("no ingested files")
+            if start_workflows:
+                print("workflow result")
+                print(json.dumps(res["workflow_result"], indent=2))
+
+
+@cli.command("run-from-urls")
+def run_from_urls(
+    urls_file: Annotated[
+        str,
+        typer.Argument(help="Path to file containing WebDAV URLs (one per line)"),
+    ],
+    source: Annotated[str, typer.Argument(help="source name")],
+    start: Annotated[int, typer.Option(help="start index")] = 0,
+    end: Annotated[int, typer.Option(help="end index")] = None,
+    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = False,
+    workflow_definition_id: Annotated[str, typer.Option(help="workflow definition id")] = None,
+    param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
+    priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
+    do_json: Annotated[bool, typer.Option(help="output json")] = False,
+    webdav_url: Annotated[
+        str,
+        typer.Option(help="WebDAV server URL (uses WEBDAV_URL env var if not provided)"),
+    ] = None,
+    webdav_username: Annotated[
+        str,
+        typer.Option(help="WebDAV username (uses WEBDAV_USERNAME env var if not provided)"),
+    ] = None,
+    webdav_password: Annotated[
+        str,
+        typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
+    ] = None,
+    skip_hash_check: Annotated[
+        bool,
+        typer.Option(help="Skip hash check and ingest all URLs (avoids downloading files twice)"),
+    ] = False,
+    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
+):
+    """
+    Run ingestion from a URL list file.
+
+    Reads a file of WebDAV URLs (one per line) and ingests those specific files.
+    """
+    extra_metadata = json.loads(metadata) if metadata else None
+    if start_workflows:
+        if workflow_definition_id is None:
+            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
+        if param_set_id is None:
+            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
+    print(f"loading URLs from {urls_file} source={source}")
+    try:
+        res = asyncio.run(
+            app.load_inventory_from_urls(
+                urls_file,
+                source,
+                start,
+                end,
+                workflow_definition_id=workflow_definition_id,
+                param_set_id=param_set_id,
+                start_workflows=start_workflows,
+                priority=priority,
+                webdav_url=webdav_url,
+                webdav_username=webdav_username,
+                webdav_password=webdav_password,
+                skip_hash_check=skip_hash_check,
+                extra_metadata=extra_metadata,
+            )
+        )
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+        print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    if do_json:
+        print(json.dumps(res, indent=2))
+    else:
+        if "errors" in res and len(res["errors"]) > 0:
+            print(f"found {len(res['errors'])} errors:")
+            for err in res["errors"]:
+                print(err)
+        else:
+            print("no errors found")
+            print(f"found {len(res['inventory'])} files")
+            print(f"found {len(res['to_process'])} to process")
+            if "ingested" in res and len(res["ingested"]) > 0:
+                print(f"{len(res['ingested'])} ingested")
+            else:
+                print("no ingested files")
             if start_workflows:
                 print("workflow result")
                 print(json.dumps(res["workflow_result"], indent=2))

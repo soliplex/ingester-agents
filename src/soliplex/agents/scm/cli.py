@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import sys
 from typing import Annotated
 
+import aiohttp
 import typer
 
 from ..config import SCM
@@ -99,19 +101,26 @@ def run_inventory(
             raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
         if param_set_id is None:
             raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
-    res = asyncio.run(
-        app.load_inventory(
-            scm,
-            repo_name,
-            owner,
-            start_workflows=start_workflows,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            priority=priority,
-            content_filter=content_filter,
-            extra_metadata=extra_metadata,
+    try:
+        res = asyncio.run(
+            app.load_inventory(
+                scm,
+                repo_name,
+                owner,
+                start_workflows=start_workflows,
+                workflow_definition_id=workflow_definition_id,
+                param_set_id=param_set_id,
+                priority=priority,
+                content_filter=content_filter,
+                extra_metadata=extra_metadata,
+            )
         )
-    )
+    except (aiohttp.ClientError, ConnectionError) as e:
+        print(f"Connection error: Could not connect to server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
     if do_json:
         print(json.dumps(res, indent=2))
     else:
@@ -123,7 +132,10 @@ def run_inventory(
             print("no errors found")
             print(f"found {len(res['inventory'])} files")
             print(f"found {len(res['to_process'])} to process")
-            print(f"{len(res['ingested'])} ingested")
+            if "ingested" in res and len(res["ingested"]) > 0:
+                print(f"{len(res['ingested'])} ingested")
+            else:
+                print("no ingested files")
             if start_workflows:
                 print("workflow result")
                 print(json.dumps(res["workflow_result"], indent=2))
@@ -155,20 +167,32 @@ def run_incremental(
     """
     owner, repo_name = parse_repo(repo)
     extra_metadata = json.loads(metadata) if metadata else None
-    res = asyncio.run(
-        app.incremental_sync(
-            scm,
-            repo_name,
-            owner,
-            branch=branch,
-            priority=priority,
-            start_workflows=start_workflows,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            content_filter=content_filter,
-            extra_metadata=extra_metadata,
+    if start_workflows:
+        if workflow_definition_id is None:
+            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
+        if param_set_id is None:
+            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
+    try:
+        res = asyncio.run(
+            app.incremental_sync(
+                scm,
+                repo_name,
+                owner,
+                branch=branch,
+                priority=priority,
+                start_workflows=start_workflows,
+                workflow_definition_id=workflow_definition_id,
+                param_set_id=param_set_id,
+                content_filter=content_filter,
+                extra_metadata=extra_metadata,
+            )
         )
-    )
+    except (aiohttp.ClientError, ConnectionError) as e:
+        print(f"Connection error: Could not connect to server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
 
     if do_json:
         print(json.dumps(res, indent=2))

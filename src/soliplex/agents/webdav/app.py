@@ -6,12 +6,12 @@ from io import BytesIO
 from pathlib import Path
 
 import aiofiles
+import httpx
 from webdav4.client import Client as WebDAVClient
 
 from soliplex.agents import client
 from soliplex.agents.common.config import check_config
 from soliplex.agents.common.config import detect_mime_type
-from soliplex.agents.common.config import read_config
 from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ def create_webdav_client(url: str = None, username: str = None, password: str = 
     """
     webdav_url = url or settings.webdav_url
     webdav_username = username or settings.webdav_username
-    webdav_password = password or settings.webdav_password
+    webdav_password = password or (settings.webdav_password.get_secret_value() if settings.webdav_password else None)
 
     if not webdav_url:
         raise ValueError("WebDAV URL is required (set WEBDAV_URL environment variable)")
@@ -42,19 +42,19 @@ def create_webdav_client(url: str = None, username: str = None, password: str = 
     auth = None
     if webdav_username and webdav_password:
         auth = (webdav_username, webdav_password)
-
-    return WebDAVClient(webdav_url, auth=auth, verify=settings.ssl_verify)
+    headers = {"User-Agent": "soliplex-agent/curl"}
+    timeout = httpx.Timeout(60.0, connect=20.0)
+    return WebDAVClient(webdav_url, auth=auth, verify=settings.ssl_verify, headers=headers, timeout=timeout)
 
 
 async def validate_config(path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None):
     """
     Validate a configuration and print out validation results.
 
-    If path is a file, treats it as a config file.
-    If path is a WebDAV path, builds config from WebDAV directory contents.
+    Builds config from WebDAV directory contents and validates files.
 
     Args:
-        path: Path to either a config file or WebDAV directory to validate
+        path: WebDAV directory path to validate (e.g., /documents)
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
@@ -62,7 +62,7 @@ async def validate_config(path: str, webdav_url: str = None, webdav_username: st
     Returns:
         None
     """
-    config, _ = await resolve_config_path(path, webdav_url, webdav_username, webdav_password)
+    config = await build_config(path, webdav_url, webdav_username, webdav_password)
     validated = check_config(config)
     invalid = [row for row in validated if "valid" in row and not row["valid"]]
     print(f"Validation for {path}")
@@ -73,48 +73,166 @@ async def validate_config(path: str, webdav_url: str = None, webdav_username: st
             print(row["path"], row["reason"], row["metadata"]["content-type"])
 
 
-async def resolve_config_path(
-    path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None
-) -> tuple[list[dict], str]:
+async def export_urls(
+    path: str, output_path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None
+):
     """
-    Resolve a path to a configuration.
+    Export discovered WebDAV URLs to a file without downloading content.
 
-    If the path is a local file that exists, treat it as an inventory.json config file.
-    Otherwise, treat it as a WebDAV path and build config.
+    Uses list_config (PROPFIND only) to discover files, then writes
+    their absolute paths to the output file.
 
     Args:
-        path: Path to either a config file or WebDAV directory
+        path: WebDAV directory path to scan (e.g., /documents)
+        output_path: File path to write URLs to
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
 
     Returns:
-        Tuple of (config list, base_path) where base_path is the WebDAV directory
-        or parent directory of config file
-
-    Raises:
-        FileNotFoundError: If the local path doesn't exist
-        ValidationError: If the config file format is invalid
+        None
     """
-    # Only treat as local file if it actually exists on the filesystem
-    # This prevents WebDAV paths like "/documents" from being interpreted
-    # as Windows paths on Windows systems
-    path_obj = Path(path)
-    try:
-        if path_obj.exists() and path_obj.is_file():
-            logger.info(f"Using {path} as local config file")
-            config = await read_config(path)
-            base_path = str(path_obj.parent)
-            return config, base_path
-    except (OSError, ValueError):
-        # Path might be invalid for local filesystem (e.g., contains invalid chars)
-        # Treat as WebDAV path
-        pass
+    config = await list_config(path, webdav_url, webdav_username, webdav_password)
+    count = await export_urls_to_file(config, path, output_path)
+    print(f"Found {len(config)} files in {path}")
+    print(f"Exported {count} URLs to {output_path}")
 
-    # Treat as WebDAV path
-    logger.info(f"Building config from WebDAV path {path}")
-    config = await build_config(path, webdav_url, webdav_username, webdav_password)
-    return config, path
+
+async def export_urls_to_file(config: list[dict], base_path: str, output_path: str) -> int:
+    """
+    Export discovered URLs to a file, one absolute WebDAV path per line.
+
+    Args:
+        config: Config list with relative paths
+        base_path: Base WebDAV path used during discovery
+        output_path: File path to write URLs to
+
+    Returns:
+        Number of URLs written
+    """
+    normalized_base = base_path.rstrip("/")
+    async with aiofiles.open(output_path, "w") as f:
+        for item in config:
+            absolute_path = f"{normalized_base}/{item['path']}"
+            await f.write(absolute_path + "\n")
+    return len(config)
+
+
+async def build_config_from_urls(
+    urls_file: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None
+) -> tuple[list[dict], list[dict]]:
+    """
+    Build config from a file containing one absolute WebDAV path per line.
+
+    Each URL is processed independently; errors are captured per-URL
+    so that one failure does not stop the whole list.
+
+    Args:
+        urls_file: Path to file containing WebDAV URLs (one per line)
+        webdav_url: Optional WebDAV server URL
+        webdav_username: Optional WebDAV username
+        webdav_password: Optional WebDAV password
+
+    Returns:
+        Tuple of (config list, results list). The config list contains
+        successfully processed files. The results list contains one entry
+        per URL with status and optional error_message.
+    """
+    webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
+    allowed_extensions = settings.extensions
+    config = []
+    results = []
+
+    async with aiofiles.open(urls_file) as f:
+        content = await f.read()
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+
+    for full_path in lines:
+        ext = Path(full_path).suffix.lstrip(".")
+        if ext not in allowed_extensions:
+            logger.info(f"skipping {full_path}")
+            results.append({"url": full_path, "status": "skipped", "error_message": f"Extension .{ext} not allowed"})
+            continue
+
+        try:
+            buffer = BytesIO()
+            webdav_client.download_fileobj(full_path, buffer)
+            content_bytes = buffer.getvalue()
+            sha256_hash = hashlib.sha256(content_bytes, usedforsecurity=False).hexdigest()
+            mime_type = detect_mime_type(full_path)
+
+            rec = {
+                "path": full_path,
+                "sha256": sha256_hash,
+                "metadata": {
+                    "size": len(content_bytes),
+                    "content-type": mime_type,
+                },
+            }
+            config.append(rec)
+            results.append({"url": full_path, "status": "success", "error_message": None})
+        except Exception as e:
+            logger.exception(f"Error processing {full_path}")
+            results.append({"url": full_path, "status": "error", "error_message": str(e)})
+
+    return config, results
+
+
+async def list_config(
+    webdav_path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None
+) -> list[dict]:
+    """
+    List files in a WebDAV directory without downloading content.
+
+    Only uses PROPFIND to discover files. No GET requests are made.
+    Suitable for validation and URL export where file content is not needed.
+
+    Args:
+        webdav_path: Path within WebDAV server (e.g., "/documents")
+        webdav_url: Optional WebDAV server URL
+        webdav_username: Optional WebDAV username
+        webdav_password: Optional WebDAV password
+
+    Returns:
+        List of file configuration dictionaries (without sha256)
+    """
+    webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
+    allowed_extensions = settings.extensions
+    config = []
+
+    files = await recursive_listdir_webdav(webdav_client, webdav_path)
+
+    for file_info in files:
+        full_path = file_info["path"]
+        ext = Path(full_path).suffix.lstrip(".")
+
+        if ext not in allowed_extensions:
+            logger.info(f"skipping {full_path}")
+            continue
+
+        mime_type = detect_mime_type(full_path)
+
+        normalized_base = webdav_path.strip("/")
+        normalized_full = full_path.strip("/")
+
+        if normalized_full.startswith(normalized_base + "/"):
+            relative_path = normalized_full[len(normalized_base) + 1 :]
+        elif normalized_full == normalized_base:
+            relative_path = ""
+        else:
+            relative_path = normalized_full
+
+        rec = {
+            "path": relative_path,
+            "metadata": {
+                "size": file_info["size"],
+                "content-type": mime_type,
+            },
+        }
+        config.append(rec)
+
+    return config
 
 
 async def build_config(
@@ -135,6 +253,7 @@ async def build_config(
     client = create_webdav_client(webdav_url, webdav_username, webdav_password)
     allowed_extensions = settings.extensions
     config = []
+    failed = 0
 
     # Recursively list all files
     files = await recursive_listdir_webdav(client, webdav_path)
@@ -148,10 +267,15 @@ async def build_config(
             continue
 
         # Get file content for hashing
-        # Use download_fileobj to get content as bytes
-        buffer = BytesIO()
-        client.download_fileobj(full_path, buffer)
-        content = buffer.getvalue()
+        try:
+            buffer = BytesIO()
+            client.download_fileobj(full_path, buffer)
+            content = buffer.getvalue()
+        except Exception:
+            logger.exception(f"Error downloading {full_path}, skipping")
+            failed += 1
+            continue
+
         sha256_hash = hashlib.sha256(content, usedforsecurity=False).hexdigest()
 
         # Detect MIME type
@@ -187,6 +311,7 @@ async def build_config(
         }
         config.append(rec)
 
+    logger.info(f"Built config: {len(config)} files succeeded, {failed} files failed")
     return config
 
 
@@ -203,16 +328,6 @@ async def recursive_listdir_webdav(client: WebDAVClient, path: str) -> list[dict
     """
     file_list = []
 
-    # Fix for Git Bash on Windows: paths starting with / get converted to Windows paths
-    # If path looks like a Windows path (contains :), it was likely converted
-    if ":" in path and path.startswith("C:"):
-        # Extract the original WebDAV path
-        # C:/Program Files/Git/Plone/docs -> /Plone/docs
-        parts = path.split("Git")
-        if len(parts) > 1:
-            path = parts[1].replace("\\", "/")
-            logger.warning(f"Detected Git Bash path conversion, using: {path}")
-
     logger.debug(f"Listing WebDAV directory: {path}")
 
     try:
@@ -222,7 +337,7 @@ async def recursive_listdir_webdav(client: WebDAVClient, path: str) -> list[dict
             logger.debug(f"Found resource: {resource_path}, type: {resource.get('type', 'unknown')}")
 
             # Skip the directory itself
-            if resource_path.rstrip("/") == path.rstrip("/"):
+            if resource_path.rstrip("/") == path.rstrip("/") or resource["name"].split("/")[-1] == "_data":
                 continue
 
             if resource["type"] == "directory":
@@ -230,7 +345,13 @@ async def recursive_listdir_webdav(client: WebDAVClient, path: str) -> list[dict
                 subdir_files = await recursive_listdir_webdav(client, resource_path)
                 file_list.extend(subdir_files)
             else:
-                file_list.append({"path": resource_path, "size": resource.get("size", 0)})
+                rec = {"path": resource_path, "size": resource.get("content_length", 0)}
+                for key in [x for x in resource.keys() if x not in ["href", "etag", "type", "name"]]:
+                    rec[key] = resource.get(key)
+                file_list.append(rec)
+    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException):
+        logger.exception(f"Connection error listing {path}")
+        raise
     except Exception:
         logger.exception(f"Error listing WebDAV directory {path}")
 
@@ -244,22 +365,23 @@ async def load_inventory(
     end: int = None,
     skip_invalid: bool = False,
     workflow_definition_id: str | None = None,
-    start_workflows: bool = True,
+    start_workflows: bool = False,
     param_set_id: str | None = None,
     priority: int = 0,
     webdav_url: str = None,
     webdav_username: str = None,
     webdav_password: str = None,
+    config: list[dict] | None = None,
+    skip_status_check: bool = False,
     extra_metadata: dict[str, str] | None = None,
 ):
     """
     Load and process an inventory for ingestion.
 
-    If path is a local file, treats it as a config file.
-    If path is a WebDAV path, builds config from WebDAV directory contents.
+    Builds config from WebDAV directory contents and ingests files.
 
     Args:
-        path: Path to either a config file or WebDAV directory to process
+        path: WebDAV directory path to process (e.g., /documents)
         source: Source identifier for the batch
         start: Starting index for processing (default: 0)
         end: Ending index for processing (default: None, processes all)
@@ -271,21 +393,27 @@ async def load_inventory(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
-        endpoint_url: Optional Ingester API endpoint URL
 
     Returns:
         Dictionary with inventory, to_process, batch_id, ingested, errors,
         and workflow_result
     """
+
     client.validate_parameters(start_workflows, workflow_definition_id, param_set_id)
-    config, base_path = await resolve_config_path(path, webdav_url, webdav_username, webdav_password)
+    if config is None:
+        config = await build_config(path, webdav_url, webdav_username, webdav_password)
+    base_path = path
     if skip_invalid:
         filtered = check_config(config)
         config = [x for x in filtered if x["valid"]]
 
     logger.info(f"found {len(config)} files in {path}")
-    to_process = await client.check_status(config, source)
-    logger.info(f"found {len(to_process)} out of {len(config)} to process in {base_path}")
+    if skip_status_check:
+        to_process = config
+        logger.info(f"skipping status check, processing all {len(to_process)} files")
+    else:
+        to_process = await client.check_status(config, source)
+        logger.info(f"found {len(to_process)} out of {len(config)} to process in {base_path}")
     if end is None:
         end = len(config)
         to_process = to_process[start:end]
@@ -311,7 +439,7 @@ async def load_inventory(
     ret["batch_id"] = batch_id
     ingested = []
     errors = []
-    for row in to_process:
+    for idx, row in enumerate(to_process):
         meta = row["metadata"].copy()
         for k in [
             "path",
@@ -325,7 +453,7 @@ async def load_inventory(
                 del meta[k]
         if extra_metadata:
             meta.update(extra_metadata)
-        logger.info(f"starting ingest for {row['path']}")
+        logger.info(f"starting ingest for {row['path']} {idx}/{len(to_process)} ")
         mime_type = None
         if "metadata" in row and "content-type" in row["metadata"]:
             mime_type = row["metadata"]["content-type"]
@@ -393,7 +521,7 @@ async def do_ingest(
     logger.info(f"base_path={base_path}, uri={uri}")
 
     # Check if base_path is a local directory
-    if Path(base_path).exists():
+    if base_path and Path(base_path).exists():
         # Local file ingestion
         load_path = Path(base_path) / uri
         logger.debug(f"Loading from local path: {load_path}")
@@ -401,12 +529,16 @@ async def do_ingest(
             doc_body = await f.read()
     else:
         # WebDAV file ingestion
-        webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
-        full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}"
-        logger.info(f"Downloading from WebDAV: {full_path}")
-        buffer = BytesIO()
-        webdav_client.download_fileobj(full_path, buffer)
-        doc_body = buffer.getvalue()
+        try:
+            webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
+            full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}"
+            logger.info(f"Downloading from WebDAV: {full_path}")
+            buffer = BytesIO()
+            webdav_client.download_fileobj(full_path, buffer)
+            doc_body = buffer.getvalue()
+        except Exception as e:
+            logger.exception(f"Error downloading {uri} from WebDAV")
+            return {"error": str(e)}
 
     return await client.do_ingest(
         doc_body,
@@ -416,6 +548,115 @@ async def do_ingest(
         batch_id,
         mime_type,
     )
+
+
+async def load_inventory_from_urls(
+    urls_file: str,
+    source: str,
+    start: int = 0,
+    end: int = None,
+    skip_invalid: bool = False,
+    workflow_definition_id: str | None = None,
+    start_workflows: bool = False,
+    param_set_id: str | None = None,
+    priority: int = 0,
+    webdav_url: str = None,
+    webdav_username: str = None,
+    webdav_password: str = None,
+    skip_hash_check: bool = False,
+    extra_metadata: dict[str, str] | None = None,
+):
+    """
+    Load and process an inventory from a URL list file.
+
+    Reads URLs from file, builds config, then delegates to load_inventory.
+
+    Args:
+        urls_file: Path to file containing WebDAV URLs (one per line)
+        source: Source identifier for the batch
+        start: Starting index for processing (default: 0)
+        end: Ending index for processing (default: None, processes all)
+        skip_invalid: Skip files that fail validation (default: False)
+        workflow_definition_id: Optional workflow to start after ingestion
+        start_workflows: Whether to start workflows (default: False)
+        param_set_id: Parameter set for workflows
+        priority: Workflow priority (default: 0)
+        webdav_url: Optional WebDAV server URL
+        webdav_username: Optional WebDAV username
+        webdav_password: Optional WebDAV password
+        skip_hash_check: Skip downloading files for hash comparison and
+            assume all URLs need ingestion (default: False)
+
+    Returns:
+        Dictionary with inventory, to_process, batch_id, ingested, errors,
+        url_results, and url_results_path
+    """
+    if skip_hash_check:
+        config, url_results = await _read_urls_as_config(urls_file)
+    else:
+        config, url_results = await build_config_from_urls(urls_file, webdav_url, webdav_username, webdav_password)
+
+    result = await load_inventory(
+        path="",
+        source=source,
+        start=start,
+        end=end,
+        skip_invalid=skip_invalid,
+        workflow_definition_id=workflow_definition_id,
+        start_workflows=start_workflows,
+        param_set_id=param_set_id,
+        priority=priority,
+        webdav_url=webdav_url,
+        webdav_username=webdav_username,
+        webdav_password=webdav_password,
+        config=config,
+        skip_status_check=skip_hash_check,
+        extra_metadata=extra_metadata,
+    )
+    result["url_results"] = url_results
+    return result
+
+
+async def _read_urls_as_config(urls_file: str) -> tuple[list[dict], list[dict]]:
+    """
+    Read URLs from file and build lightweight config without downloading.
+
+    Filters by allowed extensions and detects MIME types from paths.
+    No WebDAV connection or file downloads are performed.
+
+    Args:
+        urls_file: Path to file containing WebDAV URLs (one per line)
+
+    Returns:
+        Tuple of (config list, results list)
+    """
+    allowed_extensions = settings.extensions
+    config = []
+    results = []
+
+    async with aiofiles.open(urls_file) as f:
+        content = await f.read()
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+
+    for full_path in lines:
+        ext = Path(full_path).suffix.lstrip(".")
+        if ext not in allowed_extensions:
+            logger.info(f"skipping {full_path}")
+            results.append({"url": full_path, "status": "skipped", "error_message": f"Extension .{ext} not allowed"})
+            continue
+
+        mime_type = detect_mime_type(full_path)
+        rec = {
+            "path": full_path,
+            "metadata": {
+                "content-type": mime_type,
+            },
+        }
+        config.append(rec)
+        results.append({"url": full_path, "status": "success", "error_message": None})
+
+    return config, results
 
 
 async def status_report(
@@ -429,11 +670,10 @@ async def status_report(
     """
     Generate a status report for an inventory.
 
-    If config_path is a local file, treats it as a config file.
-    If config_path is a WebDAV path, builds config from WebDAV directory contents.
+    Builds config from WebDAV directory contents and checks status.
 
     Args:
-        config_path: Path to either a config file or WebDAV directory
+        config_path: WebDAV directory path (e.g., /documents)
         source: Source identifier to check against
         detail: Whether to print detailed file list (default: False)
         webdav_url: Optional WebDAV server URL
@@ -443,7 +683,7 @@ async def status_report(
     """
 
     print(f"checking status for {config_path} source={source} ")
-    config, _ = await resolve_config_path(config_path, webdav_url, webdav_username, webdav_password)
+    config = await build_config(config_path, webdav_url, webdav_username, webdav_password)
     to_process = await client.check_status(config, source)
     print(f"Files to process: {len(to_process)}")
     print(f"Total files: {len(config)}")
