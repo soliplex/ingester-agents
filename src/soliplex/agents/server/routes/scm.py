@@ -92,12 +92,17 @@ async def run_inventory(
     param_set_id: str | None = Form(None, description="Parameter set ID"),
     priority: int = Form(0, description="Workflow priority"),
     content_filter: ContentFilter = Form(ContentFilter.ALL, description="Content filter: all, files, issues"),
+    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
     Run ingestion from a SCM repository.
 
     Ingests files, issues, or both from the repository based on content_filter.
     """
+    import json
+
+    extra_metadata = json.loads(metadata) if metadata else None
+
     result = await scm_app.load_inventory(
         scm,
         repo_name,
@@ -107,6 +112,7 @@ async def run_inventory(
         param_set_id=param_set_id,
         priority=priority,
         content_filter=content_filter,
+        extra_metadata=extra_metadata,
     )
 
     return {
@@ -134,6 +140,7 @@ async def run_incremental_sync(
     param_set_id: str | None = Form(None, description="Parameter set ID"),
     priority: int = Form(0, description="Workflow priority"),
     content_filter: ContentFilter = Form(ContentFilter.ALL, description="Content filter: all, files, issues"),
+    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
     Run incremental sync from a SCM repository.
@@ -141,6 +148,10 @@ async def run_incremental_sync(
     Only fetches and processes content that changed since last sync.
     Falls back to full sync if no sync state exists.
     """
+    import json
+
+    extra_metadata = json.loads(metadata) if metadata else None
+
     result = await scm_app.incremental_sync(
         scm,
         repo_name,
@@ -151,6 +162,7 @@ async def run_incremental_sync(
         param_set_id=param_set_id,
         priority=priority,
         content_filter=content_filter,
+        extra_metadata=extra_metadata,
     )
 
     if "error" in result:

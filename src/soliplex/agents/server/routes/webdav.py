@@ -1,5 +1,6 @@
 """WebDAV agent API routes."""
 
+import json
 import logging
 
 from fastapi import APIRouter
@@ -111,6 +112,7 @@ async def run_inventory(
     webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
     webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
     webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
+    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
     Run document ingestion from an inventory.
@@ -119,6 +121,7 @@ async def run_inventory(
     """
     try:
         pwd = webdav_password.get_secret_value() if webdav_password else None
+        extra_metadata = json.loads(metadata) if metadata else None
         result = await webdav_app.load_inventory(
             config_path,
             source,
@@ -131,6 +134,7 @@ async def run_inventory(
             webdav_url=webdav_url,
             webdav_username=webdav_username,
             webdav_password=pwd,
+            extra_metadata=extra_metadata,
         )
 
         return {
@@ -166,6 +170,7 @@ async def run_from_urls(
     webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
     webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
     skip_hash_check: bool = Form(False, description="Skip hash check and ingest all URLs"),
+    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
     Run document ingestion from a URL list file.
@@ -174,6 +179,7 @@ async def run_from_urls(
     """
     try:
         pwd = webdav_password.get_secret_value() if webdav_password else None
+        extra_metadata = json.loads(metadata) if metadata else None
         result = await webdav_app.load_inventory_from_urls(
             urls_file,
             source,
@@ -187,6 +193,7 @@ async def run_from_urls(
             webdav_username=webdav_username,
             webdav_password=pwd,
             skip_hash_check=skip_hash_check,
+            extra_metadata=extra_metadata,
         )
 
         return {

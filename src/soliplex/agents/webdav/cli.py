@@ -96,7 +96,7 @@ def check_status(
         typer.Argument(help="WebDAV directory path (e.g., /documents)"),
     ],
     source: Annotated[str, typer.Argument(help="source name")],
-    detail: bool = False,
+    detail: Annotated[bool, typer.Option(help="include detailed file list")] = False,
     webdav_url: Annotated[
         str,
         typer.Option(help="WebDAV server URL (uses WEBDAV_URL env var if not provided)"),
@@ -151,12 +151,19 @@ def run(
         str,
         typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
     ] = None,
+    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
 ):
     """
     Run an inventory ingestion.
 
     Scans the specified WebDAV directory recursively and ingests discovered files.
     """
+    extra_metadata = json.loads(metadata) if metadata else None
+    if start_workflows:
+        if workflow_definition_id is None:
+            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
+        if param_set_id is None:
+            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
     print(f"loading {config_path} source={source}")
     try:
         res = asyncio.run(
@@ -172,6 +179,7 @@ def run(
                 webdav_url=webdav_url,
                 webdav_username=webdav_username,
                 webdav_password=webdav_password,
+                extra_metadata=extra_metadata,
             )
         )
     except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
@@ -191,7 +199,10 @@ def run(
             print("no errors found")
             print(f"found {len(res['inventory'])} files")
             print(f"found {len(res['to_process'])} to process")
-            print(f"{len(res['ingested'])} ingested")
+            if "ingested" in res and len(res["ingested"]) > 0:
+                print(f"{len(res['ingested'])} ingested")
+            else:
+                print("no ingested files")
             if start_workflows:
                 print("workflow result")
                 print(json.dumps(res["workflow_result"], indent=2))
@@ -227,12 +238,19 @@ def run_from_urls(
         bool,
         typer.Option(help="Skip hash check and ingest all URLs (avoids downloading files twice)"),
     ] = False,
+    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
 ):
     """
     Run ingestion from a URL list file.
 
     Reads a file of WebDAV URLs (one per line) and ingests those specific files.
     """
+    extra_metadata = json.loads(metadata) if metadata else None
+    if start_workflows:
+        if workflow_definition_id is None:
+            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
+        if param_set_id is None:
+            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
     print(f"loading URLs from {urls_file} source={source}")
     try:
         res = asyncio.run(
@@ -249,6 +267,7 @@ def run_from_urls(
                 webdav_username=webdav_username,
                 webdav_password=webdav_password,
                 skip_hash_check=skip_hash_check,
+                extra_metadata=extra_metadata,
             )
         )
     except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
@@ -268,7 +287,10 @@ def run_from_urls(
             print("no errors found")
             print(f"found {len(res['inventory'])} files")
             print(f"found {len(res['to_process'])} to process")
-            print(f"{len(res['ingested'])} ingested")
+            if "ingested" in res and len(res["ingested"]) > 0:
+                print(f"{len(res['ingested'])} ingested")
+            else:
+                print("no ingested files")
             if start_workflows:
                 print("workflow result")
                 print(json.dumps(res["workflow_result"], indent=2))

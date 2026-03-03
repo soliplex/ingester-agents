@@ -373,6 +373,7 @@ async def load_inventory(
     webdav_password: str = None,
     config: list[dict] | None = None,
     skip_status_check: bool = False,
+    extra_metadata: dict[str, str] | None = None,
 ):
     """
     Load and process an inventory for ingestion.
@@ -392,7 +393,6 @@ async def load_inventory(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
-        endpoint_url: Optional Ingester API endpoint URL
 
     Returns:
         Dictionary with inventory, to_process, batch_id, ingested, errors,
@@ -451,6 +451,8 @@ async def load_inventory(
         ]:
             if k in meta:
                 del meta[k]
+        if extra_metadata:
+            meta.update(extra_metadata)
         logger.info(f"starting ingest for {row['path']} {idx}/{len(to_process)} ")
         mime_type = None
         if "metadata" in row and "content-type" in row["metadata"]:
@@ -562,6 +564,7 @@ async def load_inventory_from_urls(
     webdav_username: str = None,
     webdav_password: str = None,
     skip_hash_check: bool = False,
+    extra_metadata: dict[str, str] | None = None,
 ):
     """
     Load and process an inventory from a URL list file.
@@ -593,13 +596,6 @@ async def load_inventory_from_urls(
     else:
         config, url_results = await build_config_from_urls(urls_file, webdav_url, webdav_username, webdav_password)
 
-    # Write results to <urls_file>.results.<timestamp>.json
-    # timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-    # results_path = f"{urls_file}.results.{timestamp}.json"
-    # async with aiofiles.open(results_path, "w") as f:
-    #    await f.write(json.dumps(url_results, indent=2))
-    # logger.info(f"URL results written to {results_path}")
-
     result = await load_inventory(
         path="",
         source=source,
@@ -615,9 +611,9 @@ async def load_inventory_from_urls(
         webdav_password=webdav_password,
         config=config,
         skip_status_check=skip_hash_check,
+        extra_metadata=extra_metadata,
     )
     result["url_results"] = url_results
-    # result["url_results_path"] = results_path
     return result
 
 

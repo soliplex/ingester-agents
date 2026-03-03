@@ -2,8 +2,10 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from typing import Annotated
 
+import aiohttp
 import typer
 
 from . import app
@@ -52,7 +54,7 @@ def check_status(
         typer.Argument(help="path to inventory file or directory (will build config if directory)"),
     ],
     source: Annotated[str, typer.Argument(help="source name")],
-    detail: bool = False,
+    detail: Annotated[bool, typer.Option(help="include detailed file list")] = False,
 ):
     """
     Check the status of files in an inventory.
@@ -77,6 +79,7 @@ def run(
     param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
+    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
 ):
     """
     Run an inventory ingestion.
@@ -84,24 +87,33 @@ def run(
     If a file is provided, it will be treated as an inventory.json config file.
     If a directory is provided, a config will be built from the directory contents.
     """
+    extra_metadata = json.loads(metadata) if metadata else None
     if start_workflows:
         if workflow_definition_id is None:
             raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
         if param_set_id is None:
             raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
     print(f"loading {config_file} source={source}")
-    res = asyncio.run(
-        app.load_inventory(
-            config_file,
-            source,
-            start,
-            end,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            start_workflows=start_workflows,
-            priority=priority,
+    try:
+        res = asyncio.run(
+            app.load_inventory(
+                config_file,
+                source,
+                start,
+                end,
+                workflow_definition_id=workflow_definition_id,
+                param_set_id=param_set_id,
+                start_workflows=start_workflows,
+                priority=priority,
+                extra_metadata=extra_metadata,
+            )
         )
-    )
+    except (aiohttp.ClientError, ConnectionError) as e:
+        print(f"Connection error: Could not connect to server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
     if do_json:
         print(json.dumps(res, indent=2))
     else:

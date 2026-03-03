@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import sys
 from typing import Annotated
 
+import aiohttp
 import typer
 
 from ..config import SCM
@@ -82,6 +84,7 @@ def run_inventory(
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
     content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
+    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
 ):
     """
     Run full inventory sync for a repository.
@@ -92,23 +95,32 @@ def run_inventory(
         si-agent scm run-inventory github myorg/myrepo --content-filter files
     """
     owner, repo_name = parse_repo(repo)
+    extra_metadata = json.loads(metadata) if metadata else None
     if start_workflows:
         if workflow_definition_id is None:
             raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
         if param_set_id is None:
             raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
-    res = asyncio.run(
-        app.load_inventory(
-            scm,
-            repo_name,
-            owner,
-            start_workflows=start_workflows,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            priority=priority,
-            content_filter=content_filter,
+    try:
+        res = asyncio.run(
+            app.load_inventory(
+                scm,
+                repo_name,
+                owner,
+                start_workflows=start_workflows,
+                workflow_definition_id=workflow_definition_id,
+                param_set_id=param_set_id,
+                priority=priority,
+                content_filter=content_filter,
+                extra_metadata=extra_metadata,
+            )
         )
-    )
+    except (aiohttp.ClientError, ConnectionError) as e:
+        print(f"Connection error: Could not connect to server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
     if do_json:
         print(json.dumps(res, indent=2))
     else:
@@ -120,7 +132,10 @@ def run_inventory(
             print("no errors found")
             print(f"found {len(res['inventory'])} files")
             print(f"found {len(res['to_process'])} to process")
-            print(f"{len(res['ingested'])} ingested")
+            if "ingested" in res and len(res["ingested"]) > 0:
+                print(f"{len(res['ingested'])} ingested")
+            else:
+                print("no ingested files")
             if start_workflows:
                 print("workflow result")
                 print(json.dumps(res["workflow_result"], indent=2))
@@ -137,6 +152,7 @@ def run_incremental(
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
     content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
+    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
 ):
     """
     Run incremental sync based on commit history.
@@ -150,19 +166,33 @@ def run_incremental(
         si-agent scm run-incremental github myorg/myrepo --content-filter issues
     """
     owner, repo_name = parse_repo(repo)
-    res = asyncio.run(
-        app.incremental_sync(
-            scm,
-            repo_name,
-            owner,
-            branch=branch,
-            priority=priority,
-            start_workflows=start_workflows,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            content_filter=content_filter,
+    extra_metadata = json.loads(metadata) if metadata else None
+    if start_workflows:
+        if workflow_definition_id is None:
+            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
+        if param_set_id is None:
+            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
+    try:
+        res = asyncio.run(
+            app.incremental_sync(
+                scm,
+                repo_name,
+                owner,
+                branch=branch,
+                priority=priority,
+                start_workflows=start_workflows,
+                workflow_definition_id=workflow_definition_id,
+                param_set_id=param_set_id,
+                content_filter=content_filter,
+                extra_metadata=extra_metadata,
+            )
         )
-    )
+    except (aiohttp.ClientError, ConnectionError) as e:
+        print(f"Connection error: Could not connect to server: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
 
     if do_json:
         print(json.dumps(res, indent=2))
