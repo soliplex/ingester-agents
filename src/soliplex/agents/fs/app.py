@@ -125,6 +125,7 @@ async def load_inventory(
     start_workflows: bool = False,
     param_set_id: str | None = None,
     priority: int = 0,
+    extra_metadata: dict[str, str] | None = None,
 ):
     """
     Load and process an inventory for ingestion.
@@ -189,6 +190,8 @@ async def load_inventory(
         ]:
             if k in meta:
                 del meta[k]
+        if extra_metadata:
+            meta.update(extra_metadata)
         logger.info(f"starting ingest for {row['path']}")
         mime_type = None
         if "metadata" in row and "content-type" in row["metadata"]:

@@ -123,6 +123,7 @@ async def run_inventory(
     workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
     param_set_id: str | None = Form(None, description="Parameter set ID"),
     priority: int = Form(0, description="Workflow priority"),
+    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
     Run document ingestion from an inventory.
@@ -134,6 +135,8 @@ async def run_inventory(
     if not os.path.exists(config_file):
         raise HTTPException(status_code=404, detail=f"Path not found: {config_file}")
 
+    extra_metadata = json.loads(metadata) if metadata else None
+
     # Path resolution now handled by load_inventory internally
     result = await fs_app.load_inventory(
         config_file,
@@ -144,6 +147,7 @@ async def run_inventory(
         param_set_id=param_set_id,
         start_workflows=start_workflows,
         priority=priority,
+        extra_metadata=extra_metadata,
     )
 
     return {

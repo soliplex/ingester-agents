@@ -77,6 +77,7 @@ def run(
     param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
+    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
 ):
     """
     Run an inventory ingestion.
@@ -84,6 +85,7 @@ def run(
     If a file is provided, it will be treated as an inventory.json config file.
     If a directory is provided, a config will be built from the directory contents.
     """
+    extra_metadata = json.loads(metadata) if metadata else None
     if start_workflows:
         if workflow_definition_id is None:
             raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
@@ -100,6 +102,7 @@ def run(
             param_set_id=param_set_id,
             start_workflows=start_workflows,
             priority=priority,
+            extra_metadata=extra_metadata,
         )
     )
     if do_json:

@@ -82,6 +82,7 @@ def run_inventory(
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
     content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
+    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
 ):
     """
     Run full inventory sync for a repository.
@@ -92,6 +93,7 @@ def run_inventory(
         si-agent scm run-inventory github myorg/myrepo --content-filter files
     """
     owner, repo_name = parse_repo(repo)
+    extra_metadata = json.loads(metadata) if metadata else None
     if start_workflows:
         if workflow_definition_id is None:
             raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
@@ -107,6 +109,7 @@ def run_inventory(
             param_set_id=param_set_id,
             priority=priority,
             content_filter=content_filter,
+            extra_metadata=extra_metadata,
         )
     )
     if do_json:
@@ -137,6 +140,7 @@ def run_incremental(
     priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
     content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
+    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
 ):
     """
     Run incremental sync based on commit history.
@@ -150,6 +154,7 @@ def run_incremental(
         si-agent scm run-incremental github myorg/myrepo --content-filter issues
     """
     owner, repo_name = parse_repo(repo)
+    extra_metadata = json.loads(metadata) if metadata else None
     res = asyncio.run(
         app.incremental_sync(
             scm,
@@ -161,6 +166,7 @@ def run_incremental(
             workflow_definition_id=workflow_definition_id,
             param_set_id=param_set_id,
             content_filter=content_filter,
+            extra_metadata=extra_metadata,
         )
     )
 

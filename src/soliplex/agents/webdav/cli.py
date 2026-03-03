@@ -136,6 +136,7 @@ def run(
         str,
         typer.Option(help="Ingester API endpoint URL (uses ENDPOINT_URL env var if not provided)"),
     ] = None,
+    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
 ):
     """
     Run an inventory ingestion.
@@ -144,6 +145,7 @@ def run(
     If a WebDAV path is provided, a config will be built from the WebDAV directory contents.
     Path resolution is handled internally via resolve_config_path.
     """
+    extra_metadata = json.loads(metadata) if metadata else None
     print(f"loading {config_path} source={source}")
     res = asyncio.run(
         app.load_inventory(
@@ -159,6 +161,7 @@ def run(
             webdav_username=webdav_username,
             webdav_password=webdav_password,
             endpoint_url=endpoint_url,
+            extra_metadata=extra_metadata,
         )
     )
     if do_json:

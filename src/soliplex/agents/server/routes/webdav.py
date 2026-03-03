@@ -141,6 +141,7 @@ async def run_inventory(
     webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
     webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
     webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
+    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
     Run document ingestion from an inventory.
@@ -150,6 +151,9 @@ async def run_inventory(
     Path resolution is handled internally by load_inventory via resolve_config_path.
     """
     try:
+        import json
+
+        extra_metadata = json.loads(metadata) if metadata else None
         result = await webdav_app.load_inventory(
             config_path,
             source,
@@ -162,6 +166,7 @@ async def run_inventory(
             webdav_url=webdav_url,
             webdav_username=webdav_username,
             webdav_password=webdav_password,
+            extra_metadata=extra_metadata,
         )
 
         return {

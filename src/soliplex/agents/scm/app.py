@@ -53,6 +53,7 @@ async def load_inventory(
     workflow_definition_id: str | None = None,
     param_set_id: str | None = None,
     content_filter: ContentFilter = ContentFilter.ALL,
+    extra_metadata: dict[str, str] | None = None,
 ):
     client.validate_parameters(start_workflows, workflow_definition_id, param_set_id)
     data = await get_data(scm, repo_name, owner, content_filter=content_filter)
@@ -94,6 +95,8 @@ async def load_inventory(
             if k in meta:
                 del meta[k]
         meta = clean_meta(meta)
+        if extra_metadata:
+            meta.update(extra_metadata)
         logger.info(f"starting ingest for {row['uri']}")
         mime_type = detect_mime_type(row["uri"])
         if "metadata" in row and "content-type" in row["metadata"] and row["metadata"]["content-type"]:
@@ -210,6 +213,7 @@ async def incremental_sync(
     workflow_definition_id: str | None = None,
     param_set_id: str | None = None,
     content_filter: ContentFilter = ContentFilter.ALL,
+    extra_metadata: dict[str, str] | None = None,
 ):
     """
     Perform incremental sync based on commit history.
@@ -255,6 +259,7 @@ async def incremental_sync(
             workflow_definition_id=workflow_definition_id,
             param_set_id=param_set_id,
             content_filter=content_filter,
+            extra_metadata=extra_metadata,
         )
 
         latest_commit_sha = None
@@ -372,6 +377,8 @@ async def incremental_sync(
             # Clean metadata
             for k in ["path", "sha256", "size", "source", "batch_id", "source_uri"]:
                 meta.pop(k, None)
+            if extra_metadata:
+                meta.update(extra_metadata)
 
             mime_type = file.get("content-type") or meta.get("content-type", "application/octet-stream")
 
