@@ -403,6 +403,7 @@ class TestGitCliWrapper:
         """Test command timeout handling."""
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_proc = AsyncMock()
+            mock_proc.returncode = None
             mock_proc.communicate.side_effect = TimeoutError()
             mock_proc.kill = MagicMock()
             mock_proc.wait = AsyncMock()
