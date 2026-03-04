@@ -15,7 +15,9 @@ from soliplex.agents.config import configure_logging
 from soliplex.agents.config import settings
 
 from .routes.fs import fs_router
+from .routes.manifest import manifest_router
 from .routes.scm import scm_router
+from .routes.web import web_router
 from .routes.webdav import webdav_router
 
 logger = logging.getLogger(__name__)
@@ -56,7 +58,9 @@ api_router = APIRouter(prefix=settings.api_prefix or "")
 
 # Include sub-routers
 api_router.include_router(fs_router)
+api_router.include_router(manifest_router)
 api_router.include_router(scm_router)
+api_router.include_router(web_router)
 api_router.include_router(webdav_router)
 
 
@@ -89,6 +93,43 @@ if settings.scheduler_enabled:
                 except Exception as e:
                     logger.exception(f"Error running module {module_name}", exc_info=e)
         logger.info("end jobs")
+
+    # Register manifest cron schedules
+    if settings.manifest_dir:
+        from pathlib import Path
+
+        from soliplex.agents.manifest import runner as manifest_runner
+
+        manifest_path = Path(settings.manifest_dir)
+        if manifest_path.is_dir():
+            try:
+                manifests_with_paths = []
+                for yml_file in sorted(manifest_path.glob("*.yml")) + sorted(manifest_path.glob("*.yaml")):
+                    try:
+                        m = manifest_runner.load_manifest(str(yml_file))
+                        manifests_with_paths.append((m, str(yml_file)))
+                    except Exception:
+                        logger.exception(f"Error loading manifest {yml_file}")
+                # Validate unique IDs
+                ids = [m.id for m, _ in manifests_with_paths]
+                duplicates = [i for i in ids if ids.count(i) > 1]
+                if duplicates:
+                    logger.error(f"Duplicate manifest IDs found: {set(duplicates)}. Skipping manifest scheduling.")
+                else:
+                    for m_obj, yml_path in manifests_with_paths:
+                        if m_obj.schedule:
+
+                            def make_handler(mpath):
+                                async def handler():
+                                    result = await manifest_runner.run_manifest(manifest_runner.load_manifest(mpath))
+                                    logger.info(f"Manifest {mpath} completed: {len(result.get('results', []))} components")
+
+                                return handler
+
+                            crons.cron(m_obj.schedule.cron, name=f"manifest_{m_obj.id}")(make_handler(yml_path))
+                            logger.info(f"Scheduled manifest '{m_obj.id}' cron='{m_obj.schedule.cron}'")
+            except Exception:
+                logger.exception("Error setting up manifest scheduling")
 
 
 # Include the parent router in the app
