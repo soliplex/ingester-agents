@@ -1,6 +1,6 @@
 # Soliplex Ingester-Agents
 
-Document ingestion CLI for loading files from filesystem, WebDAV, and SCM platforms into Soliplex Ingester.
+Document ingestion CLI for loading files from filesystem, WebDAV, SCM platforms, and web pages into Soliplex Ingester. Supports declarative YAML manifests for multi-source ingestion.
 
 ## Quick Reference
 
@@ -39,6 +39,10 @@ si-agent webdav check-status <path> <source>
 si-agent webdav export-urls <path> <output-file>
 si-agent webdav validate-config <path>
 
+# Manifest runner
+si-agent manifest run <path>            # Run manifest file or directory
+si-agent manifest run <path> --json     # Output results as JSON
+
 # REST API server
 si-agent serve
 si-agent serve --host 0.0.0.0 --port 8080
@@ -49,7 +53,7 @@ si-agent serve --reload
 
 - **Test coverage:** 100% branch coverage required for non-CLI code
 - **Hashing algorithms:**
-  - Filesystem/WebDAV: SHA256
+  - Filesystem/WebDAV/Web: SHA256
   - SCM files: SHA3-256 (see src/soliplex/agents/scm/lib/utils.py)
   - SCM issues: SHA256
 - **Async patterns:** All I/O uses aiohttp/aiofiles
@@ -61,14 +65,19 @@ si-agent serve --reload
 src/soliplex/agents/
 ├── cli.py              # Main Typer entry point
 ├── client.py           # Ingester API client (batch, status, ingest, sync state)
-├── config.py           # Pydantic Settings (environment variables)
+├── config.py           # Pydantic Settings, manifest/component models
 ├── common/config.py    # Shared validation utilities
 ├── fs/                 # Filesystem agent
 │   ├── cli.py          # CLI commands
 │   └── app.py          # Business logic
+├── web/                # Web agent
+│   └── app.py          # HTTP fetch and ingest logic
 ├── webdav/             # WebDAV agent
 │   ├── cli.py          # CLI commands
 │   └── app.py          # Business logic
+├── manifest/           # Manifest runner
+│   ├── runner.py       # YAML loading, validation, agent dispatch
+│   └── cli.py          # CLI commands
 ├── scm/                # SCM agent
 │   ├── cli.py          # CLI commands
 │   ├── app.py          # Orchestration logic
@@ -81,7 +90,7 @@ src/soliplex/agents/
 └── server/             # FastAPI REST API
     ├── __init__.py     # App setup, CORS, scheduler
     ├── auth.py         # API key and OAuth2 proxy auth
-    └── routes/         # Endpoint handlers (fs, scm, webdav)
+    └── routes/         # Endpoint handlers (fs, scm, webdav, web, manifest)
 ```
 
 ## Configuration
@@ -118,6 +127,9 @@ SERVER_PORT=8001
 API_KEY=server-api-key
 API_KEY_ENABLED=false
 AUTH_TRUST_PROXY_HEADERS=false
+
+# Manifest scheduling
+MANIFEST_DIR=/path/to/manifests       # Directory with manifest .yml files
 ```
 
 ## Key Patterns
