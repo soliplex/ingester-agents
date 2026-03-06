@@ -155,7 +155,7 @@ async def load_inventory(
         config = [x for x in filtered if x["valid"]]
 
     logger.info(f"found {len(config)} files in {path}")
-    to_process = await client.check_status(config, source)
+    to_process = await client.check_status(config, source, delete_stale=True)
     logger.info(f"found {len(to_process)}  out of {len(config)} to process in {data_path}")
     if end is None:
         end = len(config)

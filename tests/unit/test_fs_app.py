@@ -138,6 +138,10 @@ class TestLoadInventory:
         assert "inventory" in result
         assert len(result["inventory"]) == 2
         assert result["to_process"] == []
+        # Verify delete_stale=True is passed
+        mock_check_status.assert_called_once()
+        call_kwargs = mock_check_status.call_args
+        assert call_kwargs.kwargs.get("delete_stale") is True
 
     @pytest.mark.asyncio
     async def test_load_inventory_with_directory(self, temp_document_dir, monkeypatch):

@@ -205,13 +205,14 @@ async def start_workflows_for_batch(
     return res
 
 
-async def check_status(file_info: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
+async def check_status(file_info: list[dict[str, Any]], source: str, delete_stale: bool = False) -> list[dict[str, Any]]:
     """
     Check which files need processing based on their status.
 
     Args:
         file_info: List of file information dictionaries with 'uri' and 'sha256' keys
         source: Source identifier
+        delete_stale: If True, server will delete documents not in file_info
 
     Returns:
         List of files that need processing (status is 'new' or 'mismatch')
@@ -229,6 +230,8 @@ async def check_status(file_info: list[dict[str, Any]], source: str) -> list[dic
     form = aiohttp.FormData()
     form.add_field("source", source)
     form.add_field("hashes", json.dumps(status_dict))
+    if delete_stale:
+        form.add_field("delete_stale", "true")
 
     to_process = []
     async with get_session() as session:
@@ -236,7 +239,10 @@ async def check_status(file_info: list[dict[str, Any]], source: str) -> list[dic
             response.raise_for_status()
             resp = await response.json()
 
-            for uri, row in resp.items():
+            # When delete_stale=True, server wraps response in {"status": ..., "deleted_count": ...}
+            status_data = resp.get("status", resp) if delete_stale else resp
+
+            for uri, row in status_data.items():
                 status = row["status"]
                 if status in PROCESSABLE_STATUSES:
                     logger.debug(f"need to process {uri} with status {status}")
@@ -245,6 +251,38 @@ async def check_status(file_info: list[dict[str, Any]], source: str) -> list[dic
                     logger.debug(f"no need to process {uri} with status {status}")
 
     return to_process
+
+
+async def delete_source_uri(uri: str, source: str) -> dict[str, Any]:
+    """
+    Delete a document by URI and source from the ingester.
+
+    Args:
+        uri: The document URI to delete
+        source: Source identifier
+
+    Returns:
+        Deletion statistics or error dict
+    """
+    url = _build_url("/document/by-uri")
+
+    form = aiohttp.FormData()
+    form.add_field("uri", uri)
+    form.add_field("source", source)
+
+    try:
+        async with get_session() as session:
+            async with session.delete(url, data=form) as response:
+                if response.status == 404:
+                    logger.warning(f"Document not found for deletion: {uri} ({source})")
+                    return {"status": "not_found", "uri": uri}
+
+                response.raise_for_status()
+                return await response.json()
+
+    except Exception as e:
+        logger.exception(f"Error deleting document {uri}")
+        return {"error": str(e)}
 
 
 async def do_ingest(
