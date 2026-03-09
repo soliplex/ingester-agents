@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = False  # turn on scheduler
     scheduler_modules: list[str] | None = None  # list of scheduler modules example: '["soliplex.agents.example"]'
 
+    # State settings
+    state_dir: str = "sync_state"
+
     # Manifest settings
     manifest_dir: str | None = None  # Directory with manifest .yml files for scheduling
 

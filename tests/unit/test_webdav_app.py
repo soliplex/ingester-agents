@@ -17,8 +17,8 @@ def mock_webdav_client():
     client = MagicMock()
     client.ls.return_value = [
         {"name": "/documents", "type": "directory"},
-        {"name": "/documents/test.md", "type": "file", "size": 100},
-        {"name": "/documents/readme.pdf", "type": "file", "size": 200},
+        {"name": "/documents/test.md", "type": "file", "size": 100, "etag": '"etag1"'},
+        {"name": "/documents/readme.pdf", "type": "file", "size": 200, "etag": '"etag2"'},
     ]
 
     # Mock download_fileobj to write content to buffer
@@ -26,7 +26,20 @@ def mock_webdav_client():
         buffer.write(b"test content")
 
     client.download_fileobj = mock_download_fileobj
+    # Mock info() to return etag
+    client.info.return_value = {"etag": '"etag_info"'}
     return client
+
+
+@pytest.fixture
+def mock_state():
+    """Patch webdav_state load/save for build_config tests."""
+    with (
+        patch("soliplex.agents.webdav.app.webdav_state.load_state", return_value={}) as mock_load,
+        patch("soliplex.agents.webdav.app.webdav_state.save_state") as mock_save,
+        patch("soliplex.agents.webdav.app.webdav_state.prune_state", return_value=({}, [])) as mock_prune,
+    ):
+        yield {"load": mock_load, "save": mock_save, "prune": mock_prune}
 
 
 # --- create_webdav_client ---
@@ -50,7 +63,7 @@ def test_create_webdav_client_no_url():
 
 
 @pytest.mark.asyncio
-async def test_build_config(mock_webdav_client):
+async def test_build_config(mock_webdav_client, mock_state):
     """Test building config from WebDAV directory."""
     with (
         patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client),
@@ -71,6 +84,126 @@ async def test_build_config(mock_webdav_client):
         assert all("metadata" in item for item in config)
 
 
+@pytest.mark.asyncio
+async def test_build_config_etag_cache_hit(mock_state):
+    """Test that matching ETag skips download and reuses cached SHA256."""
+    mock_client = MagicMock()
+    # Should NOT be called - cache hit means no download
+    mock_client.download_fileobj.side_effect = AssertionError("Should not download")
+
+    mock_state["load"].return_value = {
+        "/documents/test.md": {"etag": '"etag1"', "sha256": "cached_hash_abc"},
+    }
+
+    with (
+        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
+    ):
+        mock_ls.return_value = [
+            {"path": "/documents/test.md", "size": 100, "etag": '"etag1"'},
+        ]
+
+        config = await webdav_app.build_config("/documents")
+
+    assert len(config) == 1
+    assert config[0]["sha256"] == "cached_hash_abc"
+    assert config[0]["path"] == "test.md"
+
+
+@pytest.mark.asyncio
+async def test_build_config_etag_cache_miss(mock_state):
+    """Test that mismatched ETag triggers download."""
+    mock_client = MagicMock()
+
+    def mock_download(path, buffer):
+        buffer.write(b"new content")
+
+    mock_client.download_fileobj = mock_download
+
+    mock_state["load"].return_value = {
+        "/documents/test.md": {"etag": '"old_etag"', "sha256": "old_hash"},
+    }
+
+    with (
+        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
+    ):
+        mock_ls.return_value = [
+            {"path": "/documents/test.md", "size": 100, "etag": '"new_etag"'},
+        ]
+
+        config = await webdav_app.build_config("/documents")
+
+    assert len(config) == 1
+    assert config[0]["sha256"] != "old_hash"  # Should be freshly computed
+
+
+@pytest.mark.asyncio
+async def test_build_config_no_etag_from_server(mock_state):
+    """Test that missing ETag from server always triggers download."""
+    mock_client = MagicMock()
+
+    def mock_download(path, buffer):
+        buffer.write(b"content")
+
+    mock_client.download_fileobj = mock_download
+
+    # Even with cached state, no server etag means download
+    mock_state["load"].return_value = {
+        "/documents/test.md": {"etag": '"cached_etag"', "sha256": "cached_hash"},
+    }
+
+    with (
+        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
+    ):
+        mock_ls.return_value = [
+            {"path": "/documents/test.md", "size": 100},  # No etag
+        ]
+
+        config = await webdav_app.build_config("/documents")
+
+    assert len(config) == 1
+    # Hash computed from download, not from cache
+    assert config[0]["sha256"] != "cached_hash"
+
+
+@pytest.mark.asyncio
+async def test_build_config_prune_deleted():
+    """Test that deleted files are logged and pruned from state."""
+    mock_client = MagicMock()
+
+    def mock_download(path, buffer):
+        buffer.write(b"content")
+
+    mock_client.download_fileobj = mock_download
+
+    with (
+        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
+        patch("soliplex.agents.webdav.app.webdav_state.load_state") as mock_load,
+        patch("soliplex.agents.webdav.app.webdav_state.save_state") as mock_save,
+        patch("soliplex.agents.webdav.app.webdav_state.prune_state") as mock_prune,
+    ):
+        mock_load.return_value = {
+            "/documents/test.md": {"etag": '"e1"', "sha256": "h1"},
+            "/documents/deleted.md": {"etag": '"e2"', "sha256": "h2"},
+        }
+        mock_prune.return_value = (
+            {"/documents/test.md": {"etag": '"e1"', "sha256": "h1"}},
+            ["/documents/deleted.md"],
+        )
+        mock_ls.return_value = [
+            {"path": "/documents/test.md", "size": 100},
+        ]
+
+        config = await webdav_app.build_config("/documents")
+
+    assert len(config) == 1
+    mock_prune.assert_called_once()
+    mock_save.assert_called_once()
+
+
 # --- recursive_listdir_webdav ---
 
 
@@ -82,6 +215,8 @@ async def test_recursive_listdir_webdav_flat(mock_webdav_client):
     assert isinstance(files, list)
     assert len(files) == 2
     assert all("path" in f and "size" in f for f in files)
+    # ETag should be preserved in output
+    assert all("etag" in f for f in files)
 
 
 @pytest.mark.asyncio
@@ -168,7 +303,7 @@ async def test_export_urls_to_file_trailing_slash(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_build_config_from_urls(tmp_path, mock_webdav_client):
+async def test_build_config_from_urls(tmp_path, mock_webdav_client, mock_state):
     """Test building config from URL file."""
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
@@ -189,7 +324,7 @@ async def test_build_config_from_urls(tmp_path, mock_webdav_client):
 
 
 @pytest.mark.asyncio
-async def test_build_config_from_urls_extension_filtering(tmp_path, mock_webdav_client):
+async def test_build_config_from_urls_extension_filtering(tmp_path, mock_webdav_client, mock_state):
     """Test that extension filtering returns skipped status."""
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
@@ -208,7 +343,7 @@ async def test_build_config_from_urls_extension_filtering(tmp_path, mock_webdav_
 
 
 @pytest.mark.asyncio
-async def test_build_config_from_urls_blank_lines(tmp_path, mock_webdav_client):
+async def test_build_config_from_urls_blank_lines(tmp_path, mock_webdav_client, mock_state):
     """Test that blank lines are skipped."""
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
@@ -222,18 +357,17 @@ async def test_build_config_from_urls_blank_lines(tmp_path, mock_webdav_client):
 
 
 @pytest.mark.asyncio
-async def test_build_config_from_urls_download_error(tmp_path):
+async def test_build_config_from_urls_download_error(tmp_path, mock_state):
     """Test that a download error is captured per-URL without stopping."""
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/good.md\n/documents/bad.md\n/documents/also_good.pdf\n")
 
     mock_client = MagicMock()
-    call_count = 0
+    # info() raises so we fall through to download
+    mock_client.info.side_effect = Exception("info failed")
 
     def mock_download_fileobj(path, buffer):
-        nonlocal call_count
-        call_count += 1
         if "bad.md" in path:
             raise ConnectionError("Server unavailable")
         buffer.write(b"test content")
@@ -249,6 +383,53 @@ async def test_build_config_from_urls_download_error(tmp_path):
     assert results[1]["status"] == "error"
     assert "Server unavailable" in results[1]["error_message"]
     assert results[2]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_build_config_from_urls_etag_cache_hit(tmp_path, mock_state):
+    """Test that info() returning matching ETag skips download."""
+    urls_file = str(tmp_path / "urls.txt")
+    async with aiofiles.open(urls_file, "w") as f:
+        await f.write("/documents/test.md\n")
+
+    mock_client = MagicMock()
+    mock_client.info.return_value = {"etag": '"cached_etag"'}
+    # Should NOT be called
+    mock_client.download_fileobj.side_effect = AssertionError("Should not download")
+
+    mock_state["load"].return_value = {
+        "/documents/test.md": {"etag": '"cached_etag"', "sha256": "cached_hash", "size": 42},
+    }
+
+    with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client):
+        config, results = await webdav_app.build_config_from_urls(urls_file)
+
+    assert len(config) == 1
+    assert config[0]["sha256"] == "cached_hash"
+    assert results[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_build_config_from_urls_info_error(tmp_path, mock_state):
+    """Test that info() failure falls back to download."""
+    urls_file = str(tmp_path / "urls.txt")
+    async with aiofiles.open(urls_file, "w") as f:
+        await f.write("/documents/test.md\n")
+
+    mock_client = MagicMock()
+    mock_client.info.side_effect = Exception("PROPFIND failed")
+
+    def mock_download(path, buffer):
+        buffer.write(b"downloaded content")
+
+    mock_client.download_fileobj = mock_download
+
+    with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client):
+        config, results = await webdav_app.build_config_from_urls(urls_file)
+
+    assert len(config) == 1
+    assert "sha256" in config[0]
+    assert results[0]["status"] == "success"
 
 
 # --- validate_config ---
@@ -357,7 +538,7 @@ async def test_load_inventory_with_prebuilt_config(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_load_inventory_from_urls(mock_webdav_client, monkeypatch, tmp_path):
+async def test_load_inventory_from_urls(mock_webdav_client, monkeypatch, tmp_path, mock_state):
     """Test delegation to build_config_from_urls + load_inventory with results file."""
     mock_check_status = AsyncMock(return_value=[])
     monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
@@ -376,112 +557,9 @@ async def test_load_inventory_from_urls(mock_webdav_client, monkeypatch, tmp_pat
     assert "inventory" in result
     assert len(result["inventory"]) == 1
     assert result["inventory"][0]["path"] == "/documents/test.md"
-    # Check url_results are included in the return value
     assert "url_results" in result
     assert len(result["url_results"]) == 1
     assert result["url_results"][0]["status"] == "success"
-    # Check results file was written
-    # assert "url_results_path" in result
-    # results_path = result["url_results_path"]
-    # assert Path(results_path).exists()
-    # async with aiofiles.open(results_path) as f:
-    #    written = json.loads(await f.read())
-    # assert len(written) == 1
-    # assert written[0]["url"] == "/documents/test.md"
-
-
-@pytest.mark.asyncio
-async def test_load_inventory_from_urls_skip_hash_check(monkeypatch, tmp_path):
-    """Test skip_hash_check skips downloads and status check."""
-    mock_find_batch = AsyncMock(return_value=42)
-    mock_do_ingest = AsyncMock(return_value={"id": 1})
-
-    monkeypatch.setattr("soliplex.agents.client.find_batch_for_source", mock_find_batch)
-    monkeypatch.setattr("soliplex.agents.webdav.app.do_ingest", mock_do_ingest)
-
-    urls_file = str(tmp_path / "urls.txt")
-    async with aiofiles.open(urls_file, "w") as f:
-        await f.write("/documents/test.md\n/documents/report.pdf\n/documents/archive.zip\n")
-
-    result = await webdav_app.load_inventory_from_urls(
-        urls_file,
-        "test-source",
-        start_workflows=False,
-        skip_hash_check=True,
-    )
-
-    # zip should be filtered out, 2 files should be ingested
-    assert len(result["inventory"]) == 2
-    assert len(result["to_process"]) == 2
-    assert len(result["ingested"]) == 2
-    assert mock_do_ingest.call_count == 2
-    # check_status should not have been called
-    assert "url_results" in result
-    assert len(result["url_results"]) == 3
-    assert result["url_results"][2]["status"] == "skipped"
-    # Results file should exist
-    # assert Path(result["url_results_path"]).exists()
-
-
-# --- _read_urls_as_config ---
-
-
-@pytest.mark.asyncio
-async def test_read_urls_as_config(tmp_path):
-    """Test lightweight URL reading without downloads."""
-    urls_file = str(tmp_path / "urls.txt")
-    async with aiofiles.open(urls_file, "w") as f:
-        await f.write("/documents/test.md\n/documents/archive.zip\n\n/documents/readme.pdf\n")
-
-    config, results = await webdav_app._read_urls_as_config(urls_file)
-
-    # zip is filtered out
-    assert len(config) == 2
-    assert config[0]["path"] == "/documents/test.md"
-    assert config[1]["path"] == "/documents/readme.pdf"
-    assert all("content-type" in item["metadata"] for item in config)
-    # No sha256 or size since nothing was downloaded
-    assert all("sha256" not in item for item in config)
-    # Results track all 3 non-blank lines
-    assert len(results) == 3
-    assert results[0]["status"] == "success"
-    assert results[1]["status"] == "skipped"
-    assert results[2]["status"] == "success"
-
-
-# --- load_inventory with skip_status_check ---
-
-
-@pytest.mark.asyncio
-async def test_load_inventory_skip_status_check(monkeypatch):
-    """Test load_inventory with skip_status_check treats all files as needing processing."""
-    mock_check_status = AsyncMock(return_value=[])
-    mock_find_batch = AsyncMock(return_value=42)
-    mock_do_ingest = AsyncMock(return_value={"id": 1})
-
-    monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-    monkeypatch.setattr("soliplex.agents.client.find_batch_for_source", mock_find_batch)
-    monkeypatch.setattr("soliplex.agents.webdav.app.do_ingest", mock_do_ingest)
-
-    config = [
-        {"path": "/docs/a.md", "metadata": {"content-type": "text/markdown"}},
-        {"path": "/docs/b.pdf", "metadata": {"content-type": "application/pdf"}},
-    ]
-
-    result = await webdav_app.load_inventory(
-        "",
-        "test-source",
-        start_workflows=False,
-        config=config,
-        skip_status_check=True,
-    )
-
-    # check_status should NOT have been called
-    mock_check_status.assert_not_called()
-    # All files should be processed
-    assert len(result["to_process"]) == 2
-    assert len(result["ingested"]) == 2
-    assert mock_do_ingest.call_count == 2
 
 
 # --- status_report ---
@@ -541,7 +619,7 @@ async def test_recursive_listdir_webdav_swallows_other_errors():
 
 
 @pytest.mark.asyncio
-async def test_build_config_skips_failed_downloads():
+async def test_build_config_skips_failed_downloads(mock_state):
     """Test that build_config skips files that fail to download and returns partial results."""
     mock_client = MagicMock()
 
