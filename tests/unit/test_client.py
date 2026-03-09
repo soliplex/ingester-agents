@@ -548,3 +548,92 @@ async def test_retry_request_context_aexit_with_no_response():
     # Call __aexit__ directly without ever calling __aenter__
     await ctx.__aexit__(None, None, None)
     assert ctx._response is None
+
+
+# --- delete_source_uri tests ---
+
+
+@pytest.mark.asyncio
+async def test_delete_source_uri_success(mock_response):
+    """Test delete_source_uri with successful deletion."""
+    from tests.unit.conftest import create_async_context_manager
+
+    response_data = {"deleted_document_uris": 1, "total_deleted": 5}
+    mock_resp = mock_response(200, response_data)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.delete.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.delete_source_uri("/docs/test.md", "test_source")
+
+        assert result == response_data
+        mock_session.delete.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_source_uri_not_found(mock_response):
+    """Test delete_source_uri when document is not found."""
+    from tests.unit.conftest import create_async_context_manager
+
+    mock_resp = mock_response(404, None)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.delete.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.delete_source_uri("/docs/missing.md", "test_source")
+
+        assert result["status"] == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_delete_source_uri_exception():
+    """Test delete_source_uri handles exceptions gracefully."""
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.delete.side_effect = Exception("Network error")
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.delete_source_uri("/docs/test.md", "test_source")
+
+        assert "error" in result
+        assert "Network error" in result["error"]
+
+
+# --- check_status with delete_stale tests ---
+
+
+@pytest.mark.asyncio
+async def test_check_status_with_delete_stale(mock_response):
+    """Test check_status passes delete_stale and handles wrapped response."""
+    from tests.unit.conftest import create_async_context_manager
+
+    file_info = [
+        {"uri": "file1.md", "sha256": "hash1"},
+        {"uri": "file2.md", "sha256": "hash2"},
+    ]
+
+    response_data = {
+        "status": {
+            "file1.md": {"status": "new"},
+            "file2.md": {"status": "matched"},
+        },
+        "deleted_count": 3,
+    }
+
+    mock_resp = mock_response(200, response_data)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.check_status(file_info, "test_source", delete_stale=True)
+
+        assert len(result) == 1
+        assert result[0]["uri"] == "file1.md"

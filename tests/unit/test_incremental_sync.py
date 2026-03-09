@@ -30,6 +30,7 @@ async def test_incremental_sync_no_state():
         mock_client.create_batch = AsyncMock(return_value=1)
         mock_client.check_status = AsyncMock(return_value=[])
         mock_client.update_sync_state = AsyncMock(return_value={"last_commit_sha": None})
+        mock_client.validate_parameters = MagicMock()
 
         with patch("soliplex.agents.scm.app.get_scm") as mock_get_scm:
             mock_provider = MagicMock()
@@ -634,3 +635,80 @@ async def test_list_commits_since_max_pages_limit(mock_response):
 
             # Should have collected 10 pages * 100 commits = 1000 commits (stopped at max_pages)
             assert len(commits) == 1000
+
+
+@pytest.mark.asyncio
+async def test_incremental_sync_with_removed_files():
+    """Incremental sync should delete removed files from ingester."""
+    with patch("soliplex.agents.scm.app.client") as mock_client:
+        mock_client.get_sync_state = AsyncMock(
+            return_value={
+                "source_id": "gitea:admin:test",
+                "last_commit_sha": "abc123",
+                "branch": "main",
+            }
+        )
+
+        mock_client.find_batch_for_source = AsyncMock(return_value=1)
+        mock_client.do_ingest = AsyncMock(return_value={"result": "success"})
+        mock_client.update_sync_state = AsyncMock(return_value={"last_commit_sha": "def456"})
+        mock_client.delete_source_uri = AsyncMock(return_value={"status": "deleted"})
+
+        with patch("soliplex.agents.scm.app.get_scm") as mock_get_scm:
+            mock_provider = MagicMock()
+
+            mock_provider.list_commits_since = AsyncMock(return_value=[{"sha": "def456", "message": "Remove old file"}])
+
+            mock_provider.get_commit_details = AsyncMock(
+                return_value={
+                    "sha": "def456",
+                    "files": [{"filename": "old_file.md", "status": "removed"}],
+                }
+            )
+
+            mock_provider.list_issues = AsyncMock(return_value=[])
+            mock_get_scm.return_value = mock_provider
+
+            from soliplex.agents.config import SCM
+
+            result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin")
+
+            assert result["status"] == "synced"
+            assert result["files_removed"] == 1
+            # Verify delete_source_uri was called for the removed file
+            mock_client.delete_source_uri.assert_called_once_with("old_file.md", "gitea:admin:test:all")
+
+
+@pytest.mark.asyncio
+async def test_incremental_sync_issues_reconciliation():
+    """Incremental sync should reconcile issues when content_filter=ISSUES."""
+    with patch("soliplex.agents.scm.app.client") as mock_client:
+        mock_client.get_sync_state = AsyncMock(
+            return_value={
+                "source_id": "gitea:admin:test",
+                "last_commit_sha": "abc123",
+                "branch": "main",
+                "last_sync_date": "2026-01-01T00:00:00",
+            }
+        )
+
+        mock_client.find_batch_for_source = AsyncMock(return_value=1)
+        mock_client.do_ingest = AsyncMock(return_value={"result": "success"})
+        mock_client.update_sync_state = AsyncMock(return_value={"last_commit_sha": "abc123"})
+        mock_client.check_status = AsyncMock(return_value=[])
+
+        with patch("soliplex.agents.scm.app.get_scm") as mock_get_scm:
+            mock_provider = MagicMock()
+            mock_provider.list_issues = AsyncMock(return_value=[])
+            mock_get_scm.return_value = mock_provider
+
+            from soliplex.agents.config import SCM
+            from soliplex.agents.config import ContentFilter
+
+            await scm_app.incremental_sync(SCM.GITEA, "test", "admin", content_filter=ContentFilter.ISSUES)
+
+            # check_status should have been called with delete_stale=True for issue reconciliation
+            calls = mock_client.check_status.call_args_list
+            assert any(call.kwargs.get("delete_stale") is True for call in calls), (
+                "check_status should be called with delete_stale=True for issue reconciliation"
+            )
