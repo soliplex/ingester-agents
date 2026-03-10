@@ -62,7 +62,7 @@ async def load_inventory(
 
     source = source or f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
 
-    to_process = await client.check_status(data, source)
+    to_process = await client.check_status(data, source, delete_stale=True)
     ingested = []
     ret = {"inventory": data, "to_process": to_process, "ingested": ingested}
     logger.info(f"found {len(to_process)} to process")
@@ -340,6 +340,13 @@ async def incremental_sync(
     if content_filter in (ContentFilter.ALL, ContentFilter.ISSUES):
         issues = await get_issues(scm, repo_name, owner, since=sync_state.get("last_sync_date"))
         logger.info(f"found {len(issues)} issues to ingest")
+
+        # Reconcile full issue inventory to remove deleted/closed issues
+        # Only safe when source contains only issues (not mixed with files)
+        if content_filter == ContentFilter.ISSUES:
+            all_issues = await get_issues(scm, repo_name, owner)
+            logger.info(f"Reconciling issue inventory ({len(all_issues)} total issues)")
+            await client.check_status(all_issues, source, delete_stale=True)
     # Fetch commits since last sync
     logger.info(f"Last sync was at commit {last_commit_sha}")
 
@@ -388,6 +395,12 @@ async def incremental_sync(
                 continue
 
         logger.info(f"Files changed: {len(changed_files)}, removed: {len(removed_files)}")
+
+        # Delete removed files from ingester
+        for removed_path in removed_files:
+            uri = removed_path
+            logger.info(f"Deleting removed file from ingester: {uri}")
+            await client.delete_source_uri(uri, source)
 
         # Fetch only changed files
         allowed_extensions = settings.extensions
