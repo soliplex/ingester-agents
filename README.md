@@ -38,6 +38,7 @@ Agents for loading documents into the [Soliplex Ingester](https://github.com/sol
   - YAML-based manifest files defining ingestion components
   - Supports all agent types (fs, scm, webdav, web) in a single manifest
   - Shared configuration (metadata, extensions, workflow settings)
+  - Stale document removal (`delete_stale`) across all components in a manifest
   - Cron-based scheduling via the REST API server
   - Per-component credential and extension overrides
   - Directory-level execution for running multiple manifests at once
@@ -525,6 +526,7 @@ config:
   extensions:
     - md
     - pdf
+  delete_stale: true
   start_workflows: true
   workflow_definition_id: my-workflow
   param_set_id: my-params
@@ -565,6 +567,7 @@ Top-level fields:
 - **config**: Optional shared configuration applied to all components.
   - **metadata**: Key-value pairs attached to all ingested documents.
   - **extensions**: File extensions to include (overrides the global `EXTENSIONS` setting).
+  - **delete_stale**: Remove documents from the Ingester that no longer appear in any component (default: false). See [Stale Document Removal](#stale-document-removal) below.
   - **start_workflows**: Whether to start workflows after ingestion (default: false).
   - **workflow_definition_id**: Workflow definition ID (required when start_workflows is true).
   - **param_set_id**: Parameter set ID (required when start_workflows is true).
@@ -626,6 +629,43 @@ Settings are resolved in the following order (highest priority first):
 3. Global environment settings (e.g., `EXTENSIONS` env var)
 
 For metadata, config-level and component-level values are merged, with component values taking precedence for duplicate keys.
+
+#### Stale Document Removal
+
+When `delete_stale: true` is set in a manifest's `config` block, the runner will remove documents from the Ingester that no longer appear in any of the manifest's components. This keeps the Ingester in sync with the actual source data.
+
+**How it works:**
+
+1. All components execute sequentially, collecting every discovered URI and its hash
+2. After **all** components complete successfully, a single `check_status` call is made to the Ingester with the consolidated URI set and `delete_stale=true`
+3. The Ingester compares the submitted URIs against what it has stored for the source. Any documents belonging to the source whose URI is **not** in the submitted set are deleted.
+
+**Safety:**
+
+- If **any** component produces an error (exception or unknown type), `delete_stale` is **skipped entirely** for that manifest run. This prevents accidental deletions when the URI set is incomplete due to a failed component.
+- Components that succeed still have their documents ingested normally — only the stale deletion step is skipped.
+
+**Example:**
+
+```yaml
+id: synced-docs
+name: Synced Documentation
+source: docs-source
+config:
+  delete_stale: true
+components:
+  - name: local-docs
+    type: fs
+    path: /data/docs
+  - name: shared-drive
+    type: webdav
+    url: https://webdav.example.com
+    path: /shared/docs
+```
+
+If a file is removed from `/data/docs` or from the WebDAV server, the next manifest run will detect that its URI is no longer present and delete it from the Ingester.
+
+**Note:** SCM components using `incremental: true` only return files changed since the last sync, not the full file listing. When `delete_stale` is enabled with incremental SCM components, the stale detection may not have complete URI coverage for those components. Consider using full inventory mode (`incremental: false`) when `delete_stale` is needed with SCM sources.
 
 #### Scheduling
 

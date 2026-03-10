@@ -243,6 +243,7 @@ class ManifestConfig(BaseModel):
     workflow_definition_id: str | None = None
     param_set_id: str | None = None
     priority: int = 0
+    delete_stale: bool = False
 
     @model_validator(mode="after")
     def validate_workflow_params(self):

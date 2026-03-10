@@ -205,13 +205,22 @@ async def start_workflows_for_batch(
     return res
 
 
-async def check_status(file_info: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
+async def check_status(
+    file_info: list[dict[str, Any]],
+    source: str,
+    delete_stale: bool = False,
+) -> list[dict[str, Any]]:
     """
     Check which files need processing based on their status.
+
+    When delete_stale is True, the Ingester will also delete documents
+    belonging to the source whose URI is not in the submitted file_info.
 
     Args:
         file_info: List of file information dictionaries with 'uri' and 'sha256' keys
         source: Source identifier
+        delete_stale: If True, tell the Ingester to remove documents for this
+            source whose URI is not in file_info.
 
     Returns:
         List of files that need processing (status is 'new' or 'mismatch')
@@ -229,6 +238,8 @@ async def check_status(file_info: list[dict[str, Any]], source: str) -> list[dic
     form = aiohttp.FormData()
     form.add_field("source", source)
     form.add_field("hashes", json.dumps(status_dict))
+    if delete_stale:
+        form.add_field("delete_stale", "true")
 
     to_process = []
     async with get_session() as session:
@@ -236,13 +247,20 @@ async def check_status(file_info: list[dict[str, Any]], source: str) -> list[dic
             response.raise_for_status()
             resp = await response.json()
 
-            for uri, row in resp.items():
+            # When delete_stale=True the response wraps status in a "status" key
+            status_data = resp.get("status", resp) if delete_stale else resp
+
+            for uri, row in status_data.items():
                 status = row["status"]
                 if status in PROCESSABLE_STATUSES:
                     logger.debug(f"need to process {uri} with status {status}")
                     to_process.append(uri_to_file[uri])
                 else:
                     logger.debug(f"no need to process {uri} with status {status}")
+
+            if delete_stale:
+                deleted_count = resp.get("deleted_count", 0)
+                logger.info("delete_stale removed %d documents for source %s", deleted_count, source)
 
     return to_process
 

@@ -4,9 +4,11 @@ import logging
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import yaml
 
+from soliplex.agents import client
 from soliplex.agents.config import FSComponent
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import SCMComponent
@@ -244,31 +246,88 @@ _DISPATCH = {
 }
 
 
+def collect_inventory_uris(result: dict[str, Any]) -> list[dict[str, str]]:
+    """Extract URI/hash pairs from a component result's inventory.
+
+    Each agent returns an ``inventory`` list whose items use either
+    ``uri`` (SCM) or ``path`` (fs, webdav, web) as the identifier key.
+    This helper normalises both into ``{"uri": ..., "sha256": ...}``
+    dicts suitable for ``client.check_status()``.
+
+    Args:
+        result: The dict returned by a component handler.
+
+    Returns:
+        List of ``{"uri": str, "sha256": str}`` dicts.
+    """
+    items: list[dict[str, str]] = []
+    for entry in result.get("inventory", []):
+        uri = entry.get("uri") or entry.get("path")
+        sha256 = entry.get("sha256", "")
+        if uri:
+            items.append({"uri": uri, "sha256": sha256})
+    return items
+
+
 async def run_manifest(manifest: Manifest) -> dict:
     """Run all components in a manifest.
+
+    After every component has executed, if ``delete_stale`` is enabled
+    in the manifest config **and** no component produced an error, a
+    consolidated ``check_status`` call with ``delete_stale=True`` is
+    made so the Ingester can remove documents whose URI no longer
+    appears in any component.
 
     Args:
         manifest: Validated Manifest instance.
 
     Returns:
-        Dict with manifest id/name and per-component results list.
+        Dict with manifest id/name, per-component results list,
+        and optional delete_stale result.
     """
     wf_params = _resolve_workflow_params(manifest)
-    results = []
+    results: list[dict[str, Any]] = []
+    all_uri_hashes: list[dict[str, str]] = []
+    has_errors = False
+
     for component in manifest.components:
         metadata = manifest.get_metadata(component)
         handler = _DISPATCH.get(type(component))
         if handler is None:
             logger.error(f"Unknown component type: {type(component)}")
             results.append({"component": component.name, "error": f"Unknown component type: {type(component)}"})
+            has_errors = True
             continue
         try:
             result = await handler(component, manifest, wf_params, metadata)
+            all_uri_hashes.extend(collect_inventory_uris(result))
             results.append({"component": component.name, "result": result})
         except Exception as e:
             logger.exception(f"Error running component {component.name}")
             results.append({"component": component.name, "error": str(e)})
-    return {"manifest_id": manifest.id, "manifest_name": manifest.name, "results": results}
+            has_errors = True
+
+    # --- delete stale documents ------------------------------------------------
+    delete_stale_result = None
+    if manifest.config and manifest.config.delete_stale:
+        if has_errors:
+            logger.warning(
+                "Skipping delete_stale for source %s: one or more components had errors",
+                manifest.source,
+            )
+        else:
+            delete_stale_result = await client.check_status(
+                all_uri_hashes,
+                manifest.source,
+                delete_stale=True,
+            )
+
+    return {
+        "manifest_id": manifest.id,
+        "manifest_name": manifest.name,
+        "results": results,
+        "delete_stale_result": delete_stale_result,
+    }
 
 
 async def run_manifests(path: str) -> list[dict]:

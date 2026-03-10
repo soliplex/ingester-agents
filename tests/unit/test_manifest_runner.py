@@ -1,5 +1,6 @@
 """Tests for manifest runner — 100% branch coverage required."""
 
+import logging
 import textwrap
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -616,3 +617,171 @@ class TestRunManifests:
             )
         with pytest.raises(ValueError, match="Duplicate manifest IDs"):
             await runner.run_manifests(str(tmp_path))
+
+
+# --- collect_inventory_uris ---
+
+
+class TestCollectInventoryUris:
+    def test_with_path_key(self):
+        result = {"inventory": [{"path": "file1.md", "sha256": "aaa"}, {"path": "file2.md", "sha256": "bbb"}]}
+        uris = runner.collect_inventory_uris(result)
+        assert uris == [{"uri": "file1.md", "sha256": "aaa"}, {"uri": "file2.md", "sha256": "bbb"}]
+
+    def test_with_uri_key(self):
+        result = {"inventory": [{"uri": "/owner/repo/file.md", "sha256": "ccc"}]}
+        uris = runner.collect_inventory_uris(result)
+        assert uris == [{"uri": "/owner/repo/file.md", "sha256": "ccc"}]
+
+    def test_uri_takes_precedence_over_path(self):
+        result = {"inventory": [{"uri": "preferred", "path": "fallback", "sha256": "ddd"}]}
+        uris = runner.collect_inventory_uris(result)
+        assert uris[0]["uri"] == "preferred"
+
+    def test_empty_inventory(self):
+        assert runner.collect_inventory_uris({"inventory": []}) == []
+
+    def test_missing_inventory_key(self):
+        assert runner.collect_inventory_uris({"ingested": []}) == []
+
+    def test_skips_entries_without_uri_or_path(self):
+        result = {"inventory": [{"sha256": "eee"}, {"uri": "ok", "sha256": "fff"}]}
+        uris = runner.collect_inventory_uris(result)
+        assert len(uris) == 1
+        assert uris[0]["uri"] == "ok"
+
+    def test_missing_sha256_defaults_to_empty_string(self):
+        result = {"inventory": [{"path": "file.md"}]}
+        uris = runner.collect_inventory_uris(result)
+        assert uris == [{"uri": "file.md", "sha256": ""}]
+
+
+# --- run_manifest with delete_stale ---
+
+
+class TestRunManifestDeleteStale:
+    @pytest.fixture
+    def delete_stale_manifest(self):
+        return Manifest(
+            id="ds-test",
+            name="Delete Stale Test",
+            source="ds-src",
+            config={"delete_stale": True},
+            components=[
+                {"type": "fs", "name": "docs", "path": "/data"},
+                {"type": "web", "name": "page", "url": "http://example.com"},
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_stale_called_after_all_components(self, delete_stale_manifest):
+        fs_result = {"inventory": [{"path": "a.md", "sha256": "h1"}], "ingested": [], "errors": []}
+        web_result = {"inventory": [{"path": "http://example.com", "sha256": "h2"}], "ingested": [], "errors": []}
+
+        mock_fs = AsyncMock(return_value=fs_result)
+        mock_web = AsyncMock(return_value=web_result)
+
+        with (
+            patch.dict(runner._DISPATCH, {FSComponent: mock_fs, WebComponent: mock_web}),
+            patch("soliplex.agents.manifest.runner.client.check_status", new_callable=AsyncMock) as mock_check,
+        ):
+            mock_check.return_value = []
+            result = await runner.run_manifest(delete_stale_manifest)
+
+        # check_status called with consolidated URIs and delete_stale=True
+        mock_check.assert_called_once()
+        call_args = mock_check.call_args
+        uri_hashes = call_args[0][0]
+        assert len(uri_hashes) == 2
+        uris = {item["uri"] for item in uri_hashes}
+        assert uris == {"a.md", "http://example.com"}
+        assert call_args[0][1] == "ds-src"
+        assert call_args[1]["delete_stale"] is True
+        assert result["delete_stale_result"] == []
+
+    @pytest.mark.asyncio
+    async def test_delete_stale_skipped_on_component_error(self, delete_stale_manifest, caplog):
+        mock_fs = AsyncMock(side_effect=RuntimeError("fail"))
+        mock_web = AsyncMock(return_value={"inventory": [], "ingested": [], "errors": []})
+
+        with (
+            patch.dict(runner._DISPATCH, {FSComponent: mock_fs, WebComponent: mock_web}),
+            patch("soliplex.agents.manifest.runner.client.check_status", new_callable=AsyncMock) as mock_check,
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await runner.run_manifest(delete_stale_manifest)
+
+        mock_check.assert_not_called()
+        assert result["delete_stale_result"] is None
+        assert "Skipping delete_stale" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_delete_stale_skipped_on_unknown_component(self):
+        m = Manifest(
+            id="ds-unk",
+            name="DS Unknown",
+            source="src",
+            config={"delete_stale": True},
+            components=[{"type": "fs", "name": "c", "path": "/p"}],
+        )
+        m.components[0] = MagicMock(name="fake")
+        m.components[0].name = "unknown"
+
+        with patch("soliplex.agents.manifest.runner.client.check_status", new_callable=AsyncMock) as mock_check:
+            result = await runner.run_manifest(m)
+
+        mock_check.assert_not_called()
+        assert result["delete_stale_result"] is None
+
+    @pytest.mark.asyncio
+    async def test_delete_stale_not_called_when_disabled(self):
+        m = Manifest(
+            id="no-ds",
+            name="No Delete Stale",
+            source="src",
+            components=[{"type": "fs", "name": "c", "path": "/p"}],
+        )
+        mock_handler = AsyncMock(return_value={"inventory": [{"path": "f.md", "sha256": "h"}], "ingested": [], "errors": []})
+
+        with (
+            patch.dict(runner._DISPATCH, {FSComponent: mock_handler}),
+            patch("soliplex.agents.manifest.runner.client.check_status", new_callable=AsyncMock) as mock_check,
+        ):
+            result = await runner.run_manifest(m)
+
+        mock_check.assert_not_called()
+        assert result["delete_stale_result"] is None
+
+    @pytest.mark.asyncio
+    async def test_delete_stale_false_in_config(self):
+        m = Manifest(
+            id="ds-off",
+            name="DS Off",
+            source="src",
+            config={"delete_stale": False},
+            components=[{"type": "fs", "name": "c", "path": "/p"}],
+        )
+        mock_handler = AsyncMock(return_value={"inventory": [], "ingested": [], "errors": []})
+
+        with (
+            patch.dict(runner._DISPATCH, {FSComponent: mock_handler}),
+            patch("soliplex.agents.manifest.runner.client.check_status", new_callable=AsyncMock) as mock_check,
+        ):
+            result = await runner.run_manifest(m)
+
+        mock_check.assert_not_called()
+        assert result["delete_stale_result"] is None
+
+    @pytest.mark.asyncio
+    async def test_result_includes_delete_stale_result_key(self):
+        """Even when delete_stale is off, the key is present as None."""
+        m = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            components=[{"type": "fs", "name": "c", "path": "/p"}],
+        )
+        mock_handler = AsyncMock(return_value={"inventory": [], "ingested": [], "errors": []})
+        with patch.dict(runner._DISPATCH, {FSComponent: mock_handler}):
+            result = await runner.run_manifest(m)
+        assert "delete_stale_result" in result

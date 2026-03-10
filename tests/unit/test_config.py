@@ -1,6 +1,7 @@
 import logging
 from unittest.mock import patch
 
+from soliplex.agents.config import ManifestConfig
 from soliplex.agents.config import configure_logging
 
 
@@ -27,3 +28,13 @@ class TestConfigureLogging:
             assert fallback_kwargs["level"] == logging.INFO
             assert fallback_kwargs["style"] == "{"
             mock_get_logger.return_value.warning.assert_called_once()
+
+
+class TestManifestConfig:
+    def test_delete_stale_defaults_false(self):
+        config = ManifestConfig()
+        assert config.delete_stale is False
+
+    def test_delete_stale_enabled(self):
+        config = ManifestConfig(delete_stale=True)
+        assert config.delete_stale is True

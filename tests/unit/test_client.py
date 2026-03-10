@@ -232,6 +232,69 @@ async def test_check_status_empty(mock_response):
 
 
 @pytest.mark.asyncio
+async def test_check_status_delete_stale(mock_response, caplog):
+    """Test check_status with delete_stale=True unwraps nested status."""
+    import logging
+
+    from tests.unit.conftest import create_async_context_manager
+
+    caplog.set_level(logging.INFO)
+
+    file_info = [
+        {"uri": "file1.md", "sha256": "hash1"},
+        {"uri": "file2.md", "sha256": "hash2"},
+    ]
+
+    response_data = {
+        "status": {
+            "file1.md": {"status": "new"},
+            "file2.md": {"status": "matched"},
+        },
+        "deleted_count": 3,
+    }
+
+    mock_resp = mock_response(200, response_data)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.check_status(file_info, "test_source", delete_stale=True)
+
+        assert len(result) == 1
+        assert result[0]["uri"] == "file1.md"
+        assert "delete_stale removed 3 documents" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_check_status_delete_stale_no_deleted(mock_response, caplog):
+    """Test check_status with delete_stale=True when deleted_count is missing."""
+    import logging
+
+    from tests.unit.conftest import create_async_context_manager
+
+    caplog.set_level(logging.INFO)
+
+    file_info = [{"uri": "file1.md", "sha256": "hash1"}]
+    response_data = {
+        "status": {"file1.md": {"status": "matched"}},
+    }
+
+    mock_resp = mock_response(200, response_data)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.check_status(file_info, "test_source", delete_stale=True)
+
+        assert len(result) == 0
+        assert "delete_stale removed 0 documents" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_do_ingest_success_with_bytes(mock_response):
     """Test do_ingest with successful ingestion using bytes."""
     from tests.unit.conftest import create_async_context_manager
