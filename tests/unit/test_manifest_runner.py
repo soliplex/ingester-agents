@@ -171,6 +171,7 @@ class TestResolveWorkflowParams:
                 "workflow_definition_id": "wf1",
                 "param_set_id": "ps1",
                 "priority": 5,
+                "delete_stale": False,
             },
             components=[{"type": "fs", "name": "c", "path": "/p"}],
         )
@@ -191,7 +192,7 @@ class TestRunManifest:
             id="fs-test",
             name="FS Test",
             source="fs-src",
-            config={"metadata": {"project": "test"}},
+            config={"metadata": {"project": "test"}, "delete_stale": False},
             components=[{"type": "fs", "name": "docs", "path": "/data"}],
         )
 
@@ -336,7 +337,7 @@ class TestRunFSComponent:
             id="t",
             name="t",
             source="s",
-            config={"extensions": ["txt"]},
+            config={"extensions": ["txt"], "delete_stale": False},
             components=[{"type": "fs", "name": "c", "path": "/p"}],
         )
         component = manifest.components[0]
@@ -430,7 +431,7 @@ class TestRunSCMComponent:
             id="t",
             name="t",
             source="s",
-            config={"extensions": ["rst"]},
+            config={"extensions": ["rst"], "delete_stale": False},
             components=[
                 {"type": "scm", "name": "r", "platform": "github", "owner": "o", "repo": "r"},
             ],
@@ -522,7 +523,7 @@ class TestRunWebDAVComponent:
             id="t",
             name="t",
             source="s",
-            config={"extensions": ["pdf"]},
+            config={"extensions": ["pdf"], "delete_stale": False},
             components=[{"type": "webdav", "name": "d", "url": "http://dav", "path": "/docs"}],
         )
         component = manifest.components[0]
@@ -785,3 +786,292 @@ class TestRunManifestDeleteStale:
         with patch.dict(runner._DISPATCH, {FSComponent: mock_handler}):
             result = await runner.run_manifest(m)
         assert "delete_stale_result" in result
+
+
+# --- SCM source passthrough ---
+
+
+class TestSCMSourcePassthrough:
+    @pytest.mark.asyncio
+    async def test_full_sync_passes_manifest_source(self):
+        manifest = Manifest(
+            id="t",
+            name="t",
+            source="my-manifest-source",
+            components=[
+                {"type": "scm", "name": "r", "platform": "github", "owner": "o", "repo": "r"},
+            ],
+        )
+        component = manifest.components[0]
+        with patch("soliplex.agents.scm.app.load_inventory", new_callable=AsyncMock) as mock:
+            mock.return_value = {"ingested": [], "errors": []}
+            await runner._run_scm_component(
+                component,
+                manifest,
+                runner._resolve_workflow_params(manifest),
+                {},
+            )
+            assert mock.call_args.kwargs["source"] == "my-manifest-source"
+
+    @pytest.mark.asyncio
+    async def test_incremental_sync_passes_manifest_source(self):
+        manifest = Manifest(
+            id="t",
+            name="t",
+            source="my-manifest-source",
+            components=[
+                {
+                    "type": "scm",
+                    "name": "r",
+                    "platform": "github",
+                    "owner": "o",
+                    "repo": "r",
+                    "incremental": True,
+                    "auth_token": "MY_TOKEN",
+                },
+            ],
+        )
+        component = manifest.components[0]
+        with (
+            patch("soliplex.agents.scm.app.incremental_sync", new_callable=AsyncMock) as mock,
+            patch("soliplex.agents.manifest.runner.resolve_credential", return_value="secret"),
+        ):
+            mock.return_value = {"ingested": [], "errors": []}
+            await runner._run_scm_component(
+                component,
+                manifest,
+                runner._resolve_workflow_params(manifest),
+                {},
+            )
+            assert mock.call_args.kwargs["source"] == "my-manifest-source"
+
+
+# --- incremental SCM + delete_stale ---
+
+
+class TestIncrementalSCMDeleteStale:
+    @pytest.mark.asyncio
+    async def test_incremental_scm_calls_list_all_uris(self):
+        """When delete_stale + incremental SCM, list_all_uris fetches full URI set."""
+        m = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            config={"delete_stale": True},
+            components=[
+                {
+                    "type": "scm",
+                    "name": "r",
+                    "platform": "github",
+                    "owner": "o",
+                    "repo": "r",
+                    "incremental": True,
+                },
+            ],
+        )
+        # incremental_sync returns only changed files
+        inc_result = {
+            "inventory": [{"uri": "changed.md", "sha256": "h1"}],
+            "ingested": ["changed.md"],
+            "errors": [],
+        }
+        full_uris = [
+            {"uri": "file1.md", "sha256": "a1"},
+            {"uri": "file2.md", "sha256": "a2"},
+        ]
+
+        mock_scm = AsyncMock(return_value=inc_result)
+        with (
+            patch.dict(runner._DISPATCH, {SCMComponent: mock_scm}),
+            patch(
+                "soliplex.agents.manifest.runner._list_scm_all_uris",
+                new_callable=AsyncMock,
+                return_value=full_uris,
+            ) as mock_list,
+            patch(
+                "soliplex.agents.manifest.runner.client.check_status",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_check,
+        ):
+            await runner.run_manifest(m)
+
+        mock_list.assert_called_once_with(m.components[0], m)
+        # check_status uses full URIs from list_all_uris, not the partial inventory
+        uri_hashes = mock_check.call_args[0][0]
+        uris = {item["uri"] for item in uri_hashes}
+        assert uris == {"file1.md", "file2.md"}
+        assert mock_check.call_args[1]["delete_stale"] is True
+
+    @pytest.mark.asyncio
+    async def test_incremental_scm_no_delete_stale_skips_list(self):
+        """Without delete_stale, list_all_uris is NOT called."""
+        m = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            config={"delete_stale": False},
+            components=[
+                {
+                    "type": "scm",
+                    "name": "r",
+                    "platform": "github",
+                    "owner": "o",
+                    "repo": "r",
+                    "incremental": True,
+                },
+            ],
+        )
+        mock_scm = AsyncMock(return_value={"inventory": [], "ingested": [], "errors": []})
+        with (
+            patch.dict(runner._DISPATCH, {SCMComponent: mock_scm}),
+            patch(
+                "soliplex.agents.manifest.runner._list_scm_all_uris",
+                new_callable=AsyncMock,
+            ) as mock_list,
+        ):
+            await runner.run_manifest(m)
+
+        mock_list.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_incremental_scm_error_skips_list(self):
+        """On component error, list_all_uris is NOT called."""
+        m = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            config={"delete_stale": True},
+            components=[
+                {
+                    "type": "scm",
+                    "name": "r",
+                    "platform": "github",
+                    "owner": "o",
+                    "repo": "r",
+                    "incremental": True,
+                },
+            ],
+        )
+        mock_scm = AsyncMock(side_effect=RuntimeError("fail"))
+        with (
+            patch.dict(runner._DISPATCH, {SCMComponent: mock_scm}),
+            patch(
+                "soliplex.agents.manifest.runner._list_scm_all_uris",
+                new_callable=AsyncMock,
+            ) as mock_list,
+            patch(
+                "soliplex.agents.manifest.runner.client.check_status",
+                new_callable=AsyncMock,
+            ) as mock_check,
+        ):
+            await runner.run_manifest(m)
+
+        mock_list.assert_not_called()
+        mock_check.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mixed_fs_and_incremental_scm(self):
+        """FS URIs from inventory, SCM URIs from list_all_uris."""
+        m = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            config={"delete_stale": True},
+            components=[
+                {"type": "fs", "name": "docs", "path": "/data"},
+                {
+                    "type": "scm",
+                    "name": "repo",
+                    "platform": "github",
+                    "owner": "o",
+                    "repo": "r",
+                    "incremental": True,
+                },
+            ],
+        )
+        fs_result = {"inventory": [{"path": "local.md", "sha256": "lh"}], "ingested": [], "errors": []}
+        scm_result = {"inventory": [{"uri": "changed.md", "sha256": "ch"}], "ingested": [], "errors": []}
+        full_scm_uris = [{"uri": "all1.md", "sha256": "s1"}, {"uri": "all2.md", "sha256": "s2"}]
+
+        mock_fs = AsyncMock(return_value=fs_result)
+        mock_scm = AsyncMock(return_value=scm_result)
+
+        with (
+            patch.dict(runner._DISPATCH, {FSComponent: mock_fs, SCMComponent: mock_scm}),
+            patch(
+                "soliplex.agents.manifest.runner._list_scm_all_uris",
+                new_callable=AsyncMock,
+                return_value=full_scm_uris,
+            ),
+            patch(
+                "soliplex.agents.manifest.runner.client.check_status",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_check,
+        ):
+            await runner.run_manifest(m)
+
+        uri_hashes = mock_check.call_args[0][0]
+        uris = {item["uri"] for item in uri_hashes}
+        # FS inventory + full SCM listing (not partial incremental)
+        assert uris == {"local.md", "all1.md", "all2.md"}
+
+
+# --- _list_scm_all_uris ---
+
+
+class TestListSCMAllUris:
+    @pytest.mark.asyncio
+    async def test_calls_list_all_uris(self):
+        manifest = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            components=[
+                {"type": "scm", "name": "r", "platform": "github", "owner": "o", "repo": "r"},
+            ],
+        )
+        component = manifest.components[0]
+        with patch("soliplex.agents.scm.app.list_all_uris", new_callable=AsyncMock) as mock:
+            mock.return_value = [{"uri": "f.md", "sha256": "h"}]
+            result = await runner._list_scm_all_uris(component, manifest)
+            mock.assert_called_once_with(
+                component.platform,
+                component.repo,
+                owner=component.owner,
+                branch=component.branch,
+                content_filter=component.content_filter,
+            )
+        assert result == [{"uri": "f.md", "sha256": "h"}]
+
+    @pytest.mark.asyncio
+    async def test_with_credentials_and_extensions(self):
+        manifest = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            config={"extensions": ["rst"]},
+            components=[
+                {
+                    "type": "scm",
+                    "name": "r",
+                    "platform": "github",
+                    "owner": "o",
+                    "repo": "r",
+                    "auth_token": "MY_TOKEN",
+                    "base_url": "https://custom.api/v1",
+                },
+            ],
+        )
+        component = manifest.components[0]
+        original_ext = settings.extensions[:]
+        with (
+            patch("soliplex.agents.scm.app.list_all_uris", new_callable=AsyncMock) as mock,
+            patch("soliplex.agents.manifest.runner.resolve_credential", return_value="secret"),
+        ):
+            mock.return_value = []
+            await runner._list_scm_all_uris(component, manifest)
+            mock.assert_called_once()
+        # Settings restored
+        assert settings.extensions == original_ext

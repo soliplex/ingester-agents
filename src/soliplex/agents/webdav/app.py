@@ -444,6 +444,7 @@ async def load_inventory(
     webdav_password: str = None,
     config: list[dict] | None = None,
     extra_metadata: dict[str, str] | None = None,
+    delete_stale: bool = False,
 ):
     """
     Load and process an inventory for ingestion.
@@ -463,6 +464,7 @@ async def load_inventory(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
+        delete_stale: Remove documents not in inventory (default: False)
 
     Returns:
         Dictionary with inventory, to_process, batch_id, ingested, errors,
@@ -550,9 +552,17 @@ async def load_inventory(
             param_set_id,
             priority,
         )
+    delete_stale_result = None
+    if delete_stale and len(errors) == 0:
+        delete_stale_result = await client.check_status(
+            config,
+            source,
+            delete_stale=True,
+        )
     ret["ingested"] = ingested
     ret["errors"] = errors
     ret["workflow_result"] = wf_res
+    ret["delete_stale_result"] = delete_stale_result
     return ret
 
 
@@ -630,6 +640,7 @@ async def load_inventory_from_urls(
     webdav_username: str = None,
     webdav_password: str = None,
     extra_metadata: dict[str, str] | None = None,
+    delete_stale: bool = False,
 ):
     """
     Load and process an inventory from a URL list file.
@@ -649,6 +660,7 @@ async def load_inventory_from_urls(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
+        delete_stale: Remove documents not in inventory (default: False)
 
     Returns:
         Dictionary with inventory, to_process, batch_id, ingested, errors,
@@ -671,6 +683,7 @@ async def load_inventory_from_urls(
         webdav_password=webdav_password,
         config=config,
         extra_metadata=extra_metadata,
+        delete_stale=delete_stale,
     )
     result["url_results"] = url_results
     return result

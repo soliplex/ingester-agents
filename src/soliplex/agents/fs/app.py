@@ -126,6 +126,7 @@ async def load_inventory(
     param_set_id: str | None = None,
     priority: int = 0,
     extra_metadata: dict[str, str] | None = None,
+    delete_stale: bool = False,
 ):
     """
     Load and process an inventory for ingestion.
@@ -143,6 +144,7 @@ async def load_inventory(
         start_workflows: Whether to start workflows (default: False)
         param_set_id: Parameter set for workflows
         priority: Workflow priority (default: 0)
+        delete_stale: Remove documents not in inventory (default: False)
 
     Returns:
         Dictionary with inventory, to_process, batch_id, ingested, errors,
@@ -220,9 +222,17 @@ async def load_inventory(
             param_set_id,
             priority,
         )
+    delete_stale_result = None
+    if delete_stale and len(errors) == 0:
+        delete_stale_result = await client.check_status(
+            config,
+            source,
+            delete_stale=True,
+        )
     ret["ingested"] = ingested
     ret["errors"] = errors
     ret["workflow_result"] = wf_res
+    ret["delete_stale_result"] = delete_stale_result
     return ret
 
 

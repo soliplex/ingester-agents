@@ -31,10 +31,10 @@ class TestConfigureLogging:
 
 
 class TestManifestConfig:
-    def test_delete_stale_defaults_false(self):
+    def test_delete_stale_defaults_true(self):
         config = ManifestConfig()
-        assert config.delete_stale is False
-
-    def test_delete_stale_enabled(self):
-        config = ManifestConfig(delete_stale=True)
         assert config.delete_stale is True
+
+    def test_delete_stale_disabled(self):
+        config = ManifestConfig(delete_stale=False)
+        assert config.delete_stale is False

@@ -201,6 +201,7 @@ class TestManifestConfig:
         c = ManifestConfig()
         assert c.start_workflows is False
         assert c.priority == 0
+        assert c.delete_stale is True
 
     def test_workflow_validation_passes(self):
         c = ManifestConfig(start_workflows=True, workflow_definition_id="wf1", param_set_id="ps1")

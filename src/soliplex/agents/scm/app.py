@@ -54,11 +54,13 @@ async def load_inventory(
     param_set_id: str | None = None,
     content_filter: ContentFilter = ContentFilter.ALL,
     extra_metadata: dict[str, str] | None = None,
+    source: str | None = None,
+    delete_stale: bool = False,
 ):
     client.validate_parameters(start_workflows, workflow_definition_id, param_set_id)
     data = await get_data(scm, repo_name, owner, content_filter=content_filter)
 
-    source = f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
+    source = source or f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
 
     to_process = await client.check_status(data, source)
     ingested = []
@@ -128,9 +130,17 @@ async def load_inventory(
             priority,
         )
 
+    delete_stale_result = None
+    if delete_stale and len(errors) == 0:
+        delete_stale_result = await client.check_status(
+            data,
+            source,
+            delete_stale=True,
+        )
     ret["ingested"] = ingested
     ret["errors"] = errors
     ret["workflow_result"] = wf_res
+    ret["delete_stale_result"] = delete_stale_result
     return ret
 
 
@@ -160,6 +170,50 @@ async def get_issues(scm: str, repo_name: str, owner: str = None, since: datetim
         row["sha256"] = hashlib.sha256(row["file_bytes"], usedforsecurity=False).hexdigest()
         formatted.append(row)
     return formatted
+
+
+async def list_all_uris(
+    scm: str,
+    repo_name: str,
+    owner: str = None,
+    branch: str = "main",
+    content_filter: ContentFilter = ContentFilter.ALL,
+) -> list[dict[str, str]]:
+    """Return all URI/sha256 pairs for a repo without downloading content.
+
+    Used by the manifest runner when delete_stale is enabled with
+    incremental SCM components to get the full URI set.
+    """
+    impl = get_scm(scm)
+    items: list[dict[str, str]] = []
+
+    if content_filter in (ContentFilter.ALL, ContentFilter.FILES):
+        allowed_extensions = settings.extensions
+        files = await impl.list_repo_files(
+            repo_name,
+            owner,
+            allowed_extensions=allowed_extensions,
+            branch=branch,
+        )
+        for f in files:
+            if f["name"].split(".")[-1] in allowed_extensions:
+                items.append({"uri": f["uri"], "sha256": f.get("sha256", "")})
+
+    if content_filter in (ContentFilter.ALL, ContentFilter.ISSUES):
+        issues = await impl.list_issues(
+            repo=repo_name,
+            owner=owner,
+            add_comments=False,
+        )
+        for issue in issues:
+            items.append(
+                {
+                    "uri": f"/{owner}/{repo_name}/issues/{issue['number']}",
+                    "sha256": "",
+                }
+            )
+
+    return items
 
 
 async def get_data(scm: str, repo_name: str, owner: str = None, content_filter: ContentFilter = ContentFilter.ALL):
@@ -214,6 +268,8 @@ async def incremental_sync(
     param_set_id: str | None = None,
     content_filter: ContentFilter = ContentFilter.ALL,
     extra_metadata: dict[str, str] | None = None,
+    source: str | None = None,
+    delete_stale: bool = False,
 ):
     """
     Perform incremental sync based on commit history.
@@ -230,12 +286,14 @@ async def incremental_sync(
         start_workflows: Whether to start workflows after ingestion
         workflow_definition_id: Optional workflow ID
         param_set_id: Optional parameter set ID
+        source: Optional source name override (used by manifests)
+        delete_stale: Remove documents not in full inventory (default: False)
 
     Returns:
         Sync result dict with statistics
     """
     impl = get_scm(scm)
-    source = f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
+    source = source or f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
 
     logger.info(f"Starting incremental sync for {source}")
 
@@ -260,6 +318,8 @@ async def incremental_sync(
             param_set_id=param_set_id,
             content_filter=content_filter,
             extra_metadata=extra_metadata,
+            source=source,
+            delete_stale=delete_stale,
         )
 
         latest_commit_sha = None
@@ -422,6 +482,22 @@ async def incremental_sync(
     else:
         logger.info(f"Incremental sync complete. Updated sync state to {latest_commit_sha}")
 
+    # Delete stale documents using full URI listing
+    delete_stale_result = None
+    if delete_stale and len(errors) == 0:
+        all_uris = await list_all_uris(
+            scm,
+            repo_name,
+            owner=owner,
+            branch=branch,
+            content_filter=content_filter,
+        )
+        delete_stale_result = await client.check_status(
+            all_uris,
+            source,
+            delete_stale=True,
+        )
+
     return {
         "status": "synced",
         "commits_processed": len(new_commits),
@@ -431,4 +507,5 @@ async def incremental_sync(
         "errors": errors,
         "workflow_result": wf_res,
         "new_commit_sha": latest_commit_sha,
+        "delete_stale_result": delete_stale_result,
     }

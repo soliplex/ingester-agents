@@ -151,6 +151,7 @@ async def _run_scm_component(component: SCMComponent, manifest: Manifest, wf_par
                 branch=component.branch,
                 content_filter=component.content_filter,
                 extra_metadata=metadata or None,
+                source=manifest.source,
                 **wf_params,
             )
         else:
@@ -160,6 +161,7 @@ async def _run_scm_component(component: SCMComponent, manifest: Manifest, wf_par
                 owner=component.owner,
                 content_filter=component.content_filter,
                 extra_metadata=metadata or None,
+                source=manifest.source,
                 **wf_params,
             )
 
@@ -246,6 +248,38 @@ _DISPATCH = {
 }
 
 
+async def _list_scm_all_uris(
+    component: SCMComponent,
+    manifest: Manifest,
+) -> list[dict[str, str]]:
+    """Fetch the full URI set for an SCM component.
+
+    Used when ``delete_stale`` is enabled and the component uses
+    incremental sync, which only returns changed files.
+    """
+    from soliplex.agents.scm import app as scm_app
+
+    extensions = manifest.get_extensions(component)
+    overrides: dict[str, object] = {}
+    if extensions is not None:
+        overrides["extensions"] = extensions
+    if component.auth_token:
+        from pydantic import SecretStr
+
+        overrides["scm_auth_token"] = SecretStr(resolve_credential(component.auth_token))
+    if component.base_url:
+        overrides["scm_base_url"] = component.base_url
+
+    with override_settings(**overrides):
+        return await scm_app.list_all_uris(
+            component.platform,
+            component.repo,
+            owner=component.owner,
+            branch=component.branch,
+            content_filter=component.content_filter,
+        )
+
+
 def collect_inventory_uris(result: dict[str, Any]) -> list[dict[str, str]]:
     """Extract URI/hash pairs from a component result's inventory.
 
@@ -289,6 +323,7 @@ async def run_manifest(manifest: Manifest) -> dict:
     results: list[dict[str, Any]] = []
     all_uri_hashes: list[dict[str, str]] = []
     has_errors = False
+    incremental_scm_components: list[SCMComponent] = []
 
     for component in manifest.components:
         metadata = manifest.get_metadata(component)
@@ -300,12 +335,22 @@ async def run_manifest(manifest: Manifest) -> dict:
             continue
         try:
             result = await handler(component, manifest, wf_params, metadata)
-            all_uri_hashes.extend(collect_inventory_uris(result))
+            # Skip URI collection for incremental SCM — handled below
+            if isinstance(component, SCMComponent) and component.incremental:
+                incremental_scm_components.append(component)
+            else:
+                all_uri_hashes.extend(collect_inventory_uris(result))
             results.append({"component": component.name, "result": result})
         except Exception as e:
             logger.exception(f"Error running component {component.name}")
             results.append({"component": component.name, "error": str(e)})
             has_errors = True
+
+    # --- full URI listing for incremental SCM components -----------------------
+    if manifest.config and manifest.config.delete_stale and not has_errors and incremental_scm_components:
+        for inc_component in incremental_scm_components:
+            full_uris = await _list_scm_all_uris(inc_component, manifest)
+            all_uri_hashes.extend(full_uris)
 
     # --- delete stale documents ------------------------------------------------
     delete_stale_result = None
