@@ -1,5 +1,5 @@
 # Default owners for everything
-* @bd_mkt
+* @bd-mkt
 
 # CI/CD changes
-.github/ @bd_mkt
+.github/ @bd-mkt
