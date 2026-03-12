@@ -1,0 +1,12 @@
+id: simple-fs-ingestion
+name: simple fs ingestion
+source: test fs
+schedule:
+  cron: "0 0 * * *"
+components:
+  - name: test-directory1
+    type: fs
+    path: tests/test-fs
+  - name: test-directory2
+    type: fs
+    path: tests/test-fs2

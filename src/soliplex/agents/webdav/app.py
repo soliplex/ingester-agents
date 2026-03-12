@@ -13,6 +13,7 @@ from soliplex.agents import client
 from soliplex.agents.common.config import check_config
 from soliplex.agents.common.config import detect_mime_type
 from soliplex.agents.config import settings
+from soliplex.agents.webdav import state as webdav_state
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ async def build_config_from_urls(
     """
     Build config from a file containing one absolute WebDAV path per line.
 
+    Uses ETag-based caching to avoid re-downloading unchanged files.
     Each URL is processed independently; errors are captured per-URL
     so that one failure does not stop the whole list.
 
@@ -143,12 +145,18 @@ async def build_config_from_urls(
     config = []
     results = []
 
+    resolved_url = webdav_url or settings.webdav_url or ""
+    cached_state = webdav_state.load_state(resolved_url)
+    new_state = {}
+    current_paths = set()
+
     async with aiofiles.open(urls_file) as f:
         content = await f.read()
 
     lines = [line.strip() for line in content.splitlines() if line.strip()]
 
     for full_path in lines:
+        current_paths.add(full_path)
         ext = Path(full_path).suffix.lstrip(".")
         if ext not in allowed_extensions:
             logger.info(f"skipping {full_path}")
@@ -156,11 +164,43 @@ async def build_config_from_urls(
             continue
 
         try:
+            # Try to get ETag via info() for cache check
+            server_etag = None
+            try:
+                info = webdav_client.info(full_path)
+                server_etag = info.get("etag")
+            except Exception:
+                logger.debug(f"Could not get info for {full_path}, will download")
+
+            cached_entry = cached_state.get(full_path)
+
+            if server_etag and cached_entry and cached_entry.get("etag") == server_etag:
+                # ETag cache hit
+                sha256_hash = cached_entry["sha256"]
+                mime_type = detect_mime_type(full_path)
+                rec = {
+                    "path": full_path,
+                    "sha256": sha256_hash,
+                    "metadata": {
+                        "size": cached_entry.get("size", 0),
+                        "content-type": mime_type,
+                    },
+                }
+                if server_etag:
+                    new_state[full_path] = {"etag": server_etag, "sha256": sha256_hash, "size": cached_entry.get("size", 0)}
+                config.append(rec)
+                results.append({"url": full_path, "status": "success", "error_message": None})
+                continue
+
+            # Download file
             buffer = BytesIO()
             webdav_client.download_fileobj(full_path, buffer)
             content_bytes = buffer.getvalue()
             sha256_hash = hashlib.sha256(content_bytes, usedforsecurity=False).hexdigest()
             mime_type = detect_mime_type(full_path)
+
+            if server_etag:
+                new_state[full_path] = {"etag": server_etag, "sha256": sha256_hash, "size": len(content_bytes)}
 
             rec = {
                 "path": full_path,
@@ -176,6 +216,12 @@ async def build_config_from_urls(
             logger.exception(f"Error processing {full_path}")
             results.append({"url": full_path, "status": "error", "error_message": str(e)})
 
+    # Prune deleted files
+    _, removed = webdav_state.prune_state(cached_state, current_paths)
+    for removed_path in removed:
+        logger.warning(f"File removed from URL list: {removed_path}")
+
+    webdav_state.save_state(resolved_url, new_state)
     return config, results
 
 
@@ -241,6 +287,8 @@ async def build_config(
     """
     Scan a WebDAV directory and create inventory configuration.
 
+    Uses ETag-based caching to avoid re-downloading unchanged files.
+
     Args:
         webdav_path: Path within WebDAV server (e.g., "/documents")
         webdav_url: Optional WebDAV server URL
@@ -250,53 +298,68 @@ async def build_config(
     Returns:
         List of file configuration dictionaries
     """
-    client = create_webdav_client(webdav_url, webdav_username, webdav_password)
+    webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
     allowed_extensions = settings.extensions
     config = []
     failed = 0
+    cache_hits = 0
+
+    resolved_url = webdav_url or settings.webdav_url or ""
+    cached_state = webdav_state.load_state(resolved_url)
+    new_state = {}
 
     # Recursively list all files
-    files = await recursive_listdir_webdav(client, webdav_path)
+    files = await recursive_listdir_webdav(webdav_client, webdav_path)
+    current_paths = set()
 
     for file_info in files:
         full_path = file_info["path"]  # This is the absolute WebDAV path
+        current_paths.add(full_path)
         ext = Path(full_path).suffix.lstrip(".")
 
         if ext not in allowed_extensions:
             logger.info(f"skipping {full_path}")
             continue
 
-        # Get file content for hashing
-        try:
-            buffer = BytesIO()
-            client.download_fileobj(full_path, buffer)
-            content = buffer.getvalue()
-        except Exception:
-            logger.exception(f"Error downloading {full_path}, skipping")
-            failed += 1
-            continue
+        server_etag = file_info.get("etag")
+        cached_entry = cached_state.get(full_path)
 
-        sha256_hash = hashlib.sha256(content, usedforsecurity=False).hexdigest()
+        # Check ETag cache
+        if server_etag and cached_entry and cached_entry.get("etag") == server_etag:
+            sha256_hash = cached_entry["sha256"]
+            cache_hits += 1
+            logger.debug(f"ETag cache hit for {full_path}")
+        else:
+            # Download and compute hash
+            try:
+                buffer = BytesIO()
+                webdav_client.download_fileobj(full_path, buffer)
+                content = buffer.getvalue()
+            except Exception:
+                logger.exception(f"Error downloading {full_path}, skipping")
+                failed += 1
+                continue
+
+            sha256_hash = hashlib.sha256(content, usedforsecurity=False).hexdigest()
+
+        # Update state entry
+        if server_etag:
+            new_state[full_path] = {"etag": server_etag, "sha256": sha256_hash}
 
         # Detect MIME type
         mime_type = detect_mime_type(full_path)
 
         # Make path relative to webdav_path
-        # Normalize both paths for comparison - remove leading and trailing slashes
         normalized_base = webdav_path.strip("/")
         normalized_full = full_path.strip("/")
 
         logger.debug(f"Comparing - Full: '{normalized_full}', Base: '{normalized_base}'")
 
-        # Check if full path starts with base path
         if normalized_full.startswith(normalized_base + "/"):
-            # Path starts with base + slash
             relative_path = normalized_full[len(normalized_base) + 1 :]
         elif normalized_full == normalized_base:
-            # Path equals base (shouldn't happen for files, but handle it)
             relative_path = ""
         else:
-            # Path doesn't contain base - use the full normalized path
             relative_path = normalized_full
 
         logger.debug(f"Full WebDAV path: {full_path}, Base: {webdav_path}, Relative: {relative_path}")
@@ -311,7 +374,13 @@ async def build_config(
         }
         config.append(rec)
 
-    logger.info(f"Built config: {len(config)} files succeeded, {failed} files failed")
+    # Prune deleted files and log warnings
+    _, removed = webdav_state.prune_state(cached_state, current_paths)
+    for removed_path in removed:
+        logger.warning(f"File removed from server: {removed_path}")
+
+    webdav_state.save_state(resolved_url, new_state)
+    logger.info(f"Built config: {len(config)} files succeeded, {failed} failed, {cache_hits} cache hits")
     return config
 
 
@@ -346,6 +415,8 @@ async def recursive_listdir_webdav(client: WebDAVClient, path: str) -> list[dict
                 file_list.extend(subdir_files)
             else:
                 rec = {"path": resource_path, "size": resource.get("content_length", 0)}
+                if "etag" in resource:
+                    rec["etag"] = resource["etag"]
                 for key in [x for x in resource.keys() if x not in ["href", "etag", "type", "name"]]:
                     rec[key] = resource.get(key)
                 file_list.append(rec)
@@ -372,8 +443,8 @@ async def load_inventory(
     webdav_username: str = None,
     webdav_password: str = None,
     config: list[dict] | None = None,
-    skip_status_check: bool = False,
     extra_metadata: dict[str, str] | None = None,
+    delete_stale: bool = False,
 ):
     """
     Load and process an inventory for ingestion.
@@ -393,6 +464,7 @@ async def load_inventory(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
+        delete_stale: Remove documents not in inventory (default: False)
 
     Returns:
         Dictionary with inventory, to_process, batch_id, ingested, errors,
@@ -408,12 +480,8 @@ async def load_inventory(
         config = [x for x in filtered if x["valid"]]
 
     logger.info(f"found {len(config)} files in {path}")
-    if skip_status_check:
-        to_process = config
-        logger.info(f"skipping status check, processing all {len(to_process)} files")
-    else:
-        to_process = await client.check_status(config, source)
-        logger.info(f"found {len(to_process)} out of {len(config)} to process in {base_path}")
+    to_process = await client.check_status(config, source)
+    logger.info(f"found {len(to_process)} out of {len(config)} to process in {base_path}")
     if end is None:
         end = len(config)
         to_process = to_process[start:end]
@@ -484,9 +552,17 @@ async def load_inventory(
             param_set_id,
             priority,
         )
+    delete_stale_result = None
+    if delete_stale and len(errors) == 0:
+        delete_stale_result = await client.check_status(
+            config,
+            source,
+            delete_stale=True,
+        )
     ret["ingested"] = ingested
     ret["errors"] = errors
     ret["workflow_result"] = wf_res
+    ret["delete_stale_result"] = delete_stale_result
     return ret
 
 
@@ -563,13 +639,13 @@ async def load_inventory_from_urls(
     webdav_url: str = None,
     webdav_username: str = None,
     webdav_password: str = None,
-    skip_hash_check: bool = False,
     extra_metadata: dict[str, str] | None = None,
+    delete_stale: bool = False,
 ):
     """
     Load and process an inventory from a URL list file.
 
-    Reads URLs from file, builds config, then delegates to load_inventory.
+    Reads URLs from file, builds config with ETag caching, then delegates to load_inventory.
 
     Args:
         urls_file: Path to file containing WebDAV URLs (one per line)
@@ -584,17 +660,13 @@ async def load_inventory_from_urls(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
-        skip_hash_check: Skip downloading files for hash comparison and
-            assume all URLs need ingestion (default: False)
+        delete_stale: Remove documents not in inventory (default: False)
 
     Returns:
         Dictionary with inventory, to_process, batch_id, ingested, errors,
-        url_results, and url_results_path
+        and url_results
     """
-    if skip_hash_check:
-        config, url_results = await _read_urls_as_config(urls_file)
-    else:
-        config, url_results = await build_config_from_urls(urls_file, webdav_url, webdav_username, webdav_password)
+    config, url_results = await build_config_from_urls(urls_file, webdav_url, webdav_username, webdav_password)
 
     result = await load_inventory(
         path="",
@@ -610,53 +682,11 @@ async def load_inventory_from_urls(
         webdav_username=webdav_username,
         webdav_password=webdav_password,
         config=config,
-        skip_status_check=skip_hash_check,
         extra_metadata=extra_metadata,
+        delete_stale=delete_stale,
     )
     result["url_results"] = url_results
     return result
-
-
-async def _read_urls_as_config(urls_file: str) -> tuple[list[dict], list[dict]]:
-    """
-    Read URLs from file and build lightweight config without downloading.
-
-    Filters by allowed extensions and detects MIME types from paths.
-    No WebDAV connection or file downloads are performed.
-
-    Args:
-        urls_file: Path to file containing WebDAV URLs (one per line)
-
-    Returns:
-        Tuple of (config list, results list)
-    """
-    allowed_extensions = settings.extensions
-    config = []
-    results = []
-
-    async with aiofiles.open(urls_file) as f:
-        content = await f.read()
-
-    lines = [line.strip() for line in content.splitlines() if line.strip()]
-
-    for full_path in lines:
-        ext = Path(full_path).suffix.lstrip(".")
-        if ext not in allowed_extensions:
-            logger.info(f"skipping {full_path}")
-            results.append({"url": full_path, "status": "skipped", "error_message": f"Extension .{ext} not allowed"})
-            continue
-
-        mime_type = detect_mime_type(full_path)
-        rec = {
-            "path": full_path,
-            "metadata": {
-                "content-type": mime_type,
-            },
-        }
-        config.append(rec)
-        results.append({"url": full_path, "status": "success", "error_message": None})
-
-    return config, results
 
 
 async def status_report(

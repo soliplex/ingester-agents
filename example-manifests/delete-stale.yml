@@ -1,0 +1,14 @@
+id: delete-stale-example
+name: Delete Stale Example
+source: synced-docs
+config:
+  delete_stale: true
+  metadata:
+    project: my-project
+components:
+  - name: local-docs
+    type: fs
+    path: tests/test-fs
+  - name: web-page
+    type: web
+    url: http://localhost:8000/abc/xyz

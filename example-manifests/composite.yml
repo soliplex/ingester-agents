@@ -1,0 +1,29 @@
+id: composite
+name: composite
+source: composite source
+config:
+  metadata:
+    project: enfold
+  start_workflows: false
+components:
+  - name: test-directory1
+    type: fs
+    path: tests/test-fs
+  - name: plone-docs
+    type: webdav
+    url: http://localhost:8000
+    path: /docs
+  - name: plone-specific
+    type: webdav
+    url: http://localhost:8000
+    urls:
+      - /docs/doc1.pdf
+      - /docs/doc2.pdf
+      - /docs2/doc.pdf
+  - name: plone-from-file
+    type: webdav
+    url: http://localhost:8000
+    urls_file: url-list.txt
+  - name: web-page
+    type: web
+    url: http://localhost:8000/abc/xyz

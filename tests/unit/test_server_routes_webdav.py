@@ -281,11 +281,11 @@ def test_run_inventory_with_all_options(client):
         assert call_args[0][1] == "test-source"  # source
 
 
-# --- /api/v1/webdav/run-from-urls ---
+# --- /api/v1/webdav/run-from-file ---
 
 
-def test_run_from_urls_success(client):
-    """Test successful run from URLs."""
+def test_run_from_file_success(client):
+    """Test successful run from uploaded file."""
     with patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app:
         mock_app.load_inventory_from_urls = AsyncMock(
             return_value={
@@ -298,9 +298,11 @@ def test_run_from_urls_success(client):
             }
         )
 
+        file_content = b"/documents/doc1.md\n/documents/doc2.md\n"
         response = client.post(
-            "/api/v1/webdav/run-from-urls",
-            data={"urls_file": "/tmp/urls.txt", "source": "test-source"},
+            "/api/v1/webdav/run-from-file",
+            data={"source": "test-source"},
+            files={"file": ("urls.txt", file_content, "text/plain")},
         )
 
         assert response.status_code == 200
@@ -312,27 +314,16 @@ def test_run_from_urls_success(client):
         mock_app.load_inventory_from_urls.assert_called_once()
 
 
-def test_run_from_urls_error(client):
-    """Test run from URLs with error."""
-    with patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app:
-        mock_app.load_inventory_from_urls = AsyncMock(side_effect=FileNotFoundError("URLs file not found"))
-
-        response = client.post(
-            "/api/v1/webdav/run-from-urls",
-            data={"urls_file": "/tmp/missing.txt", "source": "test-source"},
-        )
-
-        assert response.status_code == 404
-
-
-def test_run_from_urls_server_error(client):
-    """Test run from URLs with server error."""
+def test_run_from_file_server_error(client):
+    """Test run from uploaded file with server error."""
     with patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app:
         mock_app.load_inventory_from_urls = AsyncMock(side_effect=Exception("Connection failed"))
 
+        file_content = b"/documents/doc1.md\n"
         response = client.post(
-            "/api/v1/webdav/run-from-urls",
-            data={"urls_file": "/tmp/urls.txt", "source": "test-source"},
+            "/api/v1/webdav/run-from-file",
+            data={"source": "test-source"},
+            files={"file": ("urls.txt", file_content, "text/plain")},
         )
 
         assert response.status_code == 500

@@ -22,12 +22,26 @@ Agents for loading documents into the [Soliplex Ingester](https://github.com/sol
   - URL-based ingestion from a curated file list with per-URL error tracking
   - Skip hash check option for faster ingestion when re-downloading is acceptable
 
+- **Web Agent (`web`)**: Ingest web pages via HTTP
+  - Fetch and ingest HTML content from URLs
+  - URL list support (inline, file, or single URL)
+  - Batch processing with workflow support
+
 - **SCM Agent (`scm`)**: Ingest files and issues from Git repositories
   - Support for GitHub and Gitea platforms
   - Automatic file type filtering
   - Issue ingestion with comments (rendered as Markdown)
   - Batch processing with workflow support
   - Status checking to avoid re-ingesting unchanged files
+
+- **Manifest Runner (`manifest`)**: Declarative multi-source ingestion
+  - YAML-based manifest files defining ingestion components
+  - Supports all agent types (fs, scm, webdav, web) in a single manifest
+  - Shared configuration (metadata, extensions, workflow settings)
+  - Stale document removal (`delete_stale`) across all components in a manifest
+  - Cron-based scheduling via the REST API server
+  - Per-component credential and extension overrides
+  - Directory-level execution for running multiple manifests at once
 
 - **REST API Server**: Run agents as a web service
   - FastAPI-based HTTP endpoints for all operations
@@ -138,6 +152,9 @@ SERVER_PORT=8001
 API_KEY=your-api-key
 API_KEY_ENABLED=false
 AUTH_TRUST_PROXY_HEADERS=false
+
+# Manifest scheduling (requires SCHEDULER_ENABLED=true)
+MANIFEST_DIR=/path/to/manifests
 ```
 
 ### Git CLI Mode
@@ -173,10 +190,12 @@ scm_git_cli_timeout=600
 
 ## Usage
 
-The CLI tool `si-agent` provides four main modes of operation:
+The CLI tool `si-agent` provides six main modes of operation:
 - **`fs`**: Filesystem agent for ingesting local documents
+- **`web`**: Web agent for ingesting HTML pages from URLs
 - **`scm`**: SCM agent for ingesting from Git repositories
 - **`webdav`**: WebDAV agent for ingesting documents from WebDAV servers
+- **`manifest`**: Manifest runner for declarative multi-source ingestion
 - **`serve`**: REST API server exposing agent functionality via HTTP
 
 ### Filesystem Agent
@@ -467,6 +486,199 @@ Use `--skip-hash-check` to skip downloading files for hash comparison, which avo
 si-agent webdav run-from-urls urls.txt my-source-name --skip-hash-check
 ```
 
+### Manifest Runner
+
+The manifest runner executes declarative YAML manifests that define multi-source ingestion jobs. A single manifest can combine filesystem, WebDAV, SCM, and web components under a shared source and configuration.
+
+#### Quick Start
+
+Run a single manifest file:
+
+```bash
+si-agent manifest run /path/to/manifest.yml
+```
+
+Run all manifests in a directory:
+
+```bash
+si-agent manifest run /path/to/manifests/
+```
+
+Output results as JSON:
+
+```bash
+si-agent manifest run /path/to/manifest.yml --json
+```
+
+#### Manifest YAML Format
+
+A manifest file defines the ingestion source, optional shared configuration, and one or more components:
+
+```yaml
+id: my-ingestion
+name: My Document Ingestion
+source: my-source-name
+schedule:
+  cron: "0 0 * * *"
+config:
+  metadata:
+    project: my-project
+  extensions:
+    - md
+    - pdf
+  delete_stale: true
+  start_workflows: true
+  workflow_definition_id: my-workflow
+  param_set_id: my-params
+  priority: 5
+components:
+  - name: local-docs
+    type: fs
+    path: /path/to/documents
+
+  - name: web-pages
+    type: web
+    urls:
+      - https://example.com/page1
+      - https://example.com/page2
+
+  - name: repo-docs
+    type: scm
+    platform: github
+    owner: myorg
+    repo: my-repo
+    incremental: true
+
+  - name: shared-drive
+    type: webdav
+    url: https://webdav.example.com
+    path: /documents
+```
+
+#### Manifest Fields
+
+Top-level fields:
+
+- **id** (required): Unique identifier for the manifest. Must be unique across all manifests when running from a directory.
+- **name** (required): Human-readable name for display and logging.
+- **source** (required): Source name used for batch management in the Ingester.
+- **schedule**: Optional cron schedule for automated execution via the REST API server.
+  - **cron**: Cron expression (e.g., `"0 0 * * *"` for daily at midnight).
+- **config**: Optional shared configuration applied to all components.
+  - **metadata**: Key-value pairs attached to all ingested documents.
+  - **extensions**: File extensions to include (overrides the global `EXTENSIONS` setting).
+  - **delete_stale**: Remove documents from the Ingester that no longer appear in any component (default: false). See [Stale Document Removal](#stale-document-removal) below.
+  - **start_workflows**: Whether to start workflows after ingestion (default: false).
+  - **workflow_definition_id**: Workflow definition ID (required when start_workflows is true).
+  - **param_set_id**: Parameter set ID (required when start_workflows is true).
+  - **priority**: Workflow priority (default: 0).
+- **components** (required): List of ingestion components (see below).
+
+#### Component Types
+
+**Filesystem (`fs`):**
+
+- **name** (required): Component name (must be unique within the manifest).
+- **path** (required): Path to a local directory or inventory file.
+- **extensions**: Override extensions for this component.
+- **metadata**: Additional metadata merged with config-level metadata.
+
+**Web (`web`):**
+
+- **name** (required): Component name.
+- **url**: Single URL to fetch.
+- **urls**: List of URLs to fetch.
+- **urls_file**: Path to a file containing URLs (one per line).
+- Exactly one of `url`, `urls`, or `urls_file` must be specified.
+- **extensions**: Override extensions for this component.
+- **metadata**: Additional metadata merged with config-level metadata.
+
+**SCM (`scm`):**
+
+- **name** (required): Component name.
+- **platform** (required): `github` or `gitea`.
+- **owner** (required): Repository owner or organization.
+- **repo** (required): Repository name.
+- **incremental**: Use commit-based incremental sync (default: false).
+- **branch**: Branch to sync (default: `main`).
+- **content_filter**: What to ingest: `all`, `files`, or `issues` (default: `all`).
+- **base_url**: Override SCM base URL (uses `scm_base_url` env var if not set).
+- **auth_token**: Override auth token name (resolved via Docker secrets or env vars).
+- **extensions**: Override extensions for this component.
+- **metadata**: Additional metadata merged with config-level metadata.
+
+**WebDAV (`webdav`):**
+
+- **name** (required): Component name.
+- **url** (required): WebDAV server URL.
+- **path**: WebDAV directory path to scan recursively.
+- **urls**: List of specific WebDAV file paths to ingest.
+- **urls_file**: Path to a file containing WebDAV URLs (one per line).
+- Exactly one of `path`, `urls`, or `urls_file` must be specified.
+- **username**: Override WebDAV username (resolved via Docker secrets or env vars).
+- **password**: Override WebDAV password (resolved via Docker secrets or env vars).
+- **extensions**: Override extensions for this component.
+- **metadata**: Additional metadata merged with config-level metadata.
+
+#### Configuration Precedence
+
+Settings are resolved in the following order (highest priority first):
+
+1. Component-level settings (e.g., `extensions` on a component)
+2. Manifest config-level settings (e.g., `config.extensions`)
+3. Global environment settings (e.g., `EXTENSIONS` env var)
+
+For metadata, config-level and component-level values are merged, with component values taking precedence for duplicate keys.
+
+#### Stale Document Removal
+
+When `delete_stale: true` is set in a manifest's `config` block, the runner will remove documents from the Ingester that no longer appear in any of the manifest's components. This keeps the Ingester in sync with the actual source data.
+
+**How it works:**
+
+1. All components execute sequentially, collecting every discovered URI and its hash
+2. After **all** components complete successfully, a single `check_status` call is made to the Ingester with the consolidated URI set and `delete_stale=true`
+3. The Ingester compares the submitted URIs against what it has stored for the source. Any documents belonging to the source whose URI is **not** in the submitted set are deleted.
+
+**Safety:**
+
+- If **any** component produces an error (exception or unknown type), `delete_stale` is **skipped entirely** for that manifest run. This prevents accidental deletions when the URI set is incomplete due to a failed component.
+- Components that succeed still have their documents ingested normally — only the stale deletion step is skipped.
+
+**Example:**
+
+```yaml
+id: synced-docs
+name: Synced Documentation
+source: docs-source
+config:
+  delete_stale: true
+components:
+  - name: local-docs
+    type: fs
+    path: /data/docs
+  - name: shared-drive
+    type: webdav
+    url: https://webdav.example.com
+    path: /shared/docs
+```
+
+If a file is removed from `/data/docs` or from the WebDAV server, the next manifest run will detect that its URI is no longer present and delete it from the Ingester.
+
+**Note:** SCM components using `incremental: true` only return files changed since the last sync, not the full file listing. When `delete_stale` is enabled with incremental SCM components, the stale detection may not have complete URI coverage for those components. Consider using full inventory mode (`incremental: false`) when `delete_stale` is needed with SCM sources.
+
+#### Scheduling
+
+When the REST API server is started with `SCHEDULER_ENABLED=true` and `MANIFEST_DIR` is set, manifests with a `schedule` block are automatically registered as cron jobs:
+
+```bash
+export SCHEDULER_ENABLED=true
+export MANIFEST_DIR=/path/to/manifests
+si-agent serve
+```
+
+The server loads all manifests from the directory at startup, validates that all manifest IDs are unique, and registers cron jobs for manifests that have a `schedule` defined.
+
 **Note:** All commands support WebDAV credentials via environment variables (`WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD`) or command-line options (`--webdav-url`, `--webdav-username`, `--webdav-password`).
 
 **Git Bash on Windows:** If using Git Bash on Windows, use double slashes for WebDAV paths to prevent path conversion (e.g., `//documents` instead of `/documents`).
@@ -475,9 +687,9 @@ si-agent webdav run-from-urls urls.txt my-source-name --skip-hash-check
 
 ### Document Ingestion Flow
 
-1. **Discovery**: Files are discovered from the source (filesystem or SCM)
+1. **Discovery**: Files are discovered from the source (filesystem, WebDAV, SCM, or web)
 2. **Hashing**: Each file's hash is calculated
-   - Filesystem sources: SHA256 hash
+   - Filesystem/WebDAV/Web sources: SHA256 hash
    - SCM sources: SHA3-256 hash for files, SHA256 for issues
 3. **Status Check**: The system checks which files have changed or are new against the ingester database
 4. **Batch Management**:
@@ -738,7 +950,7 @@ curl -X POST http://localhost:8001/api/scm/github/my-repo/ingest \
 | `POST` | `/api/v1/webdav/validate-config` | Validate inventory from WebDAV path |
 | `POST` | `/api/v1/webdav/check-status` | Check which files need ingestion |
 | `POST` | `/api/v1/webdav/run-inventory` | Ingest documents from WebDAV directory |
-| `POST` | `/api/v1/webdav/run-from-urls` | Ingest documents from a URL list file |
+| `POST` | `/api/v1/webdav/run-from-file` | Ingest documents from an uploaded URL list file |
 
 **Examples:**
 
@@ -756,14 +968,68 @@ curl -X POST http://localhost:8001/api/v1/webdav/run-inventory \
   -F "webdav_username=user" \
   -F "webdav_password=pass"
 
-# Ingest from URL list file (with skip hash check)
-curl -X POST http://localhost:8001/api/v1/webdav/run-from-urls \
-  -F "urls_file=/tmp/urls.txt" \
+# Ingest from uploaded URL list file (with skip hash check)
+curl -X POST http://localhost:8001/api/v1/webdav/run-from-file \
+  -F "file=@urls.txt" \
   -F "source=my-source" \
   -F "skip_hash_check=true" \
   -F "webdav_url=https://webdav.example.com" \
   -F "webdav_username=user" \
   -F "webdav_password=pass"
+```
+
+#### Web Routes (`/api/v1/web/`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/web/run-inventory` | Ingest web pages from a JSON array of URLs |
+| `POST` | `/api/v1/web/run-from-file` | Ingest web pages from an uploaded URL list file |
+
+**Examples:**
+
+```bash
+# Ingest web pages from URL list
+curl -X POST http://localhost:8001/api/v1/web/run-inventory \
+  -F "urls=[\"https://example.com/page1\", \"https://example.com/page2\"]" \
+  -F "source=my-source"
+
+# Ingest web pages with workflow and metadata
+curl -X POST http://localhost:8001/api/v1/web/run-inventory \
+  -F "urls=[\"https://example.com/page1\"]" \
+  -F "source=my-source" \
+  -F "start_workflows=true" \
+  -F "workflow_definition_id=my-workflow" \
+  -F "param_set_id=my-params" \
+  -F "metadata={\"project\": \"test\"}"
+
+# Ingest web pages from uploaded file
+curl -X POST http://localhost:8001/api/v1/web/run-from-file \
+  -F "file=@urls.txt" \
+  -F "source=my-source"
+```
+
+#### Manifest Routes (`/api/v1/manifest/`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/manifest/run` | Run manifests from a file or directory path |
+| `POST` | `/api/v1/manifest/run-single` | Run a single manifest file |
+| `POST` | `/api/v1/manifest/validate` | Validate manifests without executing |
+
+**Examples:**
+
+```bash
+# Run all manifests in a directory
+curl -X POST http://localhost:8001/api/v1/manifest/run \
+  -F "path=/path/to/manifests"
+
+# Run a single manifest
+curl -X POST http://localhost:8001/api/v1/manifest/run-single \
+  -F "path=/path/to/manifest.yml"
+
+# Validate manifest files
+curl -X POST http://localhost:8001/api/v1/manifest/validate \
+  -F "path=/path/to/manifests"
 ```
 
 #### Health Check
@@ -888,21 +1154,28 @@ soliplex.agents/
 ├── src/soliplex/agents/
 │   ├── cli.py              # Main CLI entry point (includes 'serve' command)
 │   ├── client.py           # Soliplex Ingester API client
-│   ├── config.py           # Configuration and settings
+│   ├── config.py           # Configuration, settings, and manifest models
 │   ├── server/             # FastAPI server
-│   │   ├── __init__.py     # FastAPI app initialization
+│   │   ├── __init__.py     # FastAPI app initialization, scheduler
 │   │   ├── auth.py         # Authentication (API key & OAuth2 proxy)
 │   │   └── routes/
 │   │       ├── __init__.py
 │   │       ├── fs.py       # Filesystem API endpoints
 │   │       ├── scm.py      # SCM API endpoints
-│   │       └── webdav.py   # WebDAV API endpoints
+│   │       ├── webdav.py   # WebDAV API endpoints
+│   │       ├── web.py      # Web API endpoints
+│   │       └── manifest.py # Manifest API endpoints
 │   ├── fs/                 # Filesystem agent
 │   │   ├── app.py          # Core filesystem logic
 │   │   └── cli.py          # Filesystem CLI commands
+│   ├── web/                # Web agent
+│   │   └── app.py          # Core web fetching logic
 │   ├── webdav/             # WebDAV agent
 │   │   ├── app.py          # Core WebDAV logic
 │   │   └── cli.py          # WebDAV CLI commands
+│   ├── manifest/           # Manifest runner
+│   │   ├── runner.py       # YAML loading, validation, dispatch
+│   │   └── cli.py          # Manifest CLI commands
 │   └── scm/                # SCM agent
 │       ├── app.py          # Core SCM logic
 │       ├── cli.py          # SCM CLI commands
@@ -912,6 +1185,7 @@ soliplex.agents/
 │       └── lib/
 │           ├── templates/  # Issue rendering templates
 │           └── utils.py    # Utility functions
+├── example-manifests/      # Example manifest YAML files
 ├── tests/                  # Test suite
 │   └── unit/
 │       ├── test_server_*.py  # Server API tests
@@ -924,8 +1198,8 @@ soliplex.agents/
 ### Key Components
 
 **CLI Layer:**
-- `cli.py` - Main entry point with `fs`, `scm`, `webdav`, and `serve` commands
-- Agent-specific CLI commands in `fs/cli.py`, `webdav/cli.py`, and `scm/cli.py`
+- `cli.py` - Main entry point with `fs`, `web`, `scm`, `webdav`, `manifest`, and `serve` commands
+- Agent-specific CLI commands in `fs/cli.py`, `webdav/cli.py`, `scm/cli.py`, and `manifest/cli.py`
 
 **Server Layer:**
 - `server/` - FastAPI application
@@ -934,13 +1208,16 @@ soliplex.agents/
 
 **Agent Layer:**
 - `fs/app.py` - Filesystem operations (shared by CLI and API)
+- `web/app.py` - Web page fetching and ingestion (shared by CLI and API)
 - `webdav/app.py` - WebDAV operations (shared by CLI and API)
 - `scm/app.py` - SCM operations (shared by CLI and API)
+- `manifest/runner.py` - Manifest loading, validation, and dispatch to agents
 - `client.py` - HTTP client for Soliplex Ingester API
 
 **Configuration:**
-- `config.py` - Pydantic settings for all components
+- `config.py` - Pydantic settings and manifest component models
 - Environment variables or `.env` file for configuration
+- YAML manifest files for declarative multi-source ingestion
 
 ## License
 

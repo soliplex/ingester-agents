@@ -209,6 +209,9 @@ async def check_status(file_info: list[dict[str, Any]], source: str, delete_stal
     """
     Check which files need processing based on their status.
 
+    When delete_stale is True, the Ingester will also delete documents
+    belonging to the source whose URI is not in the submitted file_info.
+
     Args:
         file_info: List of file information dictionaries with 'uri' and 'sha256' keys
         source: Source identifier
@@ -249,6 +252,10 @@ async def check_status(file_info: list[dict[str, Any]], source: str, delete_stal
                     to_process.append(uri_to_file[uri])
                 else:
                     logger.debug(f"no need to process {uri} with status {status}")
+
+            if delete_stale:
+                deleted_count = resp.get("deleted_count", 0)
+                logger.info("delete_stale removed %d documents for source %s", deleted_count, source)
 
     return to_process
 

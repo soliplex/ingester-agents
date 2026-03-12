@@ -1,6 +1,6 @@
 [project]
 name = "soliplex.agents"
-version = "0.5.2"
+version = "0.6.0"
 description = "Agents for use with soliplex-ingester"
 authors = [{ name = "Enfold Systems", email = "info@enfoldsystems.net" }]
 readme = "README.md"
@@ -30,6 +30,7 @@ dependencies = [
     "typer>=0.21.1",
     "uvicorn[standard]>=0.34.0",
     "webdav4>=0.10.0",
+    "pyyaml>=6.0",
 ]
 
 
@@ -47,7 +48,7 @@ dev = [
 
 
 [build-system]
-requires = ["uv_build>=0.9.7,<0.11.0"]
+requires = ["uv_build>=0.8.7,<0.11.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]

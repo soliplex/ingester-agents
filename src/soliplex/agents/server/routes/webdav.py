@@ -2,11 +2,15 @@
 
 import json
 import logging
+import tempfile
+from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi import Depends
+from fastapi import File
 from fastapi import Form
 from fastapi import HTTPException
+from fastapi import UploadFile
 from pydantic import SecretStr
 
 from soliplex.agents.server.auth import get_current_user
@@ -153,12 +157,9 @@ async def run_inventory(
         raise HTTPException(status_code=500, detail=f"Error running inventory: {str(e)}") from e
 
 
-@webdav_router.post("/run-from-urls")
-async def run_from_urls(
-    urls_file: str = Form(
-        ...,
-        description="Path to file containing WebDAV URLs (one per line)",
-    ),
+@webdav_router.post("/run-from-file")
+async def run_from_file(
+    file: UploadFile = File(..., description="Text file containing WebDAV URLs (one per line)"),
     source: str = Form(..., description="Source name"),
     start: int = Form(0, description="Start index"),
     end: int | None = Form(None, description="End index"),
@@ -169,32 +170,38 @@ async def run_from_urls(
     webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
     webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
     webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
-    skip_hash_check: bool = Form(False, description="Skip hash check and ingest all URLs"),
     metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
-    Run document ingestion from a URL list file.
+    Run document ingestion from an uploaded URL list file.
 
-    Reads a file of WebDAV URLs (one per line) and ingests those specific files.
+    Accepts a file upload containing WebDAV URLs (one per line) and ingests those specific files.
     """
     try:
         pwd = webdav_password.get_secret_value() if webdav_password else None
         extra_metadata = json.loads(metadata) if metadata else None
-        result = await webdav_app.load_inventory_from_urls(
-            urls_file,
-            source,
-            start,
-            end,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            start_workflows=start_workflows,
-            priority=priority,
-            webdav_url=webdav_url,
-            webdav_username=webdav_username,
-            webdav_password=pwd,
-            skip_hash_check=skip_hash_check,
-            extra_metadata=extra_metadata,
-        )
+
+        content = await file.read()
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".txt", delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            result = await webdav_app.load_inventory_from_urls(
+                tmp_path,
+                source,
+                start,
+                end,
+                workflow_definition_id=workflow_definition_id,
+                param_set_id=param_set_id,
+                start_workflows=start_workflows,
+                priority=priority,
+                webdav_url=webdav_url,
+                webdav_username=webdav_username,
+                webdav_password=pwd,
+                extra_metadata=extra_metadata,
+            )
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
 
         return {
             "status": "ok",
@@ -206,7 +213,5 @@ async def run_from_urls(
             "errors": result.get("errors", []),
             "workflow_result": result.get("workflow_result"),
         }
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error running from URLs: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Error running from file: {str(e)}") from e

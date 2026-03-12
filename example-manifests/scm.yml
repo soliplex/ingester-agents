@@ -1,0 +1,24 @@
+id: test-scm
+name: test scm
+source: soliplex docs
+schedule:
+  cron: "0 0 * * *"
+components:
+  - name: soliplex
+    type: scm
+    platform: github
+    owner: soliplex
+    repo: soliplex
+    incremental: true
+  - name: ingester
+    type: scm
+    platform: github
+    owner: soliplex
+    repo: ingester
+    incremental: true
+  - name: flutter
+    type: scm
+    platform: github
+    owner: soliplex
+    repo: flutter
+    incremental: true
