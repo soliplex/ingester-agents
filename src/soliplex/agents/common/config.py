@@ -1,6 +1,7 @@
 """Common configuration utilities for file validation."""
 
 import json
+import logging
 import mimetypes
 from pathlib import Path
 
@@ -13,7 +14,19 @@ MIME_OVERRIDES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",  # noqa: E501
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",  # noqa: E501
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",  # noqa: E501
+    "text/plantuml": "puml",  # noqa: E501
+    "text/asciidoc": "adoc",
+    "text/svg+xml": "svg",  # noqa: E501
+    "application/x-latex": "latex",  # noqa: E501
+    "text/python": "python",  # noqa: E501
+    "text/yaml": "yaml",  # noqa: E501
+    "text/toml": "toml",
+    "text/json": "json",
+    "text/xml": "xml",
+    "text/javascript": "js",
 }
+
+logger = logging.getLogger(__name__)
 
 
 def check_config(config: list[dict], start: int = 0, end: int = None) -> list[dict]:
@@ -69,6 +82,7 @@ def detect_mime_type(path: str) -> str:
         for mime, ext in MIME_OVERRIDES.items():
             if path.endswith(ext):
                 return mime  # pragma: no cover
+        logger.error(f"unrecognized mime type for {path}")
         mime_type = "application/octet-stream"
     return mime_type
 

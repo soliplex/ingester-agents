@@ -25,7 +25,7 @@ PROCESSABLE_STATUSES = {STATUS_NEW, STATUS_MISMATCH}
 
 # Retry settings for 429 Too Many Requests
 RETRY_MAX_ATTEMPTS = 5
-RETRY_MAX_DELAY = 60
+RETRY_MAX_DELAY = 120
 
 
 class RateLimitError(Exception):
