@@ -640,29 +640,52 @@ class BaseSCMProvider(ABC):
 
             while page <= max_pages and not found_marker:
                 paginated_url = f"{url}&page={page}"
+                resp = None
 
-                async with session.get(paginated_url) as response:
-                    resp = await response.json()
-                    await self.validate_response(response, resp)
+                for attempt in range(settings.scm_retry_attempts):  # pragma: no branch
+                    try:
+                        await asyncio.sleep(random.uniform(0.01, 0.05))
+                        async with session.get(paginated_url) as response:
+                            if await self._should_retry_response(response, paginated_url, attempt):
+                                continue
+                            resp = await response.json()
+                            await self.validate_response(response, resp)
+                        break  # Success
+                    except (aiohttp.ClientError, TimeoutError) as e:
+                        backoff = min(
+                            settings.scm_retry_backoff_base * (2**attempt),
+                            settings.scm_retry_backoff_max,
+                        )
+                        logger.warning(
+                            "Request failed for %s: %s, retrying in %ss (attempt %d)",
+                            paginated_url,
+                            e,
+                            backoff,
+                            attempt + 1,
+                        )
+                        if attempt < settings.scm_retry_attempts - 1:
+                            await asyncio.sleep(backoff)
+                        else:
+                            raise
 
-                    page_commits = resp if isinstance(resp, list) else []
+                page_commits = resp if isinstance(resp, list) else []
 
-                    if not page_commits:
-                        break  # No more commits
+                if not page_commits:
+                    break  # No more commits
 
-                    for commit in page_commits:
-                        # If we have a marker and found it, stop collecting
-                        if since_commit_sha and commit.get("sha") == since_commit_sha:
-                            found_marker = True
-                            break
-                        # Add commits until we hit the marker
-                        commits.append(commit)
-
-                    # Stop if got fewer commits than limit (last page)
-                    if len(page_commits) < limit:
+                for commit in page_commits:
+                    # If we have a marker and found it, stop collecting
+                    if since_commit_sha and commit.get("sha") == since_commit_sha:
+                        found_marker = True
                         break
+                    # Add commits until we hit the marker
+                    commits.append(commit)
 
-                    page += 1
+                # Stop if got fewer commits than limit (last page)
+                if len(page_commits) < limit:
+                    break
+
+                page += 1
 
         logger.info(f"Found {len(commits)} new commits since {since_commit_sha or 'beginning'}")
         return commits
@@ -681,12 +704,7 @@ class BaseSCMProvider(ABC):
         """
         owner = owner or self.owner
         url = self.build_url(f"/repos/{owner}/{repo}/git/commits/{commit_sha}")
-
-        async with self.get_session() as session:
-            async with session.get(url) as response:
-                resp = await response.json()
-                await self.validate_response(response, resp)
-                return resp
+        return await self._fetch_json(url)
 
     async def get_single_file(
         self, repo: str, owner: str | None = None, file_path: str = "", branch: str = "main"
@@ -710,13 +728,8 @@ class BaseSCMProvider(ABC):
         encoded_path = quote(file_path, safe="")
         url = self.build_url(f"/repos/{owner}/{repo}/contents/{encoded_path}?ref={branch}")
 
-        async with self.get_session() as session:
-            async with session.get(url) as response:
-                resp = await response.json()
-                await self.validate_response(response, resp)
-
-                # Parse and return
-                return self.parse_file_rec(resp)
+        resp = await self._fetch_json(url)
+        return self.parse_file_rec(resp)
 
     async def create_repository(
         self,

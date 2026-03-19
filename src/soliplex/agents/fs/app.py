@@ -87,17 +87,21 @@ async def build_config(source_dir) -> list[dict]:
         if ext not in allowed_extensions and not path.is_dir():
             logger.info(f"skipping {path}")
             continue
-        adj_path = path.relative_to(Path(source_dir))
-        mime_type = detect_mime_type(str(adj_path))
-        rec = {
-            "path": str(adj_path),
-            "sha256": hashlib.sha256(path.read_bytes(), usedforsecurity=False).hexdigest(),
-            "metadata": {
-                "size": path.stat().st_size,
-                "content-type": mime_type,
-            },
-        }
-        config.append(rec)
+        try:
+            adj_path = path.relative_to(Path(source_dir))
+            mime_type = detect_mime_type(str(adj_path))
+            rec = {
+                "path": str(adj_path),
+                "sha256": hashlib.sha256(path.read_bytes(), usedforsecurity=False).hexdigest(),
+                "metadata": {
+                    "size": path.stat().st_size,
+                    "content-type": mime_type,
+                },
+            }
+            config.append(rec)
+        except OSError as e:
+            logger.warning("Skipping %s: %s", path, e)
+            continue
     return config
 
 
@@ -253,8 +257,12 @@ async def do_ingest(
     load_path = uri
     if not uri.startswith("/"):
         load_path = data_path / uri
-    async with aiofiles.open(load_path, "rb") as f:
-        doc_body = await f.read()
+    try:
+        async with aiofiles.open(load_path, "rb") as f:
+            doc_body = await f.read()
+    except OSError as e:
+        logger.exception("Failed to read file %s", load_path)
+        return {"error": f"Failed to read file {load_path}: {e}"}
 
     return await client.do_ingest(
         doc_body,

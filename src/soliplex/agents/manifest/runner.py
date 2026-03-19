@@ -42,7 +42,9 @@ def load_manifest(path: str) -> Manifest:
         raise ValueError(f"Invalid YAML in {path}: {e}") from e
     if not isinstance(raw, dict):
         raise TypeError(f"Expected a YAML mapping in {path}, got {type(raw).__name__}")
-    return Manifest(**raw)
+    manifest = Manifest(**raw)
+    manifest.manifest_dir = str(file_path.parent.resolve())
+    return manifest
 
 
 def load_manifests_with_paths(
@@ -214,6 +216,7 @@ async def _run_webdav_component(component: WebDAVComponent, manifest: Manifest, 
                 webdav_username=username,
                 webdav_password=password,
                 extra_metadata=metadata or None,
+                base_dir=manifest.manifest_dir,
                 **wf_params,
             )
         elif component.urls:
@@ -253,6 +256,7 @@ async def _run_web_component(component: WebComponent, manifest: Manifest, wf_par
         url=component.url,
         urls=component.urls,
         urls_file=component.urls_file,
+        base_dir=manifest.manifest_dir,
     )
     return await web_app.load_inventory(
         resolved,

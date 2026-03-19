@@ -36,16 +36,20 @@ async def validate_config(
     if not os.path.exists(config_file):
         raise HTTPException(status_code=404, detail=f"Path not found: {config_file}")
 
-    config, _ = await fs_app.resolve_config_path(config_file)
-    validated = fs_app.check_config(config)
-    invalid = [row for row in validated if "valid" in row and not row["valid"]]
+    try:
+        config, _ = await fs_app.resolve_config_path(config_file)
+        validated = fs_app.check_config(config)
+        invalid = [row for row in validated if "valid" in row and not row["valid"]]
 
-    return {
-        "status": "ok",
-        "total_files": len(config),
-        "invalid_count": len(invalid),
-        "invalid_files": invalid,
-    }
+        return {
+            "status": "ok",
+            "total_files": len(config),
+            "invalid_count": len(invalid),
+            "invalid_files": invalid,
+        }
+    except Exception as e:
+        logger.exception("Error validating config %s", config_file)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @fs_router.post("/build-config")
@@ -63,19 +67,23 @@ async def build_config(
     if not os.path.isdir(path):
         raise HTTPException(status_code=400, detail=f"Path is not a directory: {path}")
 
-    config = await fs_app.build_config(path)
+    try:
+        config = await fs_app.build_config(path)
 
-    # Optionally save to file
-    cfg_file = os.path.join(path, "inventory.json")
-    with open(cfg_file, "w") as f:
-        json.dump(config, f, indent=2)
+        # Optionally save to file
+        cfg_file = os.path.join(path, "inventory.json")
+        with open(cfg_file, "w") as f:
+            json.dump(config, f, indent=2)
 
-    return {
-        "status": "ok",
-        "files_count": len(config),
-        "inventory_file": cfg_file,
-        "inventory": config,
-    }
+        return {
+            "status": "ok",
+            "files_count": len(config),
+            "inventory_file": cfg_file,
+            "inventory": config,
+        }
+    except Exception as e:
+        logger.exception("Error building config for %s", path)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @fs_router.post("/check-status")
@@ -96,10 +104,14 @@ async def check_status(
     if not os.path.exists(config_file):
         raise HTTPException(status_code=404, detail=f"Path not found: {config_file}")
 
-    from soliplex.agents import client
+    try:
+        from soliplex.agents import client
 
-    config, _ = await fs_app.resolve_config_path(config_file)
-    to_process = await client.check_status(config, source)
+        config, _ = await fs_app.resolve_config_path(config_file)
+        to_process = await client.check_status(config, source)
+    except Exception as e:
+        logger.exception("Error checking status for %s", config_file)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     result = {
         "status": "ok",
@@ -135,28 +147,32 @@ async def run_inventory(
     if not os.path.exists(config_file):
         raise HTTPException(status_code=404, detail=f"Path not found: {config_file}")
 
-    extra_metadata = json.loads(metadata) if metadata else None
+    try:
+        extra_metadata = json.loads(metadata) if metadata else None
 
-    # Path resolution now handled by load_inventory internally
-    result = await fs_app.load_inventory(
-        config_file,
-        source,
-        start,
-        end,
-        workflow_definition_id=workflow_definition_id,
-        param_set_id=param_set_id,
-        start_workflows=start_workflows,
-        priority=priority,
-        extra_metadata=extra_metadata,
-    )
+        # Path resolution now handled by load_inventory internally
+        result = await fs_app.load_inventory(
+            config_file,
+            source,
+            start,
+            end,
+            workflow_definition_id=workflow_definition_id,
+            param_set_id=param_set_id,
+            start_workflows=start_workflows,
+            priority=priority,
+            extra_metadata=extra_metadata,
+        )
 
-    return {
-        "status": "ok",
-        "inventory_count": len(result.get("inventory", [])),
-        "to_process_count": len(result.get("to_process", [])),
-        "ingested_count": len(result.get("ingested", [])),
-        "error_count": len(result.get("errors", [])),
-        "batch_id": result.get("batch_id"),
-        "errors": result.get("errors", []),
-        "workflow_result": result.get("workflow_result"),
-    }
+        return {
+            "status": "ok",
+            "inventory_count": len(result.get("inventory", [])),
+            "to_process_count": len(result.get("to_process", [])),
+            "ingested_count": len(result.get("ingested", [])),
+            "error_count": len(result.get("errors", [])),
+            "batch_id": result.get("batch_id"),
+            "errors": result.get("errors", []),
+            "workflow_result": result.get("workflow_result"),
+        }
+    except Exception as e:
+        logger.exception("Error running inventory for %s", config_file)
+        raise HTTPException(status_code=500, detail=str(e)) from e

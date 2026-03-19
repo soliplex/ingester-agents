@@ -2307,3 +2307,57 @@ async def test_iter_repo_files_404_with_errors_list_but_different_error(provider
             with pytest.raises(SCMException):
                 async for _ in provider.iter_repo_files("test_repo", owner="test_owner", branch="main"):
                     pass
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_retry_on_network_error(provider, mock_response):
+    """Test list_commits_since retries on network error and raises after max attempts."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.get.side_effect = aiohttp.ClientError("Connection refused")
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_retry_attempts = 2
+            mock_settings.scm_retry_backoff_base = 0.01
+            mock_settings.scm_retry_backoff_max = 0.02
+
+            with pytest.raises(aiohttp.ClientError):
+                await provider.list_commits_since("test_repo", owner="test_owner")
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_retry_on_rate_limit(provider, mock_response):
+    """Test list_commits_since retries on 429 rate limit then succeeds."""
+    from unittest.mock import MagicMock
+
+    from tests.unit.conftest import create_async_context_manager
+
+    commits_data = [{"sha": "abc123", "message": "Commit 1"}]
+
+    # First call returns 429, second returns success
+    resp_429 = mock_response(429, {})
+    resp_429.headers = {"Retry-After": "0"}
+    resp_200 = mock_response(200, commits_data)
+
+    with patch.object(provider, "get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.get.side_effect = [
+            create_async_context_manager(resp_429),
+            create_async_context_manager(resp_200),
+        ]
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        with patch("soliplex.agents.scm.base.settings") as mock_settings:
+            mock_settings.scm_retry_attempts = 3
+            mock_settings.scm_retry_backoff_base = 0.01
+            mock_settings.scm_retry_backoff_max = 0.02
+
+            result = await provider.list_commits_since("test_repo", owner="test_owner")
+
+            assert len(result) == 1
+            assert result[0]["sha"] == "abc123"

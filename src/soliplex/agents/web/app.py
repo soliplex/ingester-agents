@@ -36,13 +36,15 @@ async def resolve_urls(
     url: str | None = None,
     urls: list[str] | None = None,
     urls_file: str | None = None,
+    base_dir: str | None = None,
 ) -> list[str]:
     """Flatten WebComponent source fields to a URL list.
 
     Args:
         url: Single URL.
         urls: List of URLs.
-        urls_file: Path to file with one URL per line.
+        urls_file: Path or S3 URL to file with one URL per line.
+        base_dir: Optional directory for resolving relative local paths.
 
     Returns:
         List of resolved URLs.
@@ -52,11 +54,9 @@ async def resolve_urls(
     if urls is not None:
         return list(urls)
     if urls_file is not None:
-        import aiofiles
+        from soliplex.agents.common.urls_file import read_urls_file
 
-        async with aiofiles.open(urls_file) as f:
-            content = await f.read()
-        return [line.strip() for line in content.splitlines() if line.strip()]
+        return await read_urls_file(urls_file, base_dir)
     return []
 
 

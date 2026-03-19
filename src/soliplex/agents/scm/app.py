@@ -359,6 +359,7 @@ async def incremental_sync(
     changed_files = set()
     removed_files = set()
     file_data = []
+    fetch_errors = False
 
     if content_filter in (ContentFilter.ALL, ContentFilter.FILES):
         new_commits = await impl.list_commits_since(repo_name, owner, since_commit_sha=last_commit_sha, branch=branch)
@@ -427,6 +428,7 @@ async def incremental_sync(
                 file = await impl.get_single_file(repo_name, owner, file_path, branch)
                 file_data.append(file)
             except Exception as e:
+                fetch_errors = True
                 logger.exception(f"Failed to fetch {file_path}", exc_info=e)
 
         logger.info(f"Fetched {len(file_data)} changed files with allowed extensions")
@@ -491,10 +493,18 @@ async def incremental_sync(
         logger.info("Starting workflows")
         wf_res = await client.start_workflows_for_batch(batch_id, workflow_definition_id, param_set_id, priority)
 
-    # Update sync state with latest commit
+    # Update sync state with latest commit only if no fetch/ingest errors
     latest_commit_sha = last_commit_sha
-    if new_commits:
+    has_sync_errors = fetch_errors or len(errors) > 0
+    if new_commits and not has_sync_errors:
         latest_commit_sha = new_commits[0]["sha"]
+    elif has_sync_errors:
+        logger.warning(
+            "Not advancing sync state past %s due to errors (fetch_errors=%s, ingest_errors=%d)",
+            last_commit_sha,
+            fetch_errors,
+            len(errors),
+        )
     update_result = await client.update_sync_state(
         source,
         latest_commit_sha,

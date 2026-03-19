@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import Form
+from fastapi import HTTPException
 from fastapi import Query
 
 from soliplex.agents.config import SCM
@@ -33,17 +34,21 @@ async def list_issues(
 
     Returns all issues with their titles, bodies, and comments.
     """
-    provider = scm_app.get_scm(scm)
-    issues = await provider.list_issues(repo_name, owner, add_comments=True)
+    try:
+        provider = scm_app.get_scm(scm)
+        issues = await provider.list_issues(repo_name, owner, add_comments=True)
 
-    return {
-        "status": "ok",
-        "scm": scm.value,
-        "repo": repo_name,
-        "owner": owner,
-        "issue_count": len(issues),
-        "issues": issues,
-    }
+        return {
+            "status": "ok",
+            "scm": scm.value,
+            "repo": repo_name,
+            "owner": owner,
+            "issue_count": len(issues),
+            "issues": issues,
+        }
+    except Exception as e:
+        logger.exception("Error listing issues for %s/%s", owner, repo_name)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @scm_router.get("/{scm}/repo")
@@ -57,29 +62,33 @@ async def get_repo(
 
     Returns file metadata filtered by allowed extensions.
     """
-    provider = scm_app.get_scm(scm)
-    files = await provider.list_repo_files(repo_name, owner, settings.extensions)
+    try:
+        provider = scm_app.get_scm(scm)
+        files = await provider.list_repo_files(repo_name, owner, settings.extensions)
 
-    # Return file metadata without the full file bytes
-    file_list = [
-        {
-            "name": f.get("name"),
-            "uri": f.get("uri"),
-            "sha256": f.get("sha256"),
-            "content_type": f.get("content-type"),
-            "last_updated": f.get("last_updated"),
+        # Return file metadata without the full file bytes
+        file_list = [
+            {
+                "name": f.get("name"),
+                "uri": f.get("uri"),
+                "sha256": f.get("sha256"),
+                "content_type": f.get("content-type"),
+                "last_updated": f.get("last_updated"),
+            }
+            for f in files
+        ]
+
+        return {
+            "status": "ok",
+            "scm": scm.value,
+            "repo": repo_name,
+            "owner": owner,
+            "file_count": len(file_list),
+            "files": file_list,
         }
-        for f in files
-    ]
-
-    return {
-        "status": "ok",
-        "scm": scm.value,
-        "repo": repo_name,
-        "owner": owner,
-        "file_count": len(file_list),
-        "files": file_list,
-    }
+    except Exception as e:
+        logger.exception("Error listing repo files for %s/%s", owner, repo_name)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @scm_router.post("/run-inventory")
@@ -99,34 +108,38 @@ async def run_inventory(
 
     Ingests files, issues, or both from the repository based on content_filter.
     """
-    import json
+    try:
+        import json
 
-    extra_metadata = json.loads(metadata) if metadata else None
+        extra_metadata = json.loads(metadata) if metadata else None
 
-    result = await scm_app.load_inventory(
-        scm,
-        repo_name,
-        owner,
-        start_workflows=start_workflows,
-        workflow_definition_id=workflow_definition_id,
-        param_set_id=param_set_id,
-        priority=priority,
-        content_filter=content_filter,
-        extra_metadata=extra_metadata,
-    )
+        result = await scm_app.load_inventory(
+            scm,
+            repo_name,
+            owner,
+            start_workflows=start_workflows,
+            workflow_definition_id=workflow_definition_id,
+            param_set_id=param_set_id,
+            priority=priority,
+            content_filter=content_filter,
+            extra_metadata=extra_metadata,
+        )
 
-    return {
-        "status": "ok",
-        "scm": scm.value,
-        "repo": repo_name,
-        "owner": owner,
-        "inventory_count": len(result.get("inventory", [])),
-        "to_process_count": len(result.get("to_process", [])),
-        "ingested_count": len(result.get("ingested", [])),
-        "error_count": len(result.get("errors", [])),
-        "errors": result.get("errors", []),
-        "workflow_result": result.get("workflow_result"),
-    }
+        return {
+            "status": "ok",
+            "scm": scm.value,
+            "repo": repo_name,
+            "owner": owner,
+            "inventory_count": len(result.get("inventory", [])),
+            "to_process_count": len(result.get("to_process", [])),
+            "ingested_count": len(result.get("ingested", [])),
+            "error_count": len(result.get("errors", [])),
+            "errors": result.get("errors", []),
+            "workflow_result": result.get("workflow_result"),
+        }
+    except Exception as e:
+        logger.exception("Error running inventory for %s/%s", owner, repo_name)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @scm_router.post("/incremental-sync")
@@ -148,42 +161,46 @@ async def run_incremental_sync(
     Only fetches and processes content that changed since last sync.
     Falls back to full sync if no sync state exists.
     """
-    import json
+    try:
+        import json
 
-    extra_metadata = json.loads(metadata) if metadata else None
+        extra_metadata = json.loads(metadata) if metadata else None
 
-    result = await scm_app.incremental_sync(
-        scm,
-        repo_name,
-        owner,
-        branch=branch,
-        start_workflows=start_workflows,
-        workflow_definition_id=workflow_definition_id,
-        param_set_id=param_set_id,
-        priority=priority,
-        content_filter=content_filter,
-        extra_metadata=extra_metadata,
-    )
+        result = await scm_app.incremental_sync(
+            scm,
+            repo_name,
+            owner,
+            branch=branch,
+            start_workflows=start_workflows,
+            workflow_definition_id=workflow_definition_id,
+            param_set_id=param_set_id,
+            priority=priority,
+            content_filter=content_filter,
+            extra_metadata=extra_metadata,
+        )
 
-    if "error" in result:
+        if "error" in result:
+            return {
+                "status": "error",
+                "error": result["error"],
+            }
+
         return {
-            "status": "error",
-            "error": result["error"],
+            "status": result.get("status", "ok"),
+            "scm": scm.value,
+            "repo": repo_name,
+            "owner": owner,
+            "branch": branch,
+            "commits_processed": result.get("commits_processed", 0),
+            "files_changed": result.get("files_changed", 0),
+            "files_removed": result.get("files_removed", 0),
+            "ingested_count": len(result.get("ingested", [])),
+            "ingested": result.get("ingested", []),
+            "error_count": len(result.get("errors", [])),
+            "errors": result.get("errors", []),
+            "workflow_result": result.get("workflow_result"),
+            "new_commit_sha": result.get("new_commit_sha"),
         }
-
-    return {
-        "status": result.get("status", "ok"),
-        "scm": scm.value,
-        "repo": repo_name,
-        "owner": owner,
-        "branch": branch,
-        "commits_processed": result.get("commits_processed", 0),
-        "files_changed": result.get("files_changed", 0),
-        "files_removed": result.get("files_removed", 0),
-        "ingested_count": len(result.get("ingested", [])),
-        "ingested": result.get("ingested", []),
-        "error_count": len(result.get("errors", [])),
-        "errors": result.get("errors", []),
-        "workflow_result": result.get("workflow_result"),
-        "new_commit_sha": result.get("new_commit_sha"),
-    }
+    except Exception as e:
+        logger.exception("Error in incremental sync for %s/%s", owner, repo_name)
+        raise HTTPException(status_code=500, detail=str(e)) from e

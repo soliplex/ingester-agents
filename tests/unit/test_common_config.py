@@ -290,3 +290,30 @@ class TestReadConfig:
 
         with pytest.raises(ValidationError):
             await read_config(str(config_file))
+
+    @pytest.mark.asyncio
+    async def test_read_config_invalid_json(self, tmp_path):
+        """Test read_config with malformed JSON raises ValidationError."""
+        config_file = tmp_path / "inventory.json"
+        config_file.write_text("not valid json {{{{")
+
+        with pytest.raises(ValidationError):
+            await read_config(str(config_file))
+
+    @pytest.mark.asyncio
+    async def test_read_config_missing_metadata_size(self, tmp_path):
+        """Test read_config handles entries missing metadata.size gracefully."""
+        config_data = [
+            {"path": "a.pdf", "metadata": {"size": 200}},
+            {"path": "b.pdf", "metadata": {}},
+            {"path": "c.pdf"},
+        ]
+        config_file = tmp_path / "inventory.json"
+        config_file.write_text(json.dumps(config_data))
+
+        result = await read_config(str(config_file))
+
+        assert len(result) == 3
+        # Entries without size should sort as 0
+        assert result[0]["path"] in ("b.pdf", "c.pdf")
+        assert result[-1]["path"] == "a.pdf"

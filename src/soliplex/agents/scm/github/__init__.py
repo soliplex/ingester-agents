@@ -1,6 +1,8 @@
 """GitHub SCM provider implementation."""
 
+import asyncio
 import logging
+import random
 from typing import Any
 
 import aiohttp
@@ -88,6 +90,27 @@ class GitHubProvider(BaseSCMProvider):
         url = self.build_url(f"/repos/{owner}/{repo}/git/blobs/{sha}")
         logger.debug(f"Fetching blob from {url}")
 
-        async with session.get(url) as response:
-            response.raise_for_status()
-            return await response.read()
+        for attempt in range(settings.scm_retry_attempts):  # pragma: no branch
+            try:
+                await asyncio.sleep(random.uniform(0.01, 0.05))
+                async with session.get(url) as response:
+                    if await self._should_retry_response(response, url, attempt):
+                        continue
+                    response.raise_for_status()
+                    return await response.read()
+            except (aiohttp.ClientError, TimeoutError) as e:
+                backoff = min(
+                    settings.scm_retry_backoff_base * (2**attempt),
+                    settings.scm_retry_backoff_max,
+                )
+                logger.warning(
+                    "Blob fetch failed for %s: %s, retrying in %ss (attempt %d)",
+                    url,
+                    e,
+                    backoff,
+                    attempt + 1,
+                )
+                if attempt < settings.scm_retry_attempts - 1:
+                    await asyncio.sleep(backoff)
+                else:
+                    raise

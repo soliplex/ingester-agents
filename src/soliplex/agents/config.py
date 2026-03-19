@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     # Manifest settings
     manifest_dir: str | None = None  # Directory with manifest .yml files for scheduling
 
+    # S3 settings
+    s3_endpoint_url: str | None = None  # Custom S3 endpoint (for MinIO, etc.)
+
     # Git CLI settings
     scm_use_git_cli: bool = False  # Use git CLI instead of API for file operations
     scm_git_cli_timeout: int = 300  # Timeout for git operations (seconds)
@@ -271,6 +274,7 @@ class Manifest(BaseModel):
     schedule: Schedule | None = None
     config: ManifestConfig | None = None
     components: list[Component]
+    manifest_dir: str | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def validate_unique_component_names(self):

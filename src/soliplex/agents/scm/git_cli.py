@@ -337,8 +337,8 @@ class GitCliWrapper:
         Ensure repository is cloned and up to date.
 
         If repo doesn't exist, clone it.
-        If repo exists, pull updates. If pull fails, delete and re-clone.
-        After success, run git clean.
+        If repo exists, clean untracked files and pull updates.
+        On any failure, delete and re-clone.
 
         Args:
             base_url: Git server base URL
@@ -353,21 +353,76 @@ class GitCliWrapper:
             Path to repository directory
         """
         repo_dir = self.get_repo_dir(owner, repo)
+        clone_args = (
+            base_url,
+            owner,
+            repo,
+            token,
+            username,
+            password,
+            branch,
+        )
 
         if repo_dir.exists() and (repo_dir / ".git").exists():
-            # Repository exists, try to pull
-            if await self.pull(repo_dir):
+            try:
                 await self.clean(repo_dir)
-                return repo_dir
-            else:
-                # Pull failed, delete and re-clone
-                logger.info(f"Pull failed, re-cloning {owner}/{repo}")
-                shutil.rmtree(repo_dir)
+                if await self.pull(repo_dir):
+                    return repo_dir
+            except Exception:
+                logger.warning(
+                    "Unexpected error updating %s/%s, will re-clone",
+                    owner,
+                    repo,
+                    exc_info=True,
+                )
+            # Pull failed or unexpected error — nuke and re-clone
+            await self.nuke_and_reclone(
+                repo_dir,
+                *clone_args,
+            )
+            return repo_dir
 
-        # Clone repository
-        await self.clone(base_url, owner, repo, token, username, password, branch)
+        # No local checkout — clone fresh
+        await self.clone(*clone_args)
         await self.clean(repo_dir)
         return repo_dir
+
+    async def nuke_and_reclone(
+        self,
+        repo_dir: Path,
+        base_url: str,
+        owner: str,
+        repo: str,
+        token: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        branch: str = "main",
+    ) -> None:
+        """
+        Delete local checkout and re-clone from remote.
+
+        Args:
+            repo_dir: Path to existing repository directory
+            base_url: Git server base URL
+            owner: Repository owner
+            repo: Repository name
+            token: Authentication token
+            username: Username for basic auth
+            password: Password for basic auth
+            branch: Branch name
+        """
+        logger.info("Deleting and re-cloning %s/%s", owner, repo)
+        shutil.rmtree(repo_dir, ignore_errors=True)
+        await self.clone(
+            base_url,
+            owner,
+            repo,
+            token,
+            username,
+            password,
+            branch,
+        )
+        await self.clean(repo_dir)
 
     async def delete_repo(self, owner: str, repo: str) -> None:
         """Delete local repository clone."""
