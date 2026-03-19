@@ -82,6 +82,8 @@ def detect_mime_type(path: str) -> str:
         for mime, ext in MIME_OVERRIDES.items():
             if path.endswith(ext):
                 return mime  # pragma: no cover
+        if "/issues/" in path:  # pragma: no cover
+            return "text/markdown"  # issues don't have mime types so use markdown
         logger.error(f"unrecognized mime type for {path}")
         mime_type = "application/octet-stream"
     return mime_type

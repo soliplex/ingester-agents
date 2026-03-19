@@ -164,7 +164,12 @@ async def load_inventory(
         to_process = to_process[start:end]
     ret = {"inventory": config, "to_process": to_process}
     if len(to_process) == 0:
-        logger.info("nothing to process. exiting")
+        logger.info("nothing to process")
+        if start_workflows:
+            batch_id = await client.find_or_create_batch(source)
+            ret["workflow_result"] = await client.start_workflows_for_batch(
+                batch_id, workflow_definition_id, param_set_id, priority
+            )
         return ret
 
     found_batch_id = await client.find_batch_for_source(source)

@@ -700,3 +700,25 @@ async def test_check_status_with_delete_stale(mock_response):
 
         assert len(result) == 1
         assert result[0]["uri"] == "file1.md"
+
+
+# --- find_or_create_batch ---
+
+
+@pytest.mark.asyncio
+async def test_find_or_create_batch_existing():
+    """Test find_or_create_batch returns existing batch."""
+    with patch.object(client, "find_batch_for_source", new_callable=AsyncMock, return_value=42):
+        result = await client.find_or_create_batch("src")
+    assert result == 42
+
+
+@pytest.mark.asyncio
+async def test_find_or_create_batch_creates_new():
+    """Test find_or_create_batch creates batch when none exists."""
+    with (
+        patch.object(client, "find_batch_for_source", new_callable=AsyncMock, return_value=None),
+        patch.object(client, "create_batch", new_callable=AsyncMock, return_value=99),
+    ):
+        result = await client.find_or_create_batch("src")
+    assert result == 99

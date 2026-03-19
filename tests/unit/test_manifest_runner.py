@@ -63,6 +63,70 @@ class TestLoadManifest:
             runner.load_manifest(str(f))
 
 
+# --- load_manifests_with_paths ---
+
+
+class TestLoadManifestsWithPaths:
+    def test_returns_manifest_path_pairs(self, tmp_path):
+        for name, mid in [("a.yml", "a"), ("b.yaml", "b")]:
+            (tmp_path / name).write_text(
+                textwrap.dedent(f"""\
+                id: {mid}
+                name: Manifest {mid}
+                source: src-{mid}
+                components:
+                  - type: fs
+                    name: comp
+                    path: /data
+            """)
+            )
+        pairs = runner.load_manifests_with_paths(str(tmp_path))
+        assert len(pairs) == 2
+        ids = {m.id for m, _ in pairs}
+        assert ids == {"a", "b"}
+        for _m, p in pairs:
+            assert p.endswith((".yml", ".yaml"))
+
+    def test_skips_invalid_with_warning(self, tmp_path, caplog):
+        (tmp_path / "good.yml").write_text(
+            textwrap.dedent("""\
+            id: good
+            name: Good
+            source: src
+            components:
+              - type: fs
+                name: comp
+                path: /data
+        """)
+        )
+        (tmp_path / "bad.yml").write_text(":::invalid:::")
+
+        with caplog.at_level(logging.WARNING):
+            pairs = runner.load_manifests_with_paths(str(tmp_path))
+        assert len(pairs) == 1
+        assert pairs[0][0].id == "good"
+        assert "Skipping invalid manifest" in caplog.text
+
+    def test_duplicate_ids_raises(self, tmp_path):
+        for name in ["a.yml", "b.yml"]:
+            (tmp_path / name).write_text(
+                textwrap.dedent("""\
+                id: same-id
+                name: Dup
+                source: src
+                components:
+                  - type: fs
+                    name: comp
+                    path: /data
+            """)
+            )
+        with pytest.raises(ValueError, match="Duplicate manifest IDs"):
+            runner.load_manifests_with_paths(str(tmp_path))
+
+    def test_empty_dir(self, tmp_path):
+        assert runner.load_manifests_with_paths(str(tmp_path)) == []
+
+
 # --- load_manifests_from_dir ---
 
 
