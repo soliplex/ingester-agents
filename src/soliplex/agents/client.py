@@ -169,6 +169,21 @@ async def create_batch(source: str, name: str) -> int:
     return res["batch_id"]
 
 
+async def find_or_create_batch(source: str) -> int:
+    """Find an existing batch for *source*, or create one.
+
+    Args:
+        source: Source identifier.
+
+    Returns:
+        Batch ID (existing or newly created).
+    """
+    batch_id = await find_batch_for_source(source)
+    if batch_id is not None:
+        return batch_id
+    return await create_batch(source, source)
+
+
 async def start_workflows_for_batch(
     batch_id: int,
     workflow_definition_id: str,
@@ -195,7 +210,7 @@ async def start_workflows_for_batch(
 
     form.add_field("param_id", param_id)
     form.add_field("workflow_definition_id", workflow_definition_id)
-
+    logger.info(f"Starting workflows for batch {batch_id} with priority {priority} and param {param_id}")
     res = await _post_request("/batch/start-workflows", form)
 
     if "workflows" in res:

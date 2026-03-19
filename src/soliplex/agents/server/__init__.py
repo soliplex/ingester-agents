@@ -4,8 +4,10 @@ FastAPI server for Soliplex Agents.
 Provides REST API endpoints for filesystem, SCM, and WebDAV ingestion agents.
 """
 
+import asyncio
 import importlib
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi import FastAPI
@@ -23,6 +25,85 @@ from .routes.webdav import webdav_router
 logger = logging.getLogger(__name__)
 
 
+async def _run_manifest_at_startup(manifest_path: str) -> None:
+    """Run a single manifest and log the outcome."""
+    from soliplex.agents.manifest import runner as manifest_runner
+
+    try:
+        m = manifest_runner.load_manifest(manifest_path)
+        result = await manifest_runner.run_manifest(m)
+        count = len(result.get("results", []))
+        logger.info(
+            "Startup manifest '%s' completed: %d components",
+            m.id,
+            count,
+        )
+    except Exception:
+        logger.exception("Error running startup manifest %s", manifest_path)
+
+
+def setup_manifest_schedules(crons) -> None:
+    """Register cron jobs for scheduled manifests and fire-and-forget
+    tasks for unscheduled ones.
+
+    Args:
+        crons: A ``fastapi_crons.Crons`` instance used to register
+            cron handlers.
+    """
+    from soliplex.agents.manifest import runner as manifest_runner
+
+    if not settings.manifest_dir:
+        return
+
+    manifest_path = Path(settings.manifest_dir)
+    if not manifest_path.is_dir():
+        logger.warning(
+            "manifest_dir is not a directory: %s",
+            settings.manifest_dir,
+        )
+        return
+
+    try:
+        pairs = manifest_runner.load_manifests_with_paths(settings.manifest_dir)
+    except ValueError:
+        logger.exception("Error loading manifests from directory")
+        return
+
+    for m_obj, yml_path in pairs:
+        if m_obj.schedule:
+
+            def make_handler(mpath):
+                async def handler():
+                    loaded = manifest_runner.load_manifest(mpath)
+                    result = await manifest_runner.run_manifest(loaded)
+                    logger.info(
+                        "Manifest %s completed: %d components",
+                        mpath,
+                        len(result.get("results", [])),
+                    )
+
+                return handler
+
+            crons.cron(
+                m_obj.schedule.cron,
+                name=f"manifest_{m_obj.id}",
+            )(make_handler(yml_path))
+            logger.info(
+                "Scheduled manifest '%s' cron='%s'",
+                m_obj.id,
+                m_obj.schedule.cron,
+            )
+        else:
+            asyncio.create_task(
+                _run_manifest_at_startup(yml_path),
+                name=f"startup_manifest_{m_obj.id}",
+            )
+            logger.info(
+                "Queued startup run for manifest '%s'",
+                m_obj.id,
+            )
+
+
 async def lifespan(app: FastAPI):
     """Manage app lifecycle."""
 
@@ -32,6 +113,10 @@ async def lifespan(app: FastAPI):
         logger.info(f"API prefix: {settings.api_prefix}")
     if settings.root_path:
         logger.info(f"Root path: {settings.root_path}")
+
+    if settings.scheduler_enabled:
+        setup_manifest_schedules(_crons)
+
     yield
     logger.info("soliplex-agents server stopped")
 
@@ -71,18 +156,18 @@ async def health_check():
     return {"status": "healthy"}
 
 
-# start schedules if needed
+# Initialise the cron scheduler (module-level so lifespan can use it)
+_crons = None
 if settings.scheduler_enabled:
     from fastapi_crons import Crons
     from fastapi_crons import SQLiteStateBackend
     from fastapi_crons import get_cron_router
 
-    # Custom database path
     state_backend = SQLiteStateBackend(db_path=":memory:")
-    crons = Crons(app, state_backend=state_backend)
+    _crons = Crons(app, state_backend=state_backend)
     app.include_router(get_cron_router())
 
-    @crons.cron("*/1 * * * *", name="run_scheduled_jobs")
+    @_crons.cron("*/1 * * * *", name="run_scheduled_jobs")
     async def run_jobs():
         logger.info("start jobs")
         if settings.scheduler_modules:
@@ -91,45 +176,11 @@ if settings.scheduler_enabled:
                     module = importlib.import_module(module_name)
                     await module.run_schedule_minute()
                 except Exception as e:
-                    logger.exception(f"Error running module {module_name}", exc_info=e)
+                    logger.exception(
+                        f"Error running module {module_name}",
+                        exc_info=e,
+                    )
         logger.info("end jobs")
-
-    # Register manifest cron schedules
-    if settings.manifest_dir:
-        from pathlib import Path
-
-        from soliplex.agents.manifest import runner as manifest_runner
-
-        manifest_path = Path(settings.manifest_dir)
-        if manifest_path.is_dir():
-            try:
-                manifests_with_paths = []
-                for yml_file in sorted(manifest_path.glob("*.yml")) + sorted(manifest_path.glob("*.yaml")):
-                    try:
-                        m = manifest_runner.load_manifest(str(yml_file))
-                        manifests_with_paths.append((m, str(yml_file)))
-                    except Exception:
-                        logger.exception(f"Error loading manifest {yml_file}")
-                # Validate unique IDs
-                ids = [m.id for m, _ in manifests_with_paths]
-                duplicates = [i for i in ids if ids.count(i) > 1]
-                if duplicates:
-                    logger.error(f"Duplicate manifest IDs found: {set(duplicates)}. Skipping manifest scheduling.")
-                else:
-                    for m_obj, yml_path in manifests_with_paths:
-                        if m_obj.schedule:
-
-                            def make_handler(mpath):
-                                async def handler():
-                                    result = await manifest_runner.run_manifest(manifest_runner.load_manifest(mpath))
-                                    logger.info(f"Manifest {mpath} completed: {len(result.get('results', []))} components")
-
-                                return handler
-
-                            crons.cron(m_obj.schedule.cron, name=f"manifest_{m_obj.id}")(make_handler(yml_path))
-                            logger.info(f"Scheduled manifest '{m_obj.id}' cron='{m_obj.schedule.cron}'")
-            except Exception:
-                logger.exception("Error setting up manifest scheduling")
 
 
 # Include the parent router in the app

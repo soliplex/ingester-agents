@@ -67,7 +67,12 @@ async def load_inventory(
     ret = {"inventory": data, "to_process": to_process, "ingested": ingested}
     logger.info(f"found {len(to_process)} to process")
     if len(to_process) == 0:
-        logger.info("nothing to process. exiting")
+        logger.info("nothing to process")
+        if start_workflows:
+            batch_id = await client.find_or_create_batch(source)
+            ret["workflow_result"] = await client.start_workflows_for_batch(
+                batch_id, workflow_definition_id, param_set_id, priority
+            )
         return ret
     found_batch_id = await client.find_batch_for_source(source)
     if found_batch_id:
@@ -360,13 +365,19 @@ async def incremental_sync(
 
         if not new_commits and not issues:
             logger.info("No new commits since last sync, repository is up to date")
-            return {
+            ret = {
                 "status": "up-to-date",
                 "commits_processed": 0,
                 "files_changed": 0,
                 "ingested": [],
                 "errors": [],
             }
+            if start_workflows:
+                batch_id = await client.find_or_create_batch(source)
+                ret["workflow_result"] = await client.start_workflows_for_batch(
+                    batch_id, workflow_definition_id, param_set_id, priority
+                )
+            return ret
 
         logger.info(f"Found {len(new_commits)} new commits to process")
 
@@ -421,13 +432,19 @@ async def incremental_sync(
         logger.info(f"Fetched {len(file_data)} changed files with allowed extensions")
     elif not issues:
         logger.info("No new issues since last sync, repository is up to date")
-        return {
+        ret = {
             "status": "up-to-date",
             "commits_processed": 0,
             "files_changed": 0,
             "ingested": [],
             "errors": [],
         }
+        if start_workflows:
+            batch_id = await client.find_or_create_batch(source)
+            ret["workflow_result"] = await client.start_workflows_for_batch(
+                batch_id, workflow_definition_id, param_set_id, priority
+            )
+        return ret
 
     # Get or create batch
     found_batch_id = await client.find_batch_for_source(source)

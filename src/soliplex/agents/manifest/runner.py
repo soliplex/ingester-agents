@@ -45,6 +45,40 @@ def load_manifest(path: str) -> Manifest:
     return Manifest(**raw)
 
 
+def load_manifests_with_paths(
+    dir_path: str,
+) -> list[tuple[Manifest, str]]:
+    """Load all YAML manifests from a directory, returning file paths.
+
+    Skips files that fail to parse with a warning log.
+    Validates that all manifest IDs are unique.
+
+    Args:
+        dir_path: Path to directory containing .yml/.yaml files.
+
+    Returns:
+        List of (Manifest, file_path) tuples.
+
+    Raises:
+        ValueError: If duplicate manifest IDs are found.
+    """
+    directory = Path(dir_path)
+    pairs: list[tuple[Manifest, str]] = []
+    for yml_file in sorted(directory.glob("*.yml")) + sorted(directory.glob("*.yaml")):
+        try:
+            pairs.append((load_manifest(str(yml_file)), str(yml_file)))
+        except Exception:
+            logger.warning(
+                f"Skipping invalid manifest {yml_file}",
+                exc_info=True,
+            )
+    ids = [m.id for m, _ in pairs]
+    duplicates = [i for i in set(ids) if ids.count(i) > 1]
+    if duplicates:
+        raise ValueError(f"Duplicate manifest IDs found: {sorted(duplicates)}")
+    return pairs
+
+
 def load_manifests_from_dir(dir_path: str) -> list[Manifest]:
     """Load all YAML manifests from a directory.
 
@@ -60,19 +94,7 @@ def load_manifests_from_dir(dir_path: str) -> list[Manifest]:
     Raises:
         ValueError: If duplicate manifest IDs are found.
     """
-    directory = Path(dir_path)
-    manifests = []
-    for yml_file in sorted(directory.glob("*.yml")) + sorted(directory.glob("*.yaml")):
-        try:
-            manifests.append(load_manifest(str(yml_file)))
-        except Exception:
-            logger.warning(f"Skipping invalid manifest {yml_file}", exc_info=True)
-    # Validate unique IDs
-    ids = [m.id for m in manifests]
-    duplicates = [i for i in set(ids) if ids.count(i) > 1]
-    if duplicates:
-        raise ValueError(f"Duplicate manifest IDs found: {sorted(duplicates)}")
-    return manifests
+    return [m for m, _ in load_manifests_with_paths(dir_path)]
 
 
 @contextmanager
