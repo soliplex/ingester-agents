@@ -210,7 +210,7 @@ async def start_workflows_for_batch(
 
     form.add_field("param_id", param_id)
     form.add_field("workflow_definition_id", workflow_definition_id)
-
+    logger.info(f"Starting workflows for batch {batch_id} with priority {priority} and param {param_id}")
     res = await _post_request("/batch/start-workflows", form)
 
     if "workflows" in res:
