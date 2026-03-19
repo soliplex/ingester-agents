@@ -615,15 +615,22 @@ class TestGitCliWrapper:
 
     @pytest.mark.asyncio
     async def test_ensure_repo_pulls_when_exists(self, wrapper, temp_dir):
-        """Test that ensure_repo pulls when repo exists."""
+        """Test ensure_repo cleans then pulls when repo exists."""
         repo_dir = temp_dir / "owner" / "repo"
         repo_dir.mkdir(parents=True)
         (repo_dir / ".git").mkdir()
 
-        with patch.object(wrapper, "pull") as mock_pull:
-            with patch.object(wrapper, "clean") as mock_clean:
-                mock_pull.return_value = True
+        call_order = []
 
+        async def track_clean(d):
+            call_order.append("clean")
+
+        async def track_pull(d):
+            call_order.append("pull")
+            return True
+
+        with patch.object(wrapper, "pull", side_effect=track_pull):
+            with patch.object(wrapper, "clean", side_effect=track_clean):
                 result = await wrapper.ensure_repo(
                     "https://github.com",
                     "owner",
@@ -631,23 +638,19 @@ class TestGitCliWrapper:
                     token="token",
                 )
 
-                mock_pull.assert_called_once()
-                mock_clean.assert_called_once()
+                assert call_order == ["clean", "pull"]
                 assert result == repo_dir
 
     @pytest.mark.asyncio
     async def test_ensure_repo_reclones_on_pull_failure(self, wrapper, temp_dir):
-        """Test that ensure_repo re-clones when pull fails."""
+        """Test ensure_repo nuke-and-reclones when pull fails."""
         repo_dir = temp_dir / "owner" / "repo"
         repo_dir.mkdir(parents=True)
         (repo_dir / ".git").mkdir()
 
-        with patch.object(wrapper, "pull") as mock_pull:
-            with patch.object(wrapper, "clone") as mock_clone:
+        with patch.object(wrapper, "pull", return_value=False):
+            with patch.object(wrapper, "clone", return_value=repo_dir):
                 with patch.object(wrapper, "clean"):
-                    mock_pull.return_value = False
-                    mock_clone.return_value = repo_dir
-
                     await wrapper.ensure_repo(
                         "https://github.com",
                         "owner",
@@ -655,8 +658,51 @@ class TestGitCliWrapper:
                         token="token",
                     )
 
-                    mock_pull.assert_called_once()
-                    mock_clone.assert_called_once()
+    @pytest.mark.asyncio
+    async def test_ensure_repo_reclones_on_unexpected_error(self, wrapper, temp_dir):
+        """Test ensure_repo nuke-and-reclones on exception."""
+        repo_dir = temp_dir / "owner" / "repo"
+        repo_dir.mkdir(parents=True)
+        (repo_dir / ".git").mkdir()
+
+        with patch.object(wrapper, "clean", side_effect=[RuntimeError("boom"), None]):
+            with patch.object(wrapper, "clone", return_value=repo_dir):
+                result = await wrapper.ensure_repo(
+                    "https://github.com",
+                    "owner",
+                    "repo",
+                    token="token",
+                )
+
+                assert result == repo_dir
+
+    @pytest.mark.asyncio
+    async def test_nuke_and_reclone(self, wrapper, temp_dir):
+        """Test nuke_and_reclone deletes dir and re-clones."""
+        repo_dir = temp_dir / "owner" / "repo"
+        repo_dir.mkdir(parents=True)
+        (repo_dir / "file.txt").write_text("stale")
+
+        with patch.object(wrapper, "clone", return_value=repo_dir) as mock_clone:
+            with patch.object(wrapper, "clean") as mock_clean:
+                await wrapper.nuke_and_reclone(
+                    repo_dir,
+                    "https://github.com",
+                    "owner",
+                    "repo",
+                    token="token",
+                )
+
+                mock_clone.assert_called_once_with(
+                    "https://github.com",
+                    "owner",
+                    "repo",
+                    "token",
+                    None,
+                    None,
+                    "main",
+                )
+                mock_clean.assert_called_once_with(repo_dir)
 
     # delete_repo tests
 

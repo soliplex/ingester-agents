@@ -285,6 +285,26 @@ class TestManifest:
         assert m.config.metadata == {"project": "x"}
         assert m.config.priority == 5
 
+    def test_manifest_dir_defaults_to_none(self):
+        m = Manifest(id="t", name="test", source="src", components=[{"type": "fs", "name": "a", "path": "/a"}])
+        assert m.manifest_dir is None
+
+    def test_manifest_dir_can_be_set(self):
+        m = Manifest(id="t", name="test", source="src", components=[{"type": "fs", "name": "a", "path": "/a"}])
+        m.manifest_dir = "/path/to/manifests"
+        assert m.manifest_dir == "/path/to/manifests"
+
+    def test_manifest_dir_excluded_from_yaml(self):
+        m = Manifest(
+            id="t",
+            name="test",
+            source="src",
+            components=[{"type": "fs", "name": "a", "path": "/a"}],
+            manifest_dir="/some/path",
+        )
+        dumped = m.model_dump()
+        assert "manifest_dir" not in dumped
+
     def test_get_extensions_component_wins(self):
         m = Manifest(
             id="t",

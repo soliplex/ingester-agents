@@ -23,7 +23,7 @@ STATUS_NEW = "new"
 STATUS_MISMATCH = "mismatch"
 PROCESSABLE_STATUSES = {STATUS_NEW, STATUS_MISMATCH}
 
-# Retry settings for 429 Too Many Requests
+# Retry settings for transient errors (429, timeouts)
 RETRY_MAX_ATTEMPTS = 5
 RETRY_MAX_DELAY = 120
 
@@ -32,6 +32,17 @@ class RateLimitError(Exception):
     """Raised when the server returns 429 Too Many Requests."""
 
     pass
+
+
+# Exception types that trigger a retry
+RETRYABLE_EXCEPTIONS = (
+    RateLimitError,
+    TimeoutError,
+    aiohttp.ServerDisconnectedError,
+    aiohttp.ClientConnectorError,
+    aiohttp.ClientOSError,
+    ConnectionResetError,
+)
 
 
 def validate_parameters(start_workflows: bool, workflow_definition_id: str | None, param_set_id: str | None) -> None:
@@ -69,7 +80,7 @@ class _RetryRequestContext:
 
     async def __aenter__(self) -> aiohttp.ClientResponse:
         async for attempt in AsyncRetrying(
-            retry=retry_if_exception_type(RateLimitError),
+            retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
             wait=wait_exponential(multiplier=1, max=RETRY_MAX_DELAY),
             stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
             reraise=True,

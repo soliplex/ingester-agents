@@ -62,6 +62,22 @@ class TestLoadManifest:
         with pytest.raises(ValidationError, match="validation error"):
             runner.load_manifest(str(f))
 
+    def test_manifest_dir_is_set(self, tmp_path):
+        f = tmp_path / "test.yml"
+        f.write_text(
+            textwrap.dedent("""\
+            id: test-m
+            name: Test
+            source: src
+            components:
+              - type: fs
+                name: c
+                path: /data
+        """)
+        )
+        m = runner.load_manifest(str(f))
+        assert m.manifest_dir == str(tmp_path.resolve())
+
 
 # --- load_manifests_with_paths ---
 
@@ -539,6 +555,21 @@ class TestRunWebDAVComponent:
             mock.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_urls_file_passes_base_dir(self):
+        manifest = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            components=[{"type": "webdav", "name": "d", "url": "http://dav", "urls_file": "list.txt"}],
+            manifest_dir="/manifests",
+        )
+        component = manifest.components[0]
+        with patch("soliplex.agents.webdav.app.load_inventory_from_urls", new_callable=AsyncMock) as mock:
+            mock.return_value = {"ingested": [], "errors": []}
+            await runner._run_webdav_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            assert mock.call_args.kwargs["base_dir"] == "/manifests"
+
+    @pytest.mark.asyncio
     async def test_urls_list_mode(self):
         manifest = Manifest(
             id="t",
@@ -617,6 +648,25 @@ class TestRunWebComponent:
             await runner._run_web_component(component, manifest, runner._resolve_workflow_params(manifest), {"k": "v"})
             mock_resolve.assert_called_once()
             mock_load.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_passes_base_dir(self):
+        manifest = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            components=[{"type": "web", "name": "p", "url": "http://example.com"}],
+            manifest_dir="/manifests",
+        )
+        component = manifest.components[0]
+        with (
+            patch("soliplex.agents.web.app.resolve_urls", new_callable=AsyncMock) as mock_resolve,
+            patch("soliplex.agents.web.app.load_inventory", new_callable=AsyncMock) as mock_load,
+        ):
+            mock_resolve.return_value = ["http://example.com"]
+            mock_load.return_value = {"ingested": [], "errors": []}
+            await runner._run_web_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            assert mock_resolve.call_args.kwargs["base_dir"] == "/manifests"
 
 
 # --- run_manifests ---

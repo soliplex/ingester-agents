@@ -103,7 +103,12 @@ async def read_config(config_path: str) -> list[dict]:
         ValidationError: If the config file format is invalid
     """
     async with aiofiles.open(config_path) as f:
-        config = json.loads(await f.read())
+        raw = await f.read()
+        try:
+            config = json.loads(raw)
+        except json.JSONDecodeError as e:
+            logger.exception("Invalid JSON in config %s", config_path)
+            raise ValidationError(config_path) from e
 
         if isinstance(config, list):
             ret = config
@@ -112,5 +117,8 @@ async def read_config(config_path: str) -> list[dict]:
         else:
             raise ValidationError(config_path)
 
-        ret = sorted(ret, key=lambda x: int(x["metadata"]["size"]))
+        ret = sorted(
+            ret,
+            key=lambda x: int(x.get("metadata", {}).get("size", 0)),
+        )
         return ret

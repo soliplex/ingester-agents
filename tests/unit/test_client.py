@@ -613,6 +613,80 @@ async def test_retry_request_context_aexit_with_no_response():
     assert ctx._response is None
 
 
+@pytest.mark.asyncio
+async def test_retry_request_context_retries_on_timeout(monkeypatch):
+    """Test _RetryRequestContext retries on asyncio.TimeoutError."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_method = AsyncMock()
+    resp_200 = MagicMock()
+    resp_200.status = 200
+    resp_200.release = MagicMock()
+
+    mock_method.side_effect = [
+        TimeoutError(),
+        resp_200,
+    ]
+
+    ctx = client._RetryRequestContext(mock_method, "http://example.com")
+    async with ctx as response:
+        assert response.status == 200
+
+    assert mock_method.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_request_context_retries_on_server_disconnect(
+    monkeypatch,
+):
+    """Test _RetryRequestContext retries on ServerDisconnectedError."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_method = AsyncMock()
+    resp_200 = MagicMock()
+    resp_200.status = 200
+    resp_200.release = MagicMock()
+
+    mock_method.side_effect = [
+        aiohttp.ServerDisconnectedError(),
+        resp_200,
+    ]
+
+    ctx = client._RetryRequestContext(mock_method, "http://example.com")
+    async with ctx as response:
+        assert response.status == 200
+
+    assert mock_method.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_request_context_timeout_exhausts_retries(
+    monkeypatch,
+):
+    """Test _RetryRequestContext raises TimeoutError after max retries."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_method = AsyncMock()
+    mock_method.side_effect = TimeoutError()
+
+    ctx = client._RetryRequestContext(mock_method, "http://example.com")
+    with pytest.raises(TimeoutError):
+        async with ctx as _response:
+            pass
+
+    assert mock_method.call_count == client.RETRY_MAX_ATTEMPTS
+
+
+def test_retryable_exceptions_tuple():
+    """Test RETRYABLE_EXCEPTIONS contains expected types."""
+    assert client.RateLimitError in client.RETRYABLE_EXCEPTIONS
+    assert TimeoutError in client.RETRYABLE_EXCEPTIONS
+    assert aiohttp.ServerDisconnectedError in client.RETRYABLE_EXCEPTIONS
+    assert aiohttp.ClientConnectorError in client.RETRYABLE_EXCEPTIONS
+    assert aiohttp.ClientOSError in client.RETRYABLE_EXCEPTIONS
+    assert ConnectionResetError in client.RETRYABLE_EXCEPTIONS
+
+
 # --- delete_source_uri tests ---
 
 
