@@ -157,7 +157,13 @@ async def build_config_from_urls(
     new_state = {}
     current_paths = set()
 
-    lines = await read_urls_file(urls_file, base_dir)
+    lines = await read_urls_file(
+        urls_file,
+        base_dir,
+        webdav_url=webdav_url,
+        webdav_username=webdav_username,
+        webdav_password=webdav_password,
+    )
 
     for full_path in lines:
         current_paths.add(full_path)
