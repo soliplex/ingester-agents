@@ -720,8 +720,8 @@ async def test_do_ingest_local_file_returns_sha256(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_load_inventory_splits_cached_and_uncached(monkeypatch):
-    """Test that load_inventory only calls check_status for files with SHA256."""
+async def test_load_inventory_sends_all_files_to_check_status(monkeypatch):
+    """Test that load_inventory sends all files (cached and uncached) to check_status."""
     mock_check_status = AsyncMock(return_value=[])
     monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
     monkeypatch.setattr(
@@ -742,84 +742,32 @@ async def test_load_inventory_splits_cached_and_uncached(monkeypatch):
         {
             "path": "uncached.md",
             "sha256": None,
+            "_etag": '"etag1"',
             "metadata": {"size": 0, "content-type": "text/markdown"},
         },
     ]
 
-    do_ingest_ret = {
-        "result": "success",
-        "_sha256": "def",
-        "_size": 50,
-    }
     with patch(
         "soliplex.agents.webdav.app.do_ingest",
         new_callable=AsyncMock,
-        return_value=do_ingest_ret,
+        return_value={"result": "success", "_sha256": "def", "_size": 50},
     ):
-        result = await webdav_app.load_inventory(
+        await webdav_app.load_inventory(
             "",
             "test-source",
             start_workflows=False,
             config=config,
         )
 
-    # check_status should only receive the cached file
+    # check_status receives ALL files, not just cached ones
     mock_check_status.assert_called_once()
     checked_files = mock_check_status.call_args[0][0]
-    assert len(checked_files) == 1
-    assert checked_files[0]["sha256"] == "abc"
-
-    # uncached file should be in to_process
-    assert len(result["to_process"]) == 1
-    assert result["to_process"][0]["path"] == "uncached.md"
-
-
-@pytest.mark.asyncio
-async def test_load_inventory_no_check_status_when_all_uncached(monkeypatch):
-    """Test that check_status is not called when all files are uncached."""
-    mock_check_status = AsyncMock(return_value=[])
-    monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-    monkeypatch.setattr(
-        "soliplex.agents.client.find_batch_for_source",
-        AsyncMock(return_value=None),
-    )
-    monkeypatch.setattr(
-        "soliplex.agents.client.create_batch",
-        AsyncMock(return_value=123),
-    )
-
-    config = [
-        {
-            "path": "new.md",
-            "sha256": None,
-            "metadata": {"size": 0, "content-type": "text/markdown"},
-        },
-    ]
-
-    do_ingest_ret = {
-        "result": "success",
-        "_sha256": "abc",
-        "_size": 50,
-    }
-    with patch(
-        "soliplex.agents.webdav.app.do_ingest",
-        new_callable=AsyncMock,
-        return_value=do_ingest_ret,
-    ):
-        result = await webdav_app.load_inventory(
-            "",
-            "test-source",
-            start_workflows=False,
-            config=config,
-        )
-
-    mock_check_status.assert_not_called()
-    assert len(result["to_process"]) == 1
+    assert len(checked_files) == 2
 
 
 @pytest.mark.asyncio
 async def test_load_inventory_check_status_failure_fallback(monkeypatch):
-    """Test that check_status failure falls back to treating all cached files as new."""
+    """Test that check_status failure falls back to treating all files as new."""
     mock_check_status = AsyncMock(side_effect=Exception("API down"))
     monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
     monkeypatch.setattr(
@@ -839,15 +787,10 @@ async def test_load_inventory_check_status_failure_fallback(monkeypatch):
         },
     ]
 
-    do_ingest_ret = {
-        "result": "success",
-        "_sha256": "abc",
-        "_size": 100,
-    }
     with patch(
         "soliplex.agents.webdav.app.do_ingest",
         new_callable=AsyncMock,
-        return_value=do_ingest_ret,
+        return_value={"result": "success", "_sha256": "abc", "_size": 100},
     ):
         result = await webdav_app.load_inventory(
             "",
@@ -856,9 +799,52 @@ async def test_load_inventory_check_status_failure_fallback(monkeypatch):
             config=config,
         )
 
-    # check_status failed, but cached file still in to_process
     assert len(result["to_process"]) == 1
     assert result["to_process"][0]["path"] == "cached.md"
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_injects_etag_into_meta(monkeypatch):
+    """Test that _etag from config record is injected into ingest metadata."""
+    mock_check_status = AsyncMock(return_value=[])
+    monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
+
+    config = [
+        {
+            "path": "file.md",
+            "sha256": None,
+            "_etag": '"etag_value"',
+            "metadata": {"size": 0, "content-type": "text/markdown"},
+        },
+    ]
+
+    # check_status returns the file as needing processing
+    mock_check_status.return_value = config
+
+    monkeypatch.setattr(
+        "soliplex.agents.client.find_batch_for_source",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "soliplex.agents.client.create_batch",
+        AsyncMock(return_value=123),
+    )
+
+    with patch(
+        "soliplex.agents.webdav.app.do_ingest",
+        new_callable=AsyncMock,
+        return_value={"result": "success", "_sha256": "abc", "_size": 50},
+    ) as mock_ingest:
+        await webdav_app.load_inventory(
+            "",
+            "test-source",
+            start_workflows=False,
+            config=config,
+        )
+
+    # Verify _etag was injected into the meta dict passed to do_ingest
+    meta_arg = mock_ingest.call_args[0][2]
+    assert meta_arg["_etag"] == '"etag_value"'
 
 
 # --- load_inventory_from_urls sync state update ---

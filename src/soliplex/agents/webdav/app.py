@@ -489,19 +489,14 @@ async def load_inventory(
 
     logger.info(f"found {len(config)} files in {path}")
 
-    # Split: files with known SHA256 (cached) go through check_status;
-    # files without SHA256 (ETag cache miss) are assumed new.
-    cached_files = [f for f in config if f.get("sha256") is not None]
-    uncached_files = [f for f in config if f.get("sha256") is None]
-
+    # Send all files through check_status — the ingester can match on
+    # SHA256 (when available) or fall back to ETag stored in doc_meta.
     to_process = []
-    if cached_files:
-        try:
-            to_process.extend(await client.check_status(cached_files, source))
-        except Exception:
-            logger.exception("check_status failed, treating all cached files as new")
-            to_process.extend(cached_files)
-    to_process.extend(uncached_files)
+    try:
+        to_process.extend(await client.check_status(config, source))
+    except Exception:
+        logger.exception("check_status failed, treating all files as new")
+        to_process.extend(config)
     logger.info(f"found {len(to_process)} out of {len(config)} to process in {base_path}")
     if end is None:
         end = len(config)
@@ -547,6 +542,9 @@ async def load_inventory(
                 del meta[k]
         if extra_metadata:
             meta.update(extra_metadata)
+        etag = row.get("_etag")
+        if etag:
+            meta["_etag"] = etag
         logger.info(f"starting ingest for {row['path']} {idx}/{len(to_process)} ")
         mime_type = None
         if "metadata" in row and "content-type" in row["metadata"]:
