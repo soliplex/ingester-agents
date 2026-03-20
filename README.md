@@ -131,6 +131,9 @@ WEBDAV_URL=https://webdav.example.com
 # WebDAV authentication
 WEBDAV_USERNAME=your-username
 WEBDAV_PASSWORD=your-password
+
+# Disable TLS certificate verification (default: true)
+SSL_VERIFY=true
 ```
 
 All WebDAV credentials can also be provided via command-line options (`--webdav-url`, `--webdav-username`, `--webdav-password`), which override the environment variables.
@@ -155,6 +158,9 @@ AUTH_TRUST_PROXY_HEADERS=false
 
 # Manifest scheduling (requires SCHEDULER_ENABLED=true)
 MANIFEST_DIR=/path/to/manifests
+
+# S3-compatible storage (for urls_file references using s3:// URLs)
+S3_ENDPOINT_URL=https://minio.example.com:9000
 ```
 
 ### Git CLI Mode
@@ -588,7 +594,7 @@ Top-level fields:
 - **name** (required): Component name.
 - **url**: Single URL to fetch.
 - **urls**: List of URLs to fetch.
-- **urls_file**: Path to a file containing URLs (one per line).
+- **urls_file**: Path to a file containing URLs (one per line). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` WebDAV URLs.
 - Exactly one of `url`, `urls`, or `urls_file` must be specified.
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
@@ -613,7 +619,7 @@ Top-level fields:
 - **url** (required): WebDAV server URL.
 - **path**: WebDAV directory path to scan recursively.
 - **urls**: List of specific WebDAV file paths to ingest.
-- **urls_file**: Path to a file containing WebDAV URLs (one per line).
+- **urls_file**: Path to a file containing WebDAV URLs (one per line). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` WebDAV URLs (fetched using the same WebDAV credentials).
 - Exactly one of `path`, `urls`, or `urls_file` must be specified.
 - **username**: Override WebDAV username (resolved via Docker secrets or env vars).
 - **password**: Override WebDAV password (resolved via Docker secrets or env vars).
@@ -1165,6 +1171,10 @@ soliplex.agents/
 │   │       ├── webdav.py   # WebDAV API endpoints
 │   │       ├── web.py      # Web API endpoints
 │   │       └── manifest.py # Manifest API endpoints
+│   ├── common/              # Shared utilities
+│   │   ├── urls_file.py     # URL list reader (local, S3, WebDAV)
+│   │   ├── s3.py            # S3 object reader
+│   │   └── config.py        # MIME type detection, config helpers
 │   ├── fs/                 # Filesystem agent
 │   │   ├── app.py          # Core filesystem logic
 │   │   └── cli.py          # Filesystem CLI commands
@@ -1185,7 +1195,7 @@ soliplex.agents/
 │       └── lib/
 │           ├── templates/  # Issue rendering templates
 │           └── utils.py    # Utility functions
-├── example-manifests/      # Example manifest YAML files
+├── example-manifests/      # Example manifests (fs, scm, web, webdav, composite, delete-stale)
 ├── tests/                  # Test suite
 │   └── unit/
 │       ├── test_server_*.py  # Server API tests

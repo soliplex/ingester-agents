@@ -1,6 +1,7 @@
-"""Tests for soliplex.agents.webdav.state module."""
+"""Tests for soliplex.agents.webdav.state module (SQLite backend)."""
 
 import json
+import sqlite3
 from unittest.mock import patch
 
 from soliplex.agents.webdav import state as webdav_state
@@ -39,7 +40,7 @@ def test_get_state_path():
     with patch.object(webdav_state, "settings") as mock_settings:
         mock_settings.state_dir = "/tmp/state"
         path = webdav_state.get_state_path("https://webdav.example.com")
-        assert str(path).replace("\\", "/") == "/tmp/state/webdav_example_com.json"
+        assert str(path).replace("\\", "/") == "/tmp/state/webdav_example_com.db"
 
 
 # --- load_state ---
@@ -52,44 +53,35 @@ def test_load_state_missing_file(tmp_path):
         assert result == {}
 
 
-def test_load_state_valid_json(tmp_path):
-    state_data = {"/docs/test.md": {"etag": '"abc123"', "sha256": "def456"}}
-    state_file = tmp_path / "webdav_example_com.json"
-    state_file.write_text(json.dumps(state_data))
+def test_load_state_valid_db(tmp_path):
+    db_path = tmp_path / "webdav_example_com.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(webdav_state._CREATE_TABLE)
+    conn.execute(
+        "INSERT INTO state VALUES (?, ?, ?, ?)",
+        ("/docs/test.md", '"abc123"', "def456", 100),
+    )
+    conn.commit()
+    conn.close()
 
     with patch.object(webdav_state, "settings") as mock_settings:
         mock_settings.state_dir = str(tmp_path)
         result = webdav_state.load_state("https://webdav.example.com")
-        assert result == state_data
-
-
-def test_load_state_corrupted_json(tmp_path):
-    state_file = tmp_path / "webdav_example_com.json"
-    state_file.write_text("not valid json {{{")
-
-    with patch.object(webdav_state, "settings") as mock_settings:
-        mock_settings.state_dir = str(tmp_path)
-        result = webdav_state.load_state("https://webdav.example.com")
-        assert result == {}
-
-
-def test_load_state_not_a_dict(tmp_path):
-    state_file = tmp_path / "webdav_example_com.json"
-    state_file.write_text(json.dumps(["not", "a", "dict"]))
-
-    with patch.object(webdav_state, "settings") as mock_settings:
-        mock_settings.state_dir = str(tmp_path)
-        result = webdav_state.load_state("https://webdav.example.com")
-        assert result == {}
+        assert result == {
+            "/docs/test.md": {
+                "etag": '"abc123"',
+                "sha256": "def456",
+                "size": 100,
+            }
+        }
 
 
 def test_load_state_os_error(tmp_path):
     with patch.object(webdav_state, "settings") as mock_settings:
-        # Point to a non-existent dir that would cause an OSError on read
         mock_settings.state_dir = str(tmp_path)
-        # Create a file that will trigger OSError
-        state_file = tmp_path / "webdav_example_com.json"
-        state_file.mkdir()  # Creating a directory where file is expected
+        # Create a directory where the .db file would be
+        db_file = tmp_path / "webdav_example_com.db"
+        db_file.mkdir()
         result = webdav_state.load_state("https://webdav.example.com")
         assert result == {}
 
@@ -105,64 +97,252 @@ def test_save_state_creates_dirs(tmp_path):
         mock_settings.state_dir = str(state_dir)
         webdav_state.save_state("https://webdav.example.com", state_data)
 
-    state_file = state_dir / "webdav_example_com.json"
-    assert state_file.exists()
-    loaded = json.loads(state_file.read_text())
-    assert loaded == state_data
+    db_path = state_dir / "webdav_example_com.db"
+    assert db_path.exists()
+    conn = sqlite3.connect(str(db_path))
+    rows = conn.execute("SELECT path, etag, sha256, size FROM state").fetchall()
+    conn.close()
+    assert len(rows) == 1
+    assert rows[0] == ("/docs/test.md", '"abc"', "def", 0)
 
 
-def test_save_state_writes_correct_json(tmp_path):
-    state_data = {
-        "/docs/a.md": {"etag": '"etag1"', "sha256": "hash1"},
-        "/docs/b.pdf": {"etag": '"etag2"', "sha256": "hash2"},
-    }
-
+def test_save_state_upserts(tmp_path):
+    """save_state does upserts, not full overwrites."""
     with patch.object(webdav_state, "settings") as mock_settings:
         mock_settings.state_dir = str(tmp_path)
-        webdav_state.save_state("https://webdav.example.com", state_data)
+        webdav_state.save_state(
+            "https://webdav.example.com",
+            {"/docs/a.md": {"etag": '"e1"', "sha256": "h1", "size": 10}},
+        )
+        webdav_state.save_state(
+            "https://webdav.example.com",
+            {"/docs/b.pdf": {"etag": '"e2"', "sha256": "h2", "size": 20}},
+        )
+        result = webdav_state.load_state("https://webdav.example.com")
+        assert "/docs/a.md" in result
+        assert "/docs/b.pdf" in result
 
-    state_file = tmp_path / "webdav_example_com.json"
-    loaded = json.loads(state_file.read_text())
-    assert loaded == state_data
+
+# --- upsert_entry ---
+
+
+def test_upsert_entry(tmp_path):
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        webdav_state.upsert_entry(
+            "https://webdav.example.com",
+            "/docs/test.md",
+            '"etag1"',
+            "hash1",
+            42,
+        )
+        entry = webdav_state.get_entry("https://webdav.example.com", "/docs/test.md")
+        assert entry == {
+            "etag": '"etag1"',
+            "sha256": "hash1",
+            "size": 42,
+        }
+
+
+def test_upsert_entry_overwrites(tmp_path):
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        webdav_state.upsert_entry(
+            "https://webdav.example.com",
+            "/docs/test.md",
+            '"old"',
+            "old_hash",
+            10,
+        )
+        webdav_state.upsert_entry(
+            "https://webdav.example.com",
+            "/docs/test.md",
+            '"new"',
+            "new_hash",
+            20,
+        )
+        entry = webdav_state.get_entry("https://webdav.example.com", "/docs/test.md")
+        assert entry["etag"] == '"new"'
+        assert entry["sha256"] == "new_hash"
+        assert entry["size"] == 20
+
+
+# --- get_entry ---
+
+
+def test_get_entry_missing(tmp_path):
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        entry = webdav_state.get_entry("https://webdav.example.com", "/no/such/file.md")
+        assert entry is None
+
+
+# --- delete_entry ---
+
+
+def test_delete_entry(tmp_path):
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        webdav_state.upsert_entry(
+            "https://webdav.example.com",
+            "/docs/test.md",
+            '"e"',
+            "h",
+            0,
+        )
+        webdav_state.delete_entry("https://webdav.example.com", "/docs/test.md")
+        assert webdav_state.get_entry("https://webdav.example.com", "/docs/test.md") is None
 
 
 # --- prune_state ---
 
 
-def test_prune_state_removes_absent():
-    state = {
-        "/docs/a.md": {"etag": "e1", "sha256": "h1"},
-        "/docs/b.md": {"etag": "e2", "sha256": "h2"},
-        "/docs/c.md": {"etag": "e3", "sha256": "h3"},
+def test_prune_state_removes_absent(tmp_path):
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        webdav_state.save_state(
+            "https://webdav.example.com",
+            {
+                "/docs/a.md": {"etag": "e1", "sha256": "h1"},
+                "/docs/b.md": {"etag": "e2", "sha256": "h2"},
+                "/docs/c.md": {"etag": "e3", "sha256": "h3"},
+            },
+        )
+        removed = webdav_state.prune_state(
+            "https://webdav.example.com",
+            {"/docs/a.md", "/docs/c.md"},
+        )
+        assert removed == ["/docs/b.md"]
+        state = webdav_state.load_state("https://webdav.example.com")
+        assert "/docs/b.md" not in state
+        assert "/docs/a.md" in state
+        assert "/docs/c.md" in state
+
+
+def test_prune_state_keeps_all_present(tmp_path):
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        webdav_state.save_state(
+            "https://webdav.example.com",
+            {"/docs/a.md": {"etag": "e1", "sha256": "h1"}},
+        )
+        removed = webdav_state.prune_state(
+            "https://webdav.example.com",
+            {"/docs/a.md"},
+        )
+        assert removed == []
+
+
+def test_prune_state_empty_db(tmp_path):
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        removed = webdav_state.prune_state(
+            "https://webdav.example.com",
+            {"/docs/a.md"},
+        )
+        assert removed == []
+
+
+def test_prune_state_empty_current(tmp_path):
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        webdav_state.save_state(
+            "https://webdav.example.com",
+            {"/docs/a.md": {"etag": "e1", "sha256": "h1"}},
+        )
+        removed = webdav_state.prune_state(
+            "https://webdav.example.com",
+            set(),
+        )
+        assert removed == ["/docs/a.md"]
+
+
+# --- JSON migration ---
+
+
+def test_migrate_json_to_sqlite(tmp_path):
+    """Loading state with a legacy .json triggers auto-migration."""
+    json_data = {
+        "/docs/a.md": {"etag": '"e1"', "sha256": "h1", "size": 10},
+        "/docs/b.pdf": {"etag": '"e2"', "sha256": "h2"},
     }
-    current = {"/docs/a.md", "/docs/c.md"}
+    json_path = tmp_path / "webdav_example_com.json"
+    json_path.write_text(json.dumps(json_data))
 
-    pruned, removed = webdav_state.prune_state(state, current)
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        result = webdav_state.load_state("https://webdav.example.com")
 
-    assert "/docs/b.md" not in pruned
-    assert "/docs/a.md" in pruned
-    assert "/docs/c.md" in pruned
-    assert removed == ["/docs/b.md"]
-
-
-def test_prune_state_keeps_all_present():
-    state = {"/docs/a.md": {"etag": "e1", "sha256": "h1"}}
-    current = {"/docs/a.md"}
-
-    pruned, removed = webdav_state.prune_state(state, current)
-
-    assert pruned == state
-    assert removed == []
+    assert "/docs/a.md" in result
+    assert result["/docs/a.md"]["sha256"] == "h1"
+    assert "/docs/b.pdf" in result
+    assert not json_path.exists()
+    assert (tmp_path / "webdav_example_com.json.migrated").exists()
+    assert (tmp_path / "webdav_example_com.db").exists()
 
 
-def test_prune_state_empty_state():
-    pruned, removed = webdav_state.prune_state({}, {"/docs/a.md"})
-    assert pruned == {}
-    assert removed == []
+def test_migrate_skipped_when_db_exists(tmp_path):
+    """If both .json and .db exist, no migration occurs."""
+    json_path = tmp_path / "webdav_example_com.json"
+    json_path.write_text(json.dumps({"/old": {"etag": "x", "sha256": "y"}}))
+
+    db_path = tmp_path / "webdav_example_com.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(webdav_state._CREATE_TABLE)
+    conn.execute(
+        "INSERT INTO state VALUES (?, ?, ?, ?)",
+        ("/new", '"e"', "h", 0),
+    )
+    conn.commit()
+    conn.close()
+
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        result = webdav_state.load_state("https://webdav.example.com")
+
+    assert "/new" in result
+    assert "/old" not in result
+    assert json_path.exists()
 
 
-def test_prune_state_empty_current():
-    state = {"/docs/a.md": {"etag": "e1", "sha256": "h1"}}
-    pruned, removed = webdav_state.prune_state(state, set())
-    assert pruned == {}
-    assert removed == ["/docs/a.md"]
+def test_migrate_corrupted_json(tmp_path):
+    """Corrupted JSON file is skipped during migration."""
+    json_path = tmp_path / "webdav_example_com.json"
+    json_path.write_text("not valid json {{{")
+
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        result = webdav_state.load_state("https://webdav.example.com")
+
+    assert result == {}
+    assert (tmp_path / "webdav_example_com.db").exists()
+
+
+def test_migrate_non_dict_json(tmp_path):
+    """JSON file containing non-dict is skipped during migration."""
+    json_path = tmp_path / "webdav_example_com.json"
+    json_path.write_text(json.dumps(["not", "a", "dict"]))
+
+    with patch.object(webdav_state, "settings") as mock_settings:
+        mock_settings.state_dir = str(tmp_path)
+        result = webdav_state.load_state("https://webdav.example.com")
+
+    assert result == {}
+
+
+def test_migrate_rename_failure(tmp_path):
+    """Migration succeeds even if rename fails."""
+    json_data = {"/docs/a.md": {"etag": '"e1"', "sha256": "h1"}}
+    json_path = tmp_path / "webdav_example_com.json"
+    json_path.write_text(json.dumps(json_data))
+
+    with (
+        patch.object(webdav_state, "settings") as mock_settings,
+        patch("soliplex.agents.webdav.state.Path.rename", side_effect=OSError("perm")),
+    ):
+        mock_settings.state_dir = str(tmp_path)
+        result = webdav_state.load_state("https://webdav.example.com")
+
+    assert "/docs/a.md" in result
+    # JSON file still exists because rename failed
+    assert json_path.exists()

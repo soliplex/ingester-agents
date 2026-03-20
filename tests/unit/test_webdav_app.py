@@ -33,13 +33,14 @@ def mock_webdav_client():
 
 @pytest.fixture
 def mock_state():
-    """Patch webdav_state load/save for build_config tests."""
+    """Patch webdav_state load/save/upsert for build_config tests."""
     with (
         patch("soliplex.agents.webdav.app.webdav_state.load_state", return_value={}) as mock_load,
         patch("soliplex.agents.webdav.app.webdav_state.save_state") as mock_save,
-        patch("soliplex.agents.webdav.app.webdav_state.prune_state", return_value=({}, [])) as mock_prune,
+        patch("soliplex.agents.webdav.app.webdav_state.upsert_entry") as mock_upsert,
+        patch("soliplex.agents.webdav.app.webdav_state.prune_state", return_value=[]) as mock_prune,
     ):
-        yield {"load": mock_load, "save": mock_save, "prune": mock_prune}
+        yield {"load": mock_load, "save": mock_save, "upsert": mock_upsert, "prune": mock_prune}
 
 
 # --- create_webdav_client ---
@@ -179,17 +180,14 @@ async def test_build_config_prune_deleted():
         patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
         patch("soliplex.agents.webdav.app.webdav_state.load_state") as mock_load,
-        patch("soliplex.agents.webdav.app.webdav_state.save_state") as mock_save,
+        patch("soliplex.agents.webdav.app.webdav_state.upsert_entry"),
         patch("soliplex.agents.webdav.app.webdav_state.prune_state") as mock_prune,
     ):
         mock_load.return_value = {
             "/documents/test.md": {"etag": '"e1"', "sha256": "h1"},
             "/documents/deleted.md": {"etag": '"e2"', "sha256": "h2"},
         }
-        mock_prune.return_value = (
-            {"/documents/test.md": {"etag": '"e1"', "sha256": "h1"}},
-            ["/documents/deleted.md"],
-        )
+        mock_prune.return_value = ["/documents/deleted.md"]
         mock_ls.return_value = [
             {"path": "/documents/test.md", "size": 100},
         ]
@@ -198,7 +196,6 @@ async def test_build_config_prune_deleted():
 
     assert len(config) == 1
     mock_prune.assert_called_once()
-    mock_save.assert_called_once()
 
 
 # --- recursive_listdir_webdav ---
@@ -911,11 +908,11 @@ async def test_load_inventory_from_urls_updates_sync_state(tmp_path, mock_state,
             start_workflows=False,
         )
 
-    # save called twice: build_config_from_urls + post-ingestion
-    assert mock_state["save"].call_count == 2
-    final_state = mock_state["save"].call_args[0][1]
-    assert "/documents/test.md" in final_state
-    entry = final_state["/documents/test.md"]
-    assert entry["etag"] == '"new_etag"'
-    assert entry["sha256"] == "computed_hash"
-    assert entry["size"] == 42
+    # upsert_entry called for the ingested file
+    mock_state["upsert"].assert_called_with(
+        "",
+        "/documents/test.md",
+        '"new_etag"',
+        "computed_hash",
+        42,
+    )

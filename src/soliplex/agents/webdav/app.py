@@ -154,7 +154,6 @@ async def build_config_from_urls(
 
     resolved_url = webdav_url or settings.webdav_url or ""
     cached_state = webdav_state.load_state(resolved_url)
-    new_state = {}
     current_paths = set()
 
     lines = await read_urls_file(
@@ -196,11 +195,15 @@ async def build_config_from_urls(
                         "content-type": mime_type,
                     },
                 }
-                new_state[full_path] = {
-                    "etag": server_etag,
-                    "sha256": sha256_hash,
-                    "size": cached_entry.get("size", 0),
-                }
+                if server_etag:
+                    rec["_etag"] = server_etag
+                webdav_state.upsert_entry(
+                    resolved_url,
+                    full_path,
+                    server_etag,
+                    sha256_hash,
+                    cached_entry.get("size", 0),
+                )
                 config.append(rec)
                 results.append({"url": full_path, "status": "success", "error_message": None})
                 continue
@@ -224,11 +227,10 @@ async def build_config_from_urls(
             results.append({"url": full_path, "status": "error", "error_message": str(e)})
 
     # Prune deleted files
-    _, removed = webdav_state.prune_state(cached_state, current_paths)
+    removed = webdav_state.prune_state(resolved_url, current_paths)
     for removed_path in removed:
         logger.warning(f"File removed from URL list: {removed_path}")
 
-    webdav_state.save_state(resolved_url, new_state)
     return config, results
 
 
@@ -313,7 +315,6 @@ async def build_config(
 
     resolved_url = webdav_url or settings.webdav_url or ""
     cached_state = webdav_state.load_state(resolved_url)
-    new_state = {}
 
     # Recursively list all files
     files = await recursive_listdir_webdav(webdav_client, webdav_path)
@@ -337,10 +338,12 @@ async def build_config(
             sha256_hash = cached_entry["sha256"]
             cache_hits += 1
             logger.debug(f"ETag cache hit for {full_path}")
-            new_state[full_path] = {
-                "etag": server_etag,
-                "sha256": sha256_hash,
-            }
+            webdav_state.upsert_entry(
+                resolved_url,
+                full_path,
+                server_etag,
+                sha256_hash,
+            )
         else:
             # ETag cache miss — skip download, defer to ingestion
             sha256_hash = None
@@ -377,11 +380,10 @@ async def build_config(
         config.append(rec)
 
     # Prune deleted files and log warnings
-    _, removed = webdav_state.prune_state(cached_state, current_paths)
+    removed = webdav_state.prune_state(resolved_url, current_paths)
     for removed_path in removed:
         logger.warning(f"File removed from server: {removed_path}")
 
-    webdav_state.save_state(resolved_url, new_state)
     logger.info(f"Built config: {len(config)} files succeeded, {failed} failed, {cache_hits} cache hits")
     return config
 
@@ -728,18 +730,18 @@ async def load_inventory_from_urls(
 
     # Update sync state for newly ingested files
     resolved_url = webdav_url or settings.webdav_url or ""
-    current_state = webdav_state.load_state(resolved_url)
     etag_lookup = {r["path"]: r.get("_etag") for r in config}
     for res in result.get("ingested", []):
         path = res.get("_path")
         etag = etag_lookup.get(path) if path else None
         if path and "_sha256" in res and etag:
-            current_state[path] = {
-                "etag": etag,
-                "sha256": res["_sha256"],
-                "size": res.get("_size", 0),
-            }
-    webdav_state.save_state(resolved_url, current_state)
+            webdav_state.upsert_entry(
+                resolved_url,
+                path,
+                etag,
+                res["_sha256"],
+                res.get("_size", 0),
+            )
 
     result["url_results"] = url_results
     return result

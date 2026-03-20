@@ -323,7 +323,7 @@ def collect_inventory_uris(result: dict[str, Any]) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     for entry in result.get("inventory", []):
         uri = entry.get("uri") or entry.get("path")
-        sha256 = entry.get("sha256", "")
+        sha256 = entry.get("sha256") or ""
         if uri:
             items.append({"uri": uri, "sha256": sha256})
     return items
