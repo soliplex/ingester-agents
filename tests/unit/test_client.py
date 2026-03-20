@@ -210,6 +210,40 @@ async def test_check_status(mock_response):
         assert result[0]["uri"] == "file1.md"
         assert result[1]["uri"] == "file2.md"
 
+        # Verify payload includes sha256 and etag in dict format
+        post_call = mock_session.post.call_args
+        import json
+
+        sent_hashes = json.loads(post_call[1]["data"]._fields[1][2])
+        assert sent_hashes["file1.md"] == {"sha256": "hash1", "etag": ""}
+
+
+@pytest.mark.asyncio
+async def test_check_status_sends_etag(mock_response):
+    """Test check_status includes ETag in payload when available."""
+    from tests.unit.conftest import create_async_context_manager
+
+    file_info = [
+        {"uri": "file1.md", "sha256": None, "_etag": '"etag1"'},
+    ]
+    response_data = {"file1.md": {"status": "matched"}}
+    mock_resp = mock_response(200, response_data)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.post.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.check_status(file_info, "test_source")
+
+        assert len(result) == 0
+
+        import json
+
+        post_call = mock_session.post.call_args
+        sent_hashes = json.loads(post_call[1]["data"]._fields[1][2])
+        assert sent_hashes["file1.md"] == {"sha256": "", "etag": '"etag1"'}
+
 
 @pytest.mark.asyncio
 async def test_check_status_empty(mock_response):

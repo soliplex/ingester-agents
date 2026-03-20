@@ -250,7 +250,13 @@ async def check_status(file_info: list[dict[str, Any]], source: str, delete_stal
     for x in file_info:
         x["uri"] = x.get("path", x.get("uri"))
 
-    status_dict = {x["uri"]: x["sha256"] for x in file_info}
+    status_dict = {
+        x["uri"]: {
+            "sha256": x.get("sha256") or "",
+            "etag": x.get("_etag") or "",
+        }
+        for x in file_info
+    }
     uri_to_file = {x["uri"]: x for x in file_info}
 
     url = _build_url("/source-status")

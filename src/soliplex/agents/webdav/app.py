@@ -154,10 +154,15 @@ async def build_config_from_urls(
 
     resolved_url = webdav_url or settings.webdav_url or ""
     cached_state = webdav_state.load_state(resolved_url)
-    new_state = {}
     current_paths = set()
 
-    lines = await read_urls_file(urls_file, base_dir)
+    lines = await read_urls_file(
+        urls_file,
+        base_dir,
+        webdav_url=webdav_url,
+        webdav_username=webdav_username,
+        webdav_password=webdav_password,
+    )
 
     for full_path in lines:
         current_paths.add(full_path)
@@ -168,13 +173,19 @@ async def build_config_from_urls(
             continue
 
         try:
-            # Try to get ETag via info() for cache check
+            # Try to get ETag via info() or HEAD for cache check
             server_etag = None
             try:
                 info = webdav_client.info(full_path)
                 server_etag = info.get("etag")
             except Exception:
-                logger.debug(f"Could not get info for {full_path}, will download")
+                logger.debug(f"Could not get info for {full_path}")
+            if not server_etag:
+                try:
+                    resp = webdav_client.http.head(full_path)
+                    server_etag = resp.headers.get("etag")
+                except Exception:
+                    logger.debug(f"Could not HEAD {full_path}")
 
             cached_entry = cached_state.get(full_path)
 
@@ -190,11 +201,15 @@ async def build_config_from_urls(
                         "content-type": mime_type,
                     },
                 }
-                new_state[full_path] = {
-                    "etag": server_etag,
-                    "sha256": sha256_hash,
-                    "size": cached_entry.get("size", 0),
-                }
+                if server_etag:
+                    rec["_etag"] = server_etag
+                webdav_state.upsert_entry(
+                    resolved_url,
+                    full_path,
+                    server_etag,
+                    sha256_hash,
+                    cached_entry.get("size", 0),
+                )
                 config.append(rec)
                 results.append({"url": full_path, "status": "success", "error_message": None})
                 continue
@@ -218,11 +233,10 @@ async def build_config_from_urls(
             results.append({"url": full_path, "status": "error", "error_message": str(e)})
 
     # Prune deleted files
-    _, removed = webdav_state.prune_state(cached_state, current_paths)
+    removed = webdav_state.prune_state(resolved_url, current_paths)
     for removed_path in removed:
         logger.warning(f"File removed from URL list: {removed_path}")
 
-    webdav_state.save_state(resolved_url, new_state)
     return config, results
 
 
@@ -307,7 +321,6 @@ async def build_config(
 
     resolved_url = webdav_url or settings.webdav_url or ""
     cached_state = webdav_state.load_state(resolved_url)
-    new_state = {}
 
     # Recursively list all files
     files = await recursive_listdir_webdav(webdav_client, webdav_path)
@@ -323,6 +336,12 @@ async def build_config(
             continue
 
         server_etag = file_info.get("etag")
+        if not server_etag:
+            try:
+                resp = webdav_client.http.head(full_path)
+                server_etag = resp.headers.get("etag")
+            except Exception:
+                logger.debug(f"Could not HEAD {full_path}")
         cached_entry = cached_state.get(full_path)
         etag_for_rec = None
 
@@ -331,10 +350,12 @@ async def build_config(
             sha256_hash = cached_entry["sha256"]
             cache_hits += 1
             logger.debug(f"ETag cache hit for {full_path}")
-            new_state[full_path] = {
-                "etag": server_etag,
-                "sha256": sha256_hash,
-            }
+            webdav_state.upsert_entry(
+                resolved_url,
+                full_path,
+                server_etag,
+                sha256_hash,
+            )
         else:
             # ETag cache miss — skip download, defer to ingestion
             sha256_hash = None
@@ -371,11 +392,10 @@ async def build_config(
         config.append(rec)
 
     # Prune deleted files and log warnings
-    _, removed = webdav_state.prune_state(cached_state, current_paths)
+    removed = webdav_state.prune_state(resolved_url, current_paths)
     for removed_path in removed:
         logger.warning(f"File removed from server: {removed_path}")
 
-    webdav_state.save_state(resolved_url, new_state)
     logger.info(f"Built config: {len(config)} files succeeded, {failed} failed, {cache_hits} cache hits")
     return config
 
@@ -481,19 +501,14 @@ async def load_inventory(
 
     logger.info(f"found {len(config)} files in {path}")
 
-    # Split: files with known SHA256 (cached) go through check_status;
-    # files without SHA256 (ETag cache miss) are assumed new.
-    cached_files = [f for f in config if f.get("sha256") is not None]
-    uncached_files = [f for f in config if f.get("sha256") is None]
-
+    # Send all files through check_status — the ingester can match on
+    # SHA256 (when available) or fall back to ETag stored in doc_meta.
     to_process = []
-    if cached_files:
-        try:
-            to_process.extend(await client.check_status(cached_files, source))
-        except Exception:
-            logger.exception("check_status failed, treating all cached files as new")
-            to_process.extend(cached_files)
-    to_process.extend(uncached_files)
+    try:
+        to_process.extend(await client.check_status(config, source))
+    except Exception:
+        logger.exception("check_status failed, treating all files as new")
+        to_process.extend(config)
     logger.info(f"found {len(to_process)} out of {len(config)} to process in {base_path}")
     if end is None:
         end = len(config)
@@ -539,6 +554,9 @@ async def load_inventory(
                 del meta[k]
         if extra_metadata:
             meta.update(extra_metadata)
+        etag = row.get("_etag")
+        if etag:
+            meta["_etag"] = etag
         logger.info(f"starting ingest for {row['path']} {idx}/{len(to_process)} ")
         mime_type = None
         if "metadata" in row and "content-type" in row["metadata"]:
@@ -642,6 +660,18 @@ async def do_ingest(
 
     sha256_hash = hashlib.sha256(doc_body, usedforsecurity=False).hexdigest()
 
+    # Capture ETag via HTTP HEAD if not already in metadata
+    if "_etag" not in meta and webdav_url:
+        try:
+            wc = create_webdav_client(webdav_url, webdav_username, webdav_password)
+            head_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}" if base_path else uri
+            resp = wc.http.head(head_path)
+            head_etag = resp.headers.get("etag")
+            if head_etag:
+                meta["_etag"] = head_etag
+        except Exception:
+            logger.debug(f"Could not get ETag via HEAD for {uri}")
+
     result = await client.do_ingest(
         doc_body,
         uri,
@@ -722,18 +752,18 @@ async def load_inventory_from_urls(
 
     # Update sync state for newly ingested files
     resolved_url = webdav_url or settings.webdav_url or ""
-    current_state = webdav_state.load_state(resolved_url)
     etag_lookup = {r["path"]: r.get("_etag") for r in config}
     for res in result.get("ingested", []):
         path = res.get("_path")
         etag = etag_lookup.get(path) if path else None
         if path and "_sha256" in res and etag:
-            current_state[path] = {
-                "etag": etag,
-                "sha256": res["_sha256"],
-                "size": res.get("_size", 0),
-            }
-    webdav_state.save_state(resolved_url, current_state)
+            webdav_state.upsert_entry(
+                resolved_url,
+                path,
+                etag,
+                res["_sha256"],
+                res.get("_size", 0),
+            )
 
     result["url_results"] = url_results
     return result
