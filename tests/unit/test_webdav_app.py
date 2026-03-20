@@ -144,6 +144,10 @@ async def test_build_config_no_etag_from_server(mock_state):
     mock_client = MagicMock()
     # Should NOT be called
     mock_client.download_fileobj.side_effect = AssertionError("Should not download")
+    # HEAD also returns no etag
+    mock_head_resp = MagicMock()
+    mock_head_resp.headers.get.return_value = None
+    mock_client.http.head.return_value = mock_head_resp
 
     # Even with cached state, no server etag means cache miss
     mock_state["load"].return_value = {
@@ -361,6 +365,7 @@ async def test_build_config_from_urls_info_error_all_succeed(tmp_path, mock_stat
 
     mock_client = MagicMock()
     mock_client.info.side_effect = Exception("info failed")
+    mock_client.http.head.side_effect = Exception("HEAD failed")
 
     with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client):
         config, results = await webdav_app.build_config_from_urls(urls_file)
@@ -406,6 +411,7 @@ async def test_build_config_from_urls_info_error_no_download(tmp_path, mock_stat
 
     mock_client = MagicMock()
     mock_client.info.side_effect = Exception("PROPFIND failed")
+    mock_client.http.head.side_effect = Exception("HEAD failed")
     # Should NOT be called
     mock_client.download_fileobj.side_effect = AssertionError("Should not download")
 

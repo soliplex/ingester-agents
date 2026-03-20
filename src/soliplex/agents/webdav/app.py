@@ -173,13 +173,19 @@ async def build_config_from_urls(
             continue
 
         try:
-            # Try to get ETag via info() for cache check
+            # Try to get ETag via info() or HEAD for cache check
             server_etag = None
             try:
                 info = webdav_client.info(full_path)
                 server_etag = info.get("etag")
             except Exception:
-                logger.debug(f"Could not get info for {full_path}, will download")
+                logger.debug(f"Could not get info for {full_path}")
+            if not server_etag:
+                try:
+                    resp = webdav_client.http.head(full_path)
+                    server_etag = resp.headers.get("etag")
+                except Exception:
+                    logger.debug(f"Could not HEAD {full_path}")
 
             cached_entry = cached_state.get(full_path)
 
@@ -330,6 +336,12 @@ async def build_config(
             continue
 
         server_etag = file_info.get("etag")
+        if not server_etag:
+            try:
+                resp = webdav_client.http.head(full_path)
+                server_etag = resp.headers.get("etag")
+            except Exception:
+                logger.debug(f"Could not HEAD {full_path}")
         cached_entry = cached_state.get(full_path)
         etag_for_rec = None
 
@@ -647,6 +659,18 @@ async def do_ingest(
             return {"error": str(e)}
 
     sha256_hash = hashlib.sha256(doc_body, usedforsecurity=False).hexdigest()
+
+    # Capture ETag via HTTP HEAD if not already in metadata
+    if "_etag" not in meta and webdav_url:
+        try:
+            wc = create_webdav_client(webdav_url, webdav_username, webdav_password)
+            head_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}" if base_path else uri
+            resp = wc.http.head(head_path)
+            head_etag = resp.headers.get("etag")
+            if head_etag:
+                meta["_etag"] = head_etag
+        except Exception:
+            logger.debug(f"Could not get ETag via HEAD for {uri}")
 
     result = await client.do_ingest(
         doc_body,
