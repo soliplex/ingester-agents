@@ -1,0 +1,27 @@
+id: web-pages
+name: Web Pages
+source: web-source
+config:
+  start_workflows: false
+components:
+  # Single URL
+  - name: homepage
+    type: web
+    url: https://example.com/docs
+
+  # Inline list of URLs
+  - name: guides
+    type: web
+    urls:
+      - https://example.com/guide/getting-started
+      - https://example.com/guide/advanced
+
+  # Load URL list from a local file
+  - name: from-local-file
+    type: web
+    urls_file: web-urls.txt
+
+  # Load URL list from S3
+  - name: from-s3-file
+    type: web
+    urls_file: s3://my-bucket/manifests/web-urls.txt
