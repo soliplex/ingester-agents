@@ -830,3 +830,79 @@ async def test_find_or_create_batch_creates_new():
     ):
         result = await client.find_or_create_batch("src")
     assert result == 99
+
+
+# --- find_workflow ---
+
+
+@pytest.mark.asyncio
+async def test_find_workflow_found(mock_response):
+    """Test find_workflow returns workflow data when found."""
+    from tests.unit.conftest import create_async_context_manager
+
+    workflow_data = {"id": "wf-1", "name": "My Workflow"}
+    mock_resp = mock_response(200, workflow_data)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.find_workflow("wf-1")
+
+        assert result == workflow_data
+
+
+@pytest.mark.asyncio
+async def test_find_workflow_not_found(mock_response):
+    """Test find_workflow returns None on 404."""
+    from tests.unit.conftest import create_async_context_manager
+
+    mock_resp = mock_response(404)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.find_workflow("missing-wf")
+
+        assert result is None
+
+
+# --- find_param_set ---
+
+
+@pytest.mark.asyncio
+async def test_find_param_set_found(mock_response):
+    """Test find_param_set returns param set data when found."""
+    from tests.unit.conftest import create_async_context_manager
+
+    param_data = {"id": "ps-1", "params": {}}
+    mock_resp = mock_response(200, param_data)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.find_param_set("ps-1")
+
+        assert result == param_data
+
+
+@pytest.mark.asyncio
+async def test_find_param_set_not_found(mock_response):
+    """Test find_param_set returns None on 404."""
+    from tests.unit.conftest import create_async_context_manager
+
+    mock_resp = mock_response(404)
+
+    with patch("soliplex.agents.client.get_session") as mock_get_session:
+        mock_session = MagicMock()
+        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_get_session.return_value = create_async_context_manager(mock_session)
+
+        result = await client.find_param_set("missing-ps")
+
+        assert result is None

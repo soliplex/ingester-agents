@@ -28,8 +28,9 @@ repos:
     hooks:
       - id: pip-audit
         name: pip-audit
-        #ignore CVE-2026-0994 as not fixed
-        entry: uv run --with pip-audit pip-audit --ignore-vuln CVE-2026-0994
+        #ignore 2026-4539 as not fixed
+        #ignore 2026-25645 due to cooldown
+        entry: uv run --with pip-audit pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-25645
         language: system
         pass_filenames: false
         files: (^pyproject\.toml$|^uv\.lock$)

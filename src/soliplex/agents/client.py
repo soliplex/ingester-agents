@@ -131,6 +131,46 @@ async def find_batch_for_source(source: str) -> int | None:
             return found[0]["id"]
 
 
+async def find_param_set(param_id: str) -> str | None:
+    """
+    Find the parameter set with the given ID.
+
+    Args:
+        param_id (str): ID of the parameter set to find.
+
+    Returns:
+        str | None: The parameter set YAML string if found, None otherwise.
+    """
+    url = _build_url(f"/workflow/param-sets/{param_id}")
+    async with get_session() as session:
+        async with session.get(url) as response:
+            if response.status == 404:
+                return None
+            else:
+                response.raise_for_status()
+                return await response.json()
+
+
+async def find_workflow(workflow_id: str) -> str | None:
+    """
+    Find the workflow definition with the given ID.
+
+    Args:
+        workflow_id (str): ID of the workflow to find.
+
+    Returns:
+        str | None: The workflow YAML string if found, None otherwise.
+    """
+    url = _build_url(f"/workflow/definitions/{workflow_id}")
+    async with get_session() as session:
+        async with session.get(url) as response:
+            if response.status == 404:
+                return None
+            else:
+                response.raise_for_status()
+                return await response.json()
+
+
 async def _post_request(path: str, form_data: aiohttp.FormData, expected_status: int = 201) -> dict[str, Any]:
     """
     Send POST request and handle common error patterns.

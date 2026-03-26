@@ -1,0 +1,41 @@
+id: webdav-docs
+name: WebDAV Documents
+source: webdav-source
+config:
+  extensions:
+    - md
+    - pdf
+    - docx
+  start_workflows: false
+components:
+  # Scan an entire WebDAV directory recursively
+  - name: shared-drive
+    type: webdav
+    url: https://webdav.example.com
+    path: /documents
+
+  # Ingest a specific list of files
+  - name: curated-files
+    type: webdav
+    url: https://webdav.example.com
+    urls:
+      - /reports/q1.pdf
+      - /reports/q2.pdf
+
+  # Load the URL list from a local file
+  - name: from-local-file
+    type: webdav
+    url: https://webdav.example.com
+    urls_file: url-list.txt
+
+  # Load the URL list from S3
+  - name: from-s3-file
+    type: webdav
+    url: https://webdav.example.com
+    urls_file: s3://my-bucket/manifests/urls.txt
+
+  # Load the URL list from the same WebDAV server
+  - name: from-webdav-file
+    type: webdav
+    url: https://webdav.example.com
+    urls_file: https://webdav.example.com/manifests/urls.txt

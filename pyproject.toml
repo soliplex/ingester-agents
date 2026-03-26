@@ -38,7 +38,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "coverage>=7.11.0",
+    "faker>=40.8.0",
     "httpx>=0.28.0",
+    "opendal>=0.46.0",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
@@ -54,6 +56,10 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "soliplex.agents"
+
+[tool.uv]
+# 2-week cooldown: don't resolve packages newer than this date.
+exclude-newer = "2 weeks"
 
 
 [project.scripts]
