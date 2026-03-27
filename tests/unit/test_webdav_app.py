@@ -646,7 +646,7 @@ async def test_build_config_no_downloads_on_cache_miss(mock_state):
 async def test_do_ingest_returns_error_on_download_failure():
     """Test that do_ingest returns error dict when WebDAV download fails."""
     mock_client = MagicMock()
-    mock_client.download_fileobj.side_effect = httpx.ConnectTimeout("Connection timed out")
+    mock_client.http.get.side_effect = httpx.ConnectTimeout("Connection timed out")
 
     with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client):
         result = await webdav_app.do_ingest(
@@ -669,11 +669,9 @@ async def test_do_ingest_returns_sha256_on_success():
     import hashlib
 
     mock_client = MagicMock()
-
-    def mock_download(path, buffer):
-        buffer.write(b"file content")
-
-    mock_client.download_fileobj = mock_download
+    mock_resp = MagicMock()
+    mock_resp.content = b"file content"
+    mock_client.http.get.return_value = mock_resp
 
     expected_sha = hashlib.sha256(b"file content", usedforsecurity=False).hexdigest()
 
@@ -693,6 +691,36 @@ async def test_do_ingest_returns_sha256_on_success():
     assert result["_sha256"] == expected_sha
     assert result["_size"] == len(b"file content")
     mock_ingest.assert_called_once()
+    mock_client.http.get.assert_called_once_with("/webdav/docs/test.md", follow_redirects=True)
+
+
+@pytest.mark.asyncio
+async def test_do_ingest_follows_redirect():
+    """Test that do_ingest follows 307 redirects to fetch the current file."""
+    import hashlib
+
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.content = b"redirected content"
+    mock_client.http.get.return_value = mock_resp
+
+    expected_sha = hashlib.sha256(b"redirected content", usedforsecurity=False).hexdigest()
+
+    with (
+        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.client.do_ingest", new_callable=AsyncMock, return_value={"result": "success"}),
+    ):
+        result = await webdav_app.do_ingest(
+            base_path="/mobile/airpubs",
+            uri="doc-ver-8-9.pdf",
+            meta={},
+            source="test-source",
+            batch_id=1,
+            mime_type="application/pdf",
+        )
+
+    assert result["_sha256"] == expected_sha
+    mock_client.http.get.assert_called_once_with("/mobile/airpubs/doc-ver-8-9.pdf", follow_redirects=True)
 
 
 @pytest.mark.asyncio

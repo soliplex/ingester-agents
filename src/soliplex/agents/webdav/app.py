@@ -2,7 +2,6 @@
 
 import hashlib
 import logging
-from io import BytesIO
 from pathlib import Path
 
 import aiofiles
@@ -651,9 +650,9 @@ async def do_ingest(
             webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
             full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}"
             logger.info(f"Downloading from WebDAV: {full_path}")
-            buffer = BytesIO()
-            webdav_client.download_fileobj(full_path, buffer)
-            doc_body = buffer.getvalue()
+            resp = webdav_client.http.get(full_path, follow_redirects=True)
+            resp.raise_for_status()
+            doc_body = resp.content
         except Exception as e:
             logger.exception(f"Error downloading {uri} from WebDAV")
             return {"error": str(e)}
