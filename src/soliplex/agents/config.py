@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     http_timeout_connect: int = 10
     http_timeout_sock_read: int = 60
 
+    # WebDAV concurrency settings
+    webdav_max_concurrent_requests: int = 3
+
     # SCM concurrency and retry settings
     scm_max_concurrent_requests: int = 3
     scm_retry_attempts: int = 3

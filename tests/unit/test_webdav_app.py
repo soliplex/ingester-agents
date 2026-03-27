@@ -1,33 +1,34 @@
 """Tests for soliplex.agents.webdav.app module."""
 
 from unittest.mock import AsyncMock
-from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import aiofiles
-import httpx
 import pytest
 
 from soliplex.agents.webdav import app as webdav_app
+from soliplex.agents.webdav.async_client import WebDAVResponse
 
 
 @pytest.fixture
 def mock_webdav_client():
-    """Create a mock WebDAV client."""
-    client = MagicMock()
+    """Create a mock async WebDAV client."""
+    client = AsyncMock()
     client.ls.return_value = [
         {"name": "/documents", "type": "directory"},
-        {"name": "/documents/test.md", "type": "file", "size": 100, "etag": '"etag1"'},
-        {"name": "/documents/readme.pdf", "type": "file", "size": 200, "etag": '"etag2"'},
+        {"name": "/documents/test.md", "type": "file", "size": 100, "etag": '"etag1"', "content_length": 100},
+        {"name": "/documents/readme.pdf", "type": "file", "size": 200, "etag": '"etag2"', "content_length": 200},
     ]
 
-    # Mock download_fileobj to write content to buffer
-    def mock_download_fileobj(path, buffer):
-        buffer.write(b"test content")
-
-    client.download_fileobj = mock_download_fileobj
+    # Mock download to return bytes
+    client.download.return_value = b"test content"
     # Mock info() to return etag
     client.info.return_value = {"etag": '"etag_info"'}
+    # Mock head() to return WebDAVResponse
+    client.head.return_value = WebDAVResponse(status=200, headers={"etag": '"etag_head"'})
+    # Support async context manager
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
     return client
 
 
@@ -43,23 +44,6 @@ def mock_state():
         yield {"load": mock_load, "save": mock_save, "upsert": mock_upsert, "prune": mock_prune}
 
 
-# --- create_webdav_client ---
-
-
-def test_create_webdav_client_with_params():
-    """Test creating WebDAV client with explicit parameters."""
-    client = webdav_app.create_webdav_client(url="https://webdav.example.com", username="user", password="pass")
-    assert client is not None
-
-
-def test_create_webdav_client_no_url():
-    """Test creating WebDAV client without URL raises error."""
-    with patch("soliplex.agents.webdav.app.settings") as mock_settings:
-        mock_settings.webdav_url = None
-        with pytest.raises(ValueError, match="WebDAV URL is required"):
-            webdav_app.create_webdav_client()
-
-
 # --- build_config ---
 
 
@@ -67,7 +51,7 @@ def test_create_webdav_client_no_url():
 async def test_build_config(mock_webdav_client, mock_state):
     """Test building config from WebDAV directory (ETag miss → sha256=None)."""
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
     ):
         mock_ls.return_value = [
@@ -89,16 +73,18 @@ async def test_build_config(mock_webdav_client, mock_state):
 @pytest.mark.asyncio
 async def test_build_config_etag_cache_hit(mock_state):
     """Test that matching ETag skips download and reuses cached SHA256."""
-    mock_client = MagicMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
     # Should NOT be called - cache hit means no download
-    mock_client.download_fileobj.side_effect = AssertionError("Should not download")
+    mock_client.download.side_effect = AssertionError("Should not download")
 
     mock_state["load"].return_value = {
         "/documents/test.md": {"etag": '"etag1"', "sha256": "cached_hash_abc"},
     }
 
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
     ):
         mock_ls.return_value = [
@@ -115,16 +101,18 @@ async def test_build_config_etag_cache_hit(mock_state):
 @pytest.mark.asyncio
 async def test_build_config_etag_cache_miss(mock_state):
     """Test that mismatched ETag skips download and sets sha256=None."""
-    mock_client = MagicMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
     # Should NOT be called — no download on cache miss
-    mock_client.download_fileobj.side_effect = AssertionError("Should not download")
+    mock_client.download.side_effect = AssertionError("Should not download")
 
     mock_state["load"].return_value = {
         "/documents/test.md": {"etag": '"old_etag"', "sha256": "old_hash"},
     }
 
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
     ):
         mock_ls.return_value = [
@@ -141,13 +129,13 @@ async def test_build_config_etag_cache_miss(mock_state):
 @pytest.mark.asyncio
 async def test_build_config_no_etag_from_server(mock_state):
     """Test that missing ETag from server sets sha256=None, no _etag."""
-    mock_client = MagicMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
     # Should NOT be called
-    mock_client.download_fileobj.side_effect = AssertionError("Should not download")
+    mock_client.download.side_effect = AssertionError("Should not download")
     # HEAD also returns no etag
-    mock_head_resp = MagicMock()
-    mock_head_resp.headers.get.return_value = None
-    mock_client.http.head.return_value = mock_head_resp
+    mock_client.head.return_value = WebDAVResponse(status=200, headers={})
 
     # Even with cached state, no server etag means cache miss
     mock_state["load"].return_value = {
@@ -155,7 +143,7 @@ async def test_build_config_no_etag_from_server(mock_state):
     }
 
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
     ):
         mock_ls.return_value = [
@@ -173,15 +161,13 @@ async def test_build_config_no_etag_from_server(mock_state):
 @pytest.mark.asyncio
 async def test_build_config_prune_deleted():
     """Test that deleted files are logged and pruned from state."""
-    mock_client = MagicMock()
-
-    def mock_download(path, buffer):
-        buffer.write(b"content")
-
-    mock_client.download_fileobj = mock_download
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.download.return_value = b"content"
 
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
         patch("soliplex.agents.webdav.app.webdav_state.load_state") as mock_load,
         patch("soliplex.agents.webdav.app.webdav_state.upsert_entry"),
@@ -220,18 +206,20 @@ async def test_recursive_listdir_webdav_flat(mock_webdav_client):
 @pytest.mark.asyncio
 async def test_recursive_listdir_webdav_nested():
     """Test listing files in nested WebDAV directories."""
-    mock_client = MagicMock()
-    mock_client.ls.side_effect = [
-        [
-            {"name": "/documents", "type": "directory"},
-            {"name": "/documents/subdir", "type": "directory"},
-            {"name": "/documents/file1.md", "type": "file", "size": 100},
-        ],
-        [
-            {"name": "/documents/subdir", "type": "directory"},
-            {"name": "/documents/subdir/file2.md", "type": "file", "size": 200},
-        ],
-    ]
+    mock_client = AsyncMock()
+    mock_client.ls = AsyncMock(
+        side_effect=[
+            [
+                {"name": "/documents", "type": "directory"},
+                {"name": "/documents/subdir", "type": "directory"},
+                {"name": "/documents/file1.md", "type": "file", "size": 100},
+            ],
+            [
+                {"name": "/documents/subdir", "type": "directory"},
+                {"name": "/documents/subdir/file2.md", "type": "file", "size": 200},
+            ],
+        ]
+    )
 
     files = await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
 
@@ -245,7 +233,7 @@ async def test_recursive_listdir_webdav_nested():
 async def test_list_config_no_downloads(mock_webdav_client):
     """Test that list_config only lists files without downloading content."""
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
     ):
         mock_ls.return_value = [
@@ -307,7 +295,7 @@ async def test_build_config_from_urls(tmp_path, mock_webdav_client, mock_state):
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n/documents/readme.pdf\n")
 
-    with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client):
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client):
         config, results = await webdav_app.build_config_from_urls(urls_file)
 
     assert len(config) == 2
@@ -330,7 +318,7 @@ async def test_build_config_from_urls_extension_filtering(tmp_path, mock_webdav_
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n/documents/archive.zip\n")
 
-    with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client):
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client):
         config, results = await webdav_app.build_config_from_urls(urls_file)
 
     # Only .md should pass (zip is not in default extensions)
@@ -349,7 +337,7 @@ async def test_build_config_from_urls_blank_lines(tmp_path, mock_webdav_client, 
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n\n  \n/documents/readme.pdf\n")
 
-    with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client):
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client):
         config, results = await webdav_app.build_config_from_urls(urls_file)
 
     assert len(config) == 2
@@ -363,11 +351,13 @@ async def test_build_config_from_urls_info_error_all_succeed(tmp_path, mock_stat
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/good.md\n/documents/also_good.pdf\n")
 
-    mock_client = MagicMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.info.side_effect = Exception("info failed")
-    mock_client.http.head.side_effect = Exception("HEAD failed")
+    mock_client.head.side_effect = Exception("HEAD failed")
 
-    with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client):
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
         config, results = await webdav_app.build_config_from_urls(urls_file)
 
     assert len(config) == 2
@@ -385,16 +375,18 @@ async def test_build_config_from_urls_etag_cache_hit(tmp_path, mock_state):
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n")
 
-    mock_client = MagicMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.info.return_value = {"etag": '"cached_etag"'}
     # Should NOT be called
-    mock_client.download_fileobj.side_effect = AssertionError("Should not download")
+    mock_client.download.side_effect = AssertionError("Should not download")
 
     mock_state["load"].return_value = {
         "/documents/test.md": {"etag": '"cached_etag"', "sha256": "cached_hash", "size": 42},
     }
 
-    with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client):
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
         config, results = await webdav_app.build_config_from_urls(urls_file)
 
     assert len(config) == 1
@@ -409,13 +401,15 @@ async def test_build_config_from_urls_info_error_no_download(tmp_path, mock_stat
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n")
 
-    mock_client = MagicMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.info.side_effect = Exception("PROPFIND failed")
-    mock_client.http.head.side_effect = Exception("HEAD failed")
+    mock_client.head.side_effect = Exception("HEAD failed")
     # Should NOT be called
-    mock_client.download_fileobj.side_effect = AssertionError("Should not download")
+    mock_client.download.side_effect = AssertionError("Should not download")
 
-    with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client):
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
         config, results = await webdav_app.build_config_from_urls(urls_file)
 
     assert len(config) == 1
@@ -431,7 +425,7 @@ async def test_build_config_from_urls_info_error_no_download(tmp_path, mock_stat
 async def test_validate_config_with_webdav_path(mock_webdav_client, capsys):
     """Test validate_config with WebDAV path."""
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
         patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build,
     ):
         mock_build.return_value = [
@@ -484,7 +478,7 @@ async def test_load_inventory_with_webdav_path(mock_webdav_client, monkeypatch):
     monkeypatch.setattr("soliplex.agents.client.create_batch", mock_create_batch)
 
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
         patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build,
     ):
         mock_build.return_value = [
@@ -543,7 +537,7 @@ async def test_load_inventory_from_urls(mock_webdav_client, monkeypatch, tmp_pat
         await f.write("/documents/test.md\n")
 
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
         patch(
             "soliplex.agents.webdav.app.do_ingest",
             new_callable=AsyncMock,
@@ -574,7 +568,7 @@ async def test_status_report_with_webdav_path(mock_webdav_client, monkeypatch, c
     monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
 
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_webdav_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
         patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build,
     ):
         mock_build.return_value = [
@@ -591,29 +585,29 @@ async def test_status_report_with_webdav_path(mock_webdav_client, monkeypatch, c
 
 
 @pytest.mark.asyncio
-async def test_recursive_listdir_webdav_reraises_connect_timeout():
-    """Test that ConnectTimeout is re-raised instead of silently swallowed."""
-    mock_client = MagicMock()
-    mock_client.ls.side_effect = httpx.ConnectTimeout("SSL handshake timed out")
+async def test_recursive_listdir_webdav_reraises_timeout():
+    """Test that TimeoutError is re-raised instead of silently swallowed."""
+    mock_client = AsyncMock()
+    mock_client.ls.side_effect = TimeoutError("Connection timed out")
 
-    with pytest.raises(httpx.ConnectTimeout):
+    with pytest.raises(TimeoutError):
         await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
 
 
 @pytest.mark.asyncio
-async def test_recursive_listdir_webdav_reraises_connect_error():
-    """Test that ConnectError is re-raised instead of silently swallowed."""
-    mock_client = MagicMock()
-    mock_client.ls.side_effect = httpx.ConnectError("Connection refused")
+async def test_recursive_listdir_webdav_reraises_connection_error():
+    """Test that ConnectionError is re-raised instead of silently swallowed."""
+    mock_client = AsyncMock()
+    mock_client.ls.side_effect = ConnectionError("Connection refused")
 
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(ConnectionError, match="Connection refused"):
         await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
 
 
 @pytest.mark.asyncio
 async def test_recursive_listdir_webdav_swallows_other_errors():
     """Test that non-connection errors are still caught and return empty list."""
-    mock_client = MagicMock()
+    mock_client = AsyncMock()
     mock_client.ls.side_effect = PermissionError("Access denied")
 
     files = await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
@@ -623,12 +617,14 @@ async def test_recursive_listdir_webdav_swallows_other_errors():
 @pytest.mark.asyncio
 async def test_build_config_no_downloads_on_cache_miss(mock_state):
     """Test that build_config does not download files on ETag cache miss."""
-    mock_client = MagicMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
     # Should NOT be called
-    mock_client.download_fileobj.side_effect = AssertionError("Should not download")
+    mock_client.download.side_effect = AssertionError("Should not download")
 
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
     ):
         mock_ls.return_value = [
@@ -645,10 +641,12 @@ async def test_build_config_no_downloads_on_cache_miss(mock_state):
 @pytest.mark.asyncio
 async def test_do_ingest_returns_error_on_download_failure():
     """Test that do_ingest returns error dict when WebDAV download fails."""
-    mock_client = MagicMock()
-    mock_client.download_fileobj.side_effect = httpx.ConnectTimeout("Connection timed out")
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.download.side_effect = TimeoutError("Connection timed out")
 
-    with patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client):
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
         result = await webdav_app.do_ingest(
             base_path="/webdav/docs",
             uri="test.md",
@@ -668,17 +666,15 @@ async def test_do_ingest_returns_sha256_on_success():
     """Test that do_ingest returns _sha256 and _size on success."""
     import hashlib
 
-    mock_client = MagicMock()
-
-    def mock_download(path, buffer):
-        buffer.write(b"file content")
-
-    mock_client.download_fileobj = mock_download
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.download.return_value = b"file content"
 
     expected_sha = hashlib.sha256(b"file content", usedforsecurity=False).hexdigest()
 
     with (
-        patch("soliplex.agents.webdav.app.create_webdav_client", return_value=mock_client),
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
         patch("soliplex.agents.client.do_ingest", new_callable=AsyncMock, return_value={"result": "success"}) as mock_ingest,
     ):
         result = await webdav_app.do_ingest(
@@ -875,7 +871,9 @@ async def test_load_inventory_from_urls_updates_sync_state(tmp_path, mock_state,
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n")
 
-    mock_client = MagicMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.info.return_value = {"etag": '"new_etag"'}
 
     do_ingest_ret = {
@@ -885,7 +883,7 @@ async def test_load_inventory_from_urls_updates_sync_state(tmp_path, mock_state,
     }
     with (
         patch(
-            "soliplex.agents.webdav.app.create_webdav_client",
+            "soliplex.agents.webdav.app.create_async_webdav_client",
             return_value=mock_client,
         ),
         patch(

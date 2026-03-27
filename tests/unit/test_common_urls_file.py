@@ -1,7 +1,6 @@
 """Tests for urls_file shared utility."""
 
 from unittest.mock import AsyncMock
-from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
@@ -128,22 +127,21 @@ class TestIsWebdavUrl:
 
 class TestReadTextFromWebdav:
     def _mock_create_client(self, content: bytes = b"url1\n"):
-        """Return a patched create_webdav_client and its mock client."""
-        mock_client = MagicMock()
-
-        def fake_download(path, buffer):
-            buffer.write(content)
-
-        mock_client.download_fileobj.side_effect = fake_download
+        """Return a patched create_async_webdav_client and its mock client."""
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.download.return_value = content
         return patch(
-            "soliplex.agents.webdav.app.create_webdav_client",
+            "soliplex.agents.webdav.async_client.create_async_webdav_client",
             return_value=mock_client,
         ), mock_client
 
-    def test_downloads_file_with_explicit_credentials(self):
+    @pytest.mark.asyncio
+    async def test_downloads_file_with_explicit_credentials(self):
         patcher, mock_client = self._mock_create_client(b"/doc1.pdf\n/doc2.pdf\n")
         with patcher as mock_create:
-            result = read_text_from_webdav(
+            result = await read_text_from_webdav(
                 "https://webdav.example.com/manifests/urls.txt",
                 webdav_username="user",
                 webdav_password="pass",
@@ -151,13 +149,13 @@ class TestReadTextFromWebdav:
 
         assert result == "/doc1.pdf\n/doc2.pdf\n"
         mock_create.assert_called_once_with("https://webdav.example.com", "user", "pass")
-        mock_client.download_fileobj.assert_called_once()
-        assert mock_client.download_fileobj.call_args[0][0] == "/manifests/urls.txt"
+        mock_client.download.assert_called_once_with("/manifests/urls.txt")
 
-    def test_uses_webdav_url_override(self):
+    @pytest.mark.asyncio
+    async def test_uses_webdav_url_override(self):
         patcher, _ = self._mock_create_client()
         with patcher as mock_create:
-            read_text_from_webdav(
+            await read_text_from_webdav(
                 "https://webdav.example.com/urls.txt",
                 webdav_url="https://override.example.com",
                 webdav_username="u",
@@ -166,18 +164,20 @@ class TestReadTextFromWebdav:
 
         mock_create.assert_called_once_with("https://override.example.com", "u", "p")
 
-    def test_derives_base_url_from_full_url(self):
+    @pytest.mark.asyncio
+    async def test_derives_base_url_from_full_url(self):
         patcher, mock_client = self._mock_create_client()
         with patcher as mock_create:
-            read_text_from_webdav("https://webdav.example.com:8443/deep/path/urls.txt")
+            await read_text_from_webdav("https://webdav.example.com:8443/deep/path/urls.txt")
 
         mock_create.assert_called_once_with("https://webdav.example.com:8443", None, None)
-        assert mock_client.download_fileobj.call_args[0][0] == "/deep/path/urls.txt"
+        mock_client.download.assert_called_once_with("/deep/path/urls.txt")
 
-    def test_passes_none_credentials_when_not_provided(self):
+    @pytest.mark.asyncio
+    async def test_passes_none_credentials_when_not_provided(self):
         patcher, _ = self._mock_create_client()
         with patcher as mock_create:
-            read_text_from_webdav("https://webdav.example.com/urls.txt")
+            await read_text_from_webdav("https://webdav.example.com/urls.txt")
 
         mock_create.assert_called_once_with("https://webdav.example.com", None, None)
 
@@ -187,6 +187,7 @@ class TestReadUrlsFileWebdav:
     async def test_webdav_url(self):
         with patch(
             "soliplex.agents.common.urls_file.read_text_from_webdav",
+            new_callable=AsyncMock,
             return_value="/doc1.pdf\n/doc2.pdf\n",
         ) as mock_webdav:
             result = await read_urls_file(
@@ -207,6 +208,7 @@ class TestReadUrlsFileWebdav:
     async def test_webdav_url_passes_credentials(self):
         with patch(
             "soliplex.agents.common.urls_file.read_text_from_webdav",
+            new_callable=AsyncMock,
             return_value="url1\n",
         ) as mock_webdav:
             await read_urls_file(
@@ -227,6 +229,7 @@ class TestReadUrlsFileWebdav:
     async def test_http_url(self):
         with patch(
             "soliplex.agents.common.urls_file.read_text_from_webdav",
+            new_callable=AsyncMock,
             return_value="/doc1.pdf\n",
         ):
             result = await read_urls_file("http://webdav.local/urls.txt")
