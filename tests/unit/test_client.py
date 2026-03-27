@@ -837,11 +837,11 @@ async def test_find_or_create_batch_creates_new():
 
 @pytest.mark.asyncio
 async def test_find_workflow_found(mock_response):
-    """Test find_workflow returns workflow data when found."""
+    """Test find_workflow returns workflow text when found."""
     from tests.unit.conftest import create_async_context_manager
 
-    workflow_data = {"id": "wf-1", "name": "My Workflow"}
-    mock_resp = mock_response(200, workflow_data)
+    workflow_text = "id: wf-1\nname: My Workflow\n"
+    mock_resp = mock_response(200, text_data=workflow_text)
 
     with patch("soliplex.agents.client.get_session") as mock_get_session:
         mock_session = MagicMock()
@@ -850,7 +850,7 @@ async def test_find_workflow_found(mock_response):
 
         result = await client.find_workflow("wf-1")
 
-        assert result == workflow_data
+        assert result == workflow_text
 
 
 @pytest.mark.asyncio
@@ -875,11 +875,11 @@ async def test_find_workflow_not_found(mock_response):
 
 @pytest.mark.asyncio
 async def test_find_param_set_found(mock_response):
-    """Test find_param_set returns param set data when found."""
+    """Test find_param_set returns param set text when found."""
     from tests.unit.conftest import create_async_context_manager
 
-    param_data = {"id": "ps-1", "params": {}}
-    mock_resp = mock_response(200, param_data)
+    param_text = "id: ps-1\nparams: {}\n"
+    mock_resp = mock_response(200, text_data=param_text)
 
     with patch("soliplex.agents.client.get_session") as mock_get_session:
         mock_session = MagicMock()
@@ -888,7 +888,7 @@ async def test_find_param_set_found(mock_response):
 
         result = await client.find_param_set("ps-1")
 
-        assert result == param_data
+        assert result == param_text
 
 
 @pytest.mark.asyncio

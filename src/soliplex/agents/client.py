@@ -148,7 +148,7 @@ async def find_param_set(param_id: str) -> str | None:
                 return None
             else:
                 response.raise_for_status()
-                return await response.json()
+                return await response.text()
 
 
 async def find_workflow(workflow_id: str) -> str | None:
@@ -168,7 +168,7 @@ async def find_workflow(workflow_id: str) -> str | None:
                 return None
             else:
                 response.raise_for_status()
-                return await response.json()
+                return await response.text()
 
 
 async def _post_request(path: str, form_data: aiohttp.FormData, expected_status: int = 201) -> dict[str, Any]:
