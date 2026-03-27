@@ -1,6 +1,7 @@
 """Tests for soliplex.agents.webdav.async_client module."""
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -90,7 +91,7 @@ MULTISTATUS_SINGLE_XML = """\
 # ---------------------------------------------------------------------------
 
 
-def _mock_response(status=200, text="", headers=None, content=b""):
+def _mock_response(status=200, text="", headers=None, content=b"", history=None, url=None):
     """Create a mock aiohttp.ClientResponse."""
     resp = MagicMock(spec=aiohttp.ClientResponse)
     resp.status = status
@@ -99,6 +100,8 @@ def _mock_response(status=200, text="", headers=None, content=b""):
     resp.read = AsyncMock(return_value=content)
     resp.release = MagicMock()
     resp.raise_for_status = MagicMock()
+    resp.history = history or ()
+    resp.url = url or "https://example.com/path"
     return resp
 
 
@@ -603,6 +606,35 @@ class TestRedirects:
         await client.download("/file.txt")
         call_kwargs = session.request.call_args[1]
         assert call_kwargs["allow_redirects"] is True
+
+    @pytest.mark.asyncio
+    async def test_redirect_chain_is_logged(self, caplog):
+        client, session = _make_client()
+        hop1 = MagicMock()
+        hop1.url = "https://example.com/old"
+        hop2 = MagicMock()
+        hop2.url = "https://example.com/mid"
+        session.request = AsyncMock(
+            return_value=_mock_response(
+                200,
+                content=b"data",
+                history=(hop1, hop2),
+                url="https://example.com/final",
+            )
+        )
+        with caplog.at_level(logging.INFO, logger="soliplex.agents.webdav.async_client"):
+            await client._request("GET", "/old", allow_redirects=True)
+        assert "redirected" in caplog.text
+        assert "https://example.com/old" in caplog.text
+        assert "https://example.com/final" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_no_redirect_no_log(self, caplog):
+        client, session = _make_client()
+        session.request = AsyncMock(return_value=_mock_response(200))
+        with caplog.at_level(logging.INFO, logger="soliplex.agents.webdav.async_client"):
+            await client._request("GET", "/path")
+        assert "redirected" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

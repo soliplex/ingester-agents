@@ -350,6 +350,16 @@ class AsyncWebDAVClient:
                 with attempt:
                     resp = await session.request(method, url, **kwargs)
 
+                    if resp.history:
+                        chain = " -> ".join(str(r.url) for r in resp.history)
+                        logger.info(
+                            "%s %s redirected: %s -> %s",
+                            method,
+                            url,
+                            chain,
+                            resp.url,
+                        )
+
                     if resp.status == 404:
                         resp.release()
                         raise ResourceNotFound(path)
