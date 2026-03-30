@@ -6,10 +6,11 @@ import logging
 import sys
 from typing import Annotated
 
-import httpx
+import aiohttp
 import typer
 
 from . import app
+from .async_client import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def validate(
     """
     try:
         asyncio.run(app.validate_config(config_path, webdav_url, webdav_username, webdav_password))
-    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+    except (aiohttp.ClientConnectorError, ClientError, TimeoutError) as e:
         print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
         raise SystemExit(1) from None
     except ValueError as e:
@@ -81,7 +82,7 @@ def export_urls(
     """
     try:
         asyncio.run(app.export_urls(config_path, output, webdav_url, webdav_username, webdav_password))
-    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+    except (aiohttp.ClientConnectorError, ClientError, TimeoutError) as e:
         print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
         raise SystemExit(1) from None
     except ValueError as e:
@@ -117,7 +118,7 @@ def check_status(
     """
     try:
         asyncio.run(app.status_report(config_path, source, detail, webdav_url, webdav_username, webdav_password))
-    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+    except (aiohttp.ClientConnectorError, ClientError, TimeoutError) as e:
         print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
         raise SystemExit(1) from None
     except ValueError as e:
@@ -182,7 +183,7 @@ def run(
                 extra_metadata=extra_metadata,
             )
         )
-    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+    except (aiohttp.ClientConnectorError, ClientError, TimeoutError) as e:
         print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
         raise SystemExit(1) from None
     except ValueError as e:
@@ -265,7 +266,7 @@ def run_from_urls(
                 extra_metadata=extra_metadata,
             )
         )
-    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+    except (aiohttp.ClientConnectorError, ClientError, TimeoutError) as e:
         print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
         raise SystemExit(1) from None
     except ValueError as e:
