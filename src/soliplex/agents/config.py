@@ -2,6 +2,7 @@ import enum
 import logging
 import logging.handlers
 import os
+import time
 from pathlib import Path
 from typing import Annotated
 from typing import Literal
@@ -63,6 +64,7 @@ class Settings(BaseSettings):
     smtp_password: SecretStr | None = None
     smtp_use_tls: bool = False
     smtp_log_level: str = "ERROR"
+    smtp_cooldown: int = 30  # minimum seconds between emails
 
     # Ingester API authentication (for outgoing requests to the Ingester API)
     ingester_api_key: SecretStr | None = None
@@ -113,6 +115,22 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+class _ThrottledSMTPHandler(logging.handlers.SMTPHandler):
+    """SMTPHandler that suppresses emails within a cooldown period."""
+
+    def __init__(self, *args, cooldown: int = 30, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._cooldown = cooldown
+        self._last_emit: float = 0
+
+    def emit(self, record):
+        now = time.monotonic()
+        if now - self._last_emit < self._cooldown:
+            return
+        self._last_emit = now
+        super().emit(record)
+
+
 def _add_smtp_handler():
     """Attach an SMTPHandler to the root logger if SMTP settings are configured."""
     if not (settings.smtp_host and settings.smtp_from and settings.smtp_to):
@@ -125,13 +143,14 @@ def _add_smtp_handler():
                 settings.smtp_password.get_secret_value(),
             )
         secure = () if settings.smtp_use_tls else None
-        handler = logging.handlers.SMTPHandler(
+        handler = _ThrottledSMTPHandler(
             mailhost=(settings.smtp_host, settings.smtp_port),
             fromaddr=settings.smtp_from,
             toaddrs=settings.smtp_to,
             subject=settings.smtp_subject,
             credentials=credentials,
             secure=secure,
+            cooldown=settings.smtp_cooldown,
         )
         handler.setLevel(settings.smtp_log_level)
         handler.setFormatter(

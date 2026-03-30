@@ -328,6 +328,7 @@ class AsyncWebDAVClient:
         allow_redirects: bool = False,
         headers: dict[str, str] | None = None,
         data: str | None = None,
+        timeout: aiohttp.ClientTimeout | None = None,
     ) -> aiohttp.ClientResponse:
         session = await self._ensure_session()
         url = self._build_url(path)
@@ -341,6 +342,8 @@ class AsyncWebDAVClient:
             kwargs["headers"] = headers
         if data is not None:
             kwargs["data"] = data
+        if timeout is not None:
+            kwargs["timeout"] = timeout
 
         async with self._semaphore:
             async for attempt in AsyncRetrying(
@@ -389,7 +392,7 @@ class AsyncWebDAVClient:
         path: str,
         data: str | None = None,
         headers: dict[str, str] | None = None,
-        follow_redirects: bool = False,
+        follow_redirects: bool = True,
     ) -> MultiStatusResponse:
         """Send a PROPFIND request and parse the multistatus response."""
         merged_headers = dict(headers or {})
@@ -416,7 +419,6 @@ class AsyncWebDAVClient:
         result = await self.propfind(
             path,
             headers={"Depth": "1"},
-            follow_redirects=True,
         )
         responses = result.responses
 
@@ -435,7 +437,7 @@ class AsyncWebDAVClient:
 
     async def info(self, path: str) -> dict[str, Any]:
         """Return metadata for a single resource."""
-        result = await self.propfind(path, headers={"Depth": "0"}, follow_redirects=False)
+        result = await self.propfind(path, headers={"Depth": "0"})
         responses = result.responses
         if not responses:
             raise ResourceNotFound(path)
@@ -455,7 +457,12 @@ class AsyncWebDAVClient:
 
     async def download(self, path: str) -> bytes:
         """Download a file via HTTP GET. Returns the file content as bytes."""
-        resp = await self._request("GET", path, allow_redirects=True)
+        resp = await self._request(
+            "GET",
+            path,
+            allow_redirects=True,
+            timeout=aiohttp.ClientTimeout(total=300, connect=20),
+        )
         content = await resp.read()
         resp.release()
         return content

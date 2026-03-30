@@ -598,12 +598,12 @@ class TestRedirects:
         assert call_kwargs["allow_redirects"] is True
 
     @pytest.mark.asyncio
-    async def test_propfind_no_redirect_by_default(self):
+    async def test_propfind_follows_redirects_by_default(self):
         client, session = _make_client()
         session.request = AsyncMock(return_value=_mock_response(207, text=MULTISTATUS_DIR_XML))
         await client.propfind("/documents")
         call_kwargs = session.request.call_args[1]
-        assert call_kwargs["allow_redirects"] is False
+        assert call_kwargs["allow_redirects"] is True
 
     @pytest.mark.asyncio
     async def test_download_follows_redirects(self):

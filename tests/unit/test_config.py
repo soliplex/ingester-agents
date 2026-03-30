@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from soliplex.agents.config import ManifestConfig
 from soliplex.agents.config import _add_smtp_handler
+from soliplex.agents.config import _ThrottledSMTPHandler
 from soliplex.agents.config import configure_logging
 
 
@@ -84,6 +85,7 @@ class TestAddSmtpHandler:
             mock_settings.smtp_password = None
             mock_settings.smtp_use_tls = True
             mock_settings.smtp_log_level = "ERROR"
+            mock_settings.smtp_cooldown = 30
             mock_settings.log_format = "{message}"
             _add_smtp_handler()
         new_handlers = [h for h in root.handlers[before:] if isinstance(h, logging.handlers.SMTPHandler)]
@@ -107,6 +109,7 @@ class TestAddSmtpHandler:
             mock_settings.smtp_password = None
             mock_settings.smtp_use_tls = True
             mock_settings.smtp_log_level = "ERROR"
+            mock_settings.smtp_cooldown = 30
             configure_logging()
             configure_logging()
         smtp_handlers = [h for h in root.handlers if isinstance(h, logging.handlers.SMTPHandler)]
@@ -132,6 +135,54 @@ class TestAddSmtpHandler:
             mock_settings.smtp_password = None
             _add_smtp_handler()
             mock_logger.warning.assert_called_once()
+
+
+class TestThrottledSMTPHandler:
+    def test_first_emit_sends(self):
+        """First record is always emitted."""
+        handler = _ThrottledSMTPHandler(
+            mailhost=("localhost", 25),
+            fromaddr="a@b.com",
+            toaddrs=["c@d.com"],
+            subject="test",
+            cooldown=30,
+        )
+        record = logging.LogRecord("test", logging.ERROR, "", 0, "msg", (), None)
+        with patch.object(logging.handlers.SMTPHandler, "emit") as mock_emit:
+            handler.emit(record)
+            mock_emit.assert_called_once_with(record)
+
+    def test_second_emit_within_cooldown_suppressed(self):
+        """Second record within cooldown is dropped."""
+        handler = _ThrottledSMTPHandler(
+            mailhost=("localhost", 25),
+            fromaddr="a@b.com",
+            toaddrs=["c@d.com"],
+            subject="test",
+            cooldown=30,
+        )
+        record = logging.LogRecord("test", logging.ERROR, "", 0, "msg", (), None)
+        with patch.object(logging.handlers.SMTPHandler, "emit") as mock_emit:
+            handler.emit(record)
+            handler.emit(record)
+            assert mock_emit.call_count == 1
+
+    def test_emit_after_cooldown_sends(self):
+        """Record after cooldown expires is emitted."""
+        handler = _ThrottledSMTPHandler(
+            mailhost=("localhost", 25),
+            fromaddr="a@b.com",
+            toaddrs=["c@d.com"],
+            subject="test",
+            cooldown=30,
+        )
+        record = logging.LogRecord("test", logging.ERROR, "", 0, "msg", (), None)
+        with patch.object(logging.handlers.SMTPHandler, "emit") as mock_emit:
+            handler.emit(record)
+            # simulate cooldown elapsed
+            handler._last_emit -= 31
+            handler.emit(record)
+            assert mock_emit.call_count == 2
 
 
 class TestManifestConfig:
