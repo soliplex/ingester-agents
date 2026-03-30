@@ -9,6 +9,8 @@ from fastapi import HTTPException
 
 from soliplex.agents.manifest import runner as manifest_runner
 from soliplex.agents.server.auth import get_current_user
+from soliplex.agents.server.locks import get_manifest_lock
+from soliplex.agents.server.locks import is_manifest_running
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +31,38 @@ async def run_manifests(
     Loads and validates manifests, then dispatches each component to its
     appropriate agent (fs, scm, webdav, web).
     """
+    from pathlib import Path as FilePath
+
+    p = FilePath(path)
+    if not p.exists():
+        raise HTTPException(status_code=404, detail=f"Path not found: {path}")
+
     try:
-        results = await manifest_runner.run_manifests(path)
+        if p.is_file():
+            manifests = [manifest_runner.load_manifest(path)]
+        else:
+            manifests = manifest_runner.load_manifests_from_dir(path)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error running manifests: {str(e)}") from e
+
+    busy = [m.id for m in manifests if is_manifest_running(m.id)]
+    if busy:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Manifest(s) already running: {', '.join(busy)}",
+        )
+
+    try:
+        results = []
+        for manifest in manifests:
+            lock = get_manifest_lock(manifest.id)
+            async with lock:
+                result = await manifest_runner.run_manifest(manifest)
+                results.append(result)
 
         total_components = sum(len(r.get("results", [])) for r in results)
         total_errors = sum(1 for r in results for c in r.get("results", []) if "error" in c)
@@ -42,10 +74,6 @@ async def run_manifests(
             "total_errors": total_errors,
             "manifests": results,
         }
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error running manifests: {str(e)}") from e
 
@@ -61,7 +89,23 @@ async def run_single_manifest(
     """
     try:
         manifest = manifest_runner.load_manifest(path)
-        result = await manifest_runner.run_manifest(manifest)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error running manifest: {str(e)}") from e
+
+    if is_manifest_running(manifest.id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Manifest '{manifest.id}' is already running",
+        )
+
+    try:
+        lock = get_manifest_lock(manifest.id)
+        async with lock:
+            result = await manifest_runner.run_manifest(manifest)
 
         component_errors = [c for c in result.get("results", []) if "error" in c]
 
@@ -73,10 +117,6 @@ async def run_single_manifest(
             "error_count": len(component_errors),
             "results": result.get("results", []),
         }
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except (ValueError, TypeError) as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error running manifest: {str(e)}") from e
 

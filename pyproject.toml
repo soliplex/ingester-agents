@@ -30,7 +30,6 @@ dependencies = [
     "tenacity>=9.0.0",
     "typer>=0.21.1",
     "uvicorn[standard]>=0.34.0",
-    "webdav4>=0.10.0",
     "pyyaml>=6.0",
 ]
 

@@ -8,10 +8,20 @@ from fastapi.testclient import TestClient
 
 from soliplex.agents.server import app
 from soliplex.agents.server.auth import AuthenticatedUser
+from soliplex.agents.server.locks import get_manifest_lock
+from soliplex.agents.server.locks import reset_locks
 
 
 async def mock_get_current_user():
     return AuthenticatedUser(identity="test-user", method="none")
+
+
+@pytest.fixture(autouse=True)
+def _clean_locks():
+    """Reset the lock registry between tests."""
+    reset_locks()
+    yield
+    reset_locks()
 
 
 @pytest.fixture
@@ -24,22 +34,36 @@ def client():
     app.dependency_overrides.clear()
 
 
+def _make_manifest(mid="test", name="Test"):
+    """Return a minimal Manifest stub."""
+    from soliplex.agents.config import Manifest
+
+    return Manifest(
+        id=mid,
+        name=name,
+        source=f"src-{mid}",
+        components=[{"type": "fs", "name": "c", "path": "/p"}],
+    )
+
+
 # --- POST /api/v1/manifest/run ---
 
 
 def test_run_manifests_success(client, tmp_path):
     """Test running manifests from a directory."""
     with patch("soliplex.agents.server.routes.manifest.manifest_runner") as mock_runner:
-        mock_runner.run_manifests = AsyncMock(
-            return_value=[
-                {
-                    "manifest_id": "test",
-                    "manifest_name": "Test",
-                    "results": [
-                        {"component": "docs", "result": {"ingested": [1], "errors": []}},
-                    ],
-                }
-            ]
+        mock_runner.load_manifests_from_dir.return_value = [_make_manifest("m1")]
+        mock_runner.run_manifest = AsyncMock(
+            return_value={
+                "manifest_id": "m1",
+                "manifest_name": "Test",
+                "results": [
+                    {
+                        "component": "docs",
+                        "result": {"ingested": [1], "errors": []},
+                    },
+                ],
+            }
         )
 
         response = client.post(
@@ -58,17 +82,19 @@ def test_run_manifests_success(client, tmp_path):
 def test_run_manifests_with_errors(client, tmp_path):
     """Test running manifests when components have errors."""
     with patch("soliplex.agents.server.routes.manifest.manifest_runner") as mock_runner:
-        mock_runner.run_manifests = AsyncMock(
-            return_value=[
-                {
-                    "manifest_id": "test",
-                    "manifest_name": "Test",
-                    "results": [
-                        {"component": "docs", "result": {"ingested": [1], "errors": []}},
-                        {"component": "web", "error": "connection failed"},
-                    ],
-                }
-            ]
+        mock_runner.load_manifests_from_dir.return_value = [_make_manifest("m1")]
+        mock_runner.run_manifest = AsyncMock(
+            return_value={
+                "manifest_id": "m1",
+                "manifest_name": "Test",
+                "results": [
+                    {
+                        "component": "docs",
+                        "result": {"ingested": [1], "errors": []},
+                    },
+                    {"component": "web", "error": "connection failed"},
+                ],
+            }
         )
 
         response = client.post(
@@ -84,42 +110,81 @@ def test_run_manifests_with_errors(client, tmp_path):
 
 def test_run_manifests_file_not_found(client):
     """Test running manifests with non-existent path."""
-    with patch("soliplex.agents.server.routes.manifest.manifest_runner") as mock_runner:
-        mock_runner.run_manifests = AsyncMock(side_effect=FileNotFoundError("Path not found: /nope"))
+    response = client.post(
+        "/api/v1/manifest/run",
+        data={"path": "/nonexistent/path"},
+    )
 
-        response = client.post(
-            "/api/v1/manifest/run",
-            data={"path": "/nonexistent/path"},
-        )
-
-        assert response.status_code == 404
+    assert response.status_code == 404
 
 
-def test_run_manifests_validation_error(client):
+def test_run_manifests_validation_error(client, tmp_path):
     """Test running manifests with duplicate IDs."""
     with patch("soliplex.agents.server.routes.manifest.manifest_runner") as mock_runner:
-        mock_runner.run_manifests = AsyncMock(side_effect=ValueError("Duplicate manifest IDs found: ['same']"))
+        mock_runner.load_manifests_from_dir.side_effect = ValueError("Duplicate manifest IDs found: ['same']")
 
         response = client.post(
             "/api/v1/manifest/run",
-            data={"path": "/some/dir"},
+            data={"path": str(tmp_path)},
         )
 
         assert response.status_code == 422
         assert "Duplicate" in response.json()["detail"]
 
 
-def test_run_manifests_unexpected_error(client):
+def test_run_manifests_unexpected_error(client, tmp_path):
     """Test running manifests with unexpected error."""
     with patch("soliplex.agents.server.routes.manifest.manifest_runner") as mock_runner:
-        mock_runner.run_manifests = AsyncMock(side_effect=RuntimeError("unexpected"))
+        mock_runner.load_manifests_from_dir.side_effect = RuntimeError("unexpected")
 
         response = client.post(
             "/api/v1/manifest/run",
-            data={"path": "/some/path"},
+            data={"path": str(tmp_path)},
         )
 
         assert response.status_code == 500
+
+
+def test_run_manifests_single_file(client, tmp_path):
+    """Test running manifests from a single file."""
+    f = tmp_path / "test.yml"
+    f.write_text("id: t\n")
+
+    with patch("soliplex.agents.server.routes.manifest.manifest_runner") as mock_runner:
+        mock_runner.load_manifest.return_value = _make_manifest("t")
+        mock_runner.run_manifest = AsyncMock(
+            return_value={
+                "manifest_id": "t",
+                "manifest_name": "Test",
+                "results": [],
+            }
+        )
+
+        response = client.post(
+            "/api/v1/manifest/run",
+            data={"path": str(f)},
+        )
+
+        assert response.status_code == 200
+        mock_runner.load_manifest.assert_called_once_with(str(f))
+
+
+def test_run_manifests_returns_409_when_busy(client, tmp_path):
+    """Test that /run returns 409 when a manifest is already running."""
+    lock = get_manifest_lock("busy-m")
+    # Simulate a running manifest by holding the lock
+    lock._locked = True  # low-level flag; fine for sync test
+
+    with patch("soliplex.agents.server.routes.manifest.manifest_runner") as mock_runner:
+        mock_runner.load_manifests_from_dir.return_value = [_make_manifest("busy-m")]
+
+        response = client.post(
+            "/api/v1/manifest/run",
+            data={"path": str(tmp_path)},
+        )
+
+    assert response.status_code == 409
+    assert "busy-m" in response.json()["detail"]
 
 
 # --- POST /api/v1/manifest/run-single ---
@@ -127,18 +192,17 @@ def test_run_manifests_unexpected_error(client):
 
 def test_run_single_manifest_success(client, tmp_path):
     """Test running a single manifest file."""
-    from soliplex.agents.config import Manifest
-
     with patch("soliplex.agents.server.routes.manifest.manifest_runner") as mock_runner:
-        mock_runner.load_manifest.return_value = Manifest(
-            id="t", name="Test", source="s", components=[{"type": "fs", "name": "c", "path": "/p"}]
-        )
+        mock_runner.load_manifest.return_value = _make_manifest("t")
         mock_runner.run_manifest = AsyncMock(
             return_value={
                 "manifest_id": "t",
                 "manifest_name": "Test",
                 "results": [
-                    {"component": "c", "result": {"ingested": [], "errors": []}},
+                    {
+                        "component": "c",
+                        "result": {"ingested": [], "errors": []},
+                    },
                 ],
             }
         )
@@ -208,6 +272,23 @@ def test_run_single_manifest_unexpected_error(client):
         assert response.status_code == 500
 
 
+def test_run_single_manifest_returns_409_when_busy(client):
+    """Test that /run-single returns 409 when the manifest is running."""
+    lock = get_manifest_lock("busy-s")
+    lock._locked = True
+
+    with patch("soliplex.agents.server.routes.manifest.manifest_runner") as mock_runner:
+        mock_runner.load_manifest.return_value = _make_manifest("busy-s")
+
+        response = client.post(
+            "/api/v1/manifest/run-single",
+            data={"path": "/some.yml"},
+        )
+
+    assert response.status_code == 409
+    assert "busy-s" in response.json()["detail"]
+
+
 # --- POST /api/v1/manifest/validate ---
 
 
@@ -246,8 +327,18 @@ def test_validate_manifest_dir(client, tmp_path):
 
     with patch("soliplex.agents.server.routes.manifest.manifest_runner") as mock_runner:
         mock_runner.load_manifests_from_dir.return_value = [
-            Manifest(id="a", name="A", source="s", components=[{"type": "fs", "name": "c", "path": "/p"}]),
-            Manifest(id="b", name="B", source="s", components=[{"type": "fs", "name": "c", "path": "/p"}]),
+            Manifest(
+                id="a",
+                name="A",
+                source="s",
+                components=[{"type": "fs", "name": "c", "path": "/p"}],
+            ),
+            Manifest(
+                id="b",
+                name="B",
+                source="s",
+                components=[{"type": "fs", "name": "c", "path": "/p"}],
+            ),
         ]
 
         response = client.post(

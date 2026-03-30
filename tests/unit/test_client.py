@@ -600,6 +600,7 @@ async def test_retry_request_context_retries_on_429(monkeypatch):
     def make_429():
         r = MagicMock()
         r.status = 429
+        r.headers = {}
         r.release = MagicMock()
         return r
 
@@ -625,6 +626,7 @@ async def test_retry_request_context_exhausts_retries(monkeypatch):
 
     resp_429 = MagicMock()
     resp_429.status = 429
+    resp_429.headers = {}
     resp_429.release = MagicMock()
 
     mock_method.return_value = resp_429
@@ -711,14 +713,116 @@ async def test_retry_request_context_timeout_exhausts_retries(
     assert mock_method.call_count == client.RETRY_MAX_ATTEMPTS
 
 
+@pytest.mark.asyncio
+async def test_retry_request_context_retries_on_502(monkeypatch):
+    """Test _RetryRequestContext retries on 502 Bad Gateway."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_method = AsyncMock()
+
+    resp_502 = MagicMock()
+    resp_502.status = 502
+    resp_502.headers = {}
+    resp_502.release = MagicMock()
+
+    resp_200 = MagicMock()
+    resp_200.status = 200
+    resp_200.release = MagicMock()
+
+    mock_method.side_effect = [resp_502, resp_200]
+
+    ctx = client._RetryRequestContext(mock_method, "http://example.com")
+    async with ctx as response:
+        assert response.status == 200
+
+    assert mock_method.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_request_context_retries_on_503(monkeypatch):
+    """Test _RetryRequestContext retries on 503 Service Unavailable."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_method = AsyncMock()
+
+    resp_503 = MagicMock()
+    resp_503.status = 503
+    resp_503.headers = {}
+    resp_503.release = MagicMock()
+
+    resp_200 = MagicMock()
+    resp_200.status = 200
+    resp_200.release = MagicMock()
+
+    mock_method.side_effect = [resp_503, resp_200]
+
+    ctx = client._RetryRequestContext(mock_method, "http://example.com")
+    async with ctx as response:
+        assert response.status == 200
+
+    assert mock_method.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_request_context_429_with_retry_after_header(monkeypatch):
+    """Test _RetryRequestContext reads Retry-After header on 429."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_method = AsyncMock()
+
+    resp_429 = MagicMock()
+    resp_429.status = 429
+    resp_429.headers = {"Retry-After": "30"}
+    resp_429.release = MagicMock()
+
+    resp_200 = MagicMock()
+    resp_200.status = 200
+    resp_200.release = MagicMock()
+
+    mock_method.side_effect = [resp_429, resp_200]
+
+    ctx = client._RetryRequestContext(mock_method, "http://example.com")
+    async with ctx as response:
+        assert response.status == 200
+
+    assert mock_method.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_request_context_5xx_exhausts_retries(monkeypatch):
+    """Test _RetryRequestContext raises RetryableHTTPError after max 5xx retries."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_method = AsyncMock()
+
+    resp_500 = MagicMock()
+    resp_500.status = 500
+    resp_500.headers = {}
+    resp_500.release = MagicMock()
+
+    mock_method.return_value = resp_500
+
+    ctx = client._RetryRequestContext(mock_method, "http://example.com")
+    with pytest.raises(client.RetryableHTTPError):
+        async with ctx as _response:
+            pass
+
+    assert mock_method.call_count == client.RETRY_MAX_ATTEMPTS
+
+
 def test_retryable_exceptions_tuple():
     """Test RETRYABLE_EXCEPTIONS contains expected types."""
-    assert client.RateLimitError in client.RETRYABLE_EXCEPTIONS
-    assert TimeoutError in client.RETRYABLE_EXCEPTIONS
-    assert aiohttp.ServerDisconnectedError in client.RETRYABLE_EXCEPTIONS
-    assert aiohttp.ClientConnectorError in client.RETRYABLE_EXCEPTIONS
-    assert aiohttp.ClientOSError in client.RETRYABLE_EXCEPTIONS
-    assert ConnectionResetError in client.RETRYABLE_EXCEPTIONS
+    from soliplex.agents.retry import RETRYABLE_EXCEPTIONS
+
+    # RateLimitError is a subclass of RetryableHTTPError, which is in
+    # the tuple -- so retry_if_exception_type will match it.
+    assert issubclass(client.RateLimitError, client.RetryableHTTPError)
+    assert client.RetryableHTTPError in RETRYABLE_EXCEPTIONS
+    assert TimeoutError in RETRYABLE_EXCEPTIONS
+    assert aiohttp.ServerDisconnectedError in RETRYABLE_EXCEPTIONS
+    assert aiohttp.ClientConnectorError in RETRYABLE_EXCEPTIONS
+    assert aiohttp.ClientOSError in RETRYABLE_EXCEPTIONS
+    assert ConnectionResetError in RETRYABLE_EXCEPTIONS
 
 
 # --- delete_source_uri tests ---

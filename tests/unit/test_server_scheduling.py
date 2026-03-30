@@ -9,6 +9,17 @@ import pytest
 
 from soliplex.agents.server import _run_manifest_at_startup
 from soliplex.agents.server import setup_manifest_schedules
+from soliplex.agents.server.locks import get_manifest_lock
+from soliplex.agents.server.locks import is_manifest_running
+from soliplex.agents.server.locks import reset_locks
+
+
+@pytest.fixture(autouse=True)
+def _clean_locks():
+    """Reset the lock registry between tests."""
+    reset_locks()
+    yield
+    reset_locks()
 
 
 def _write_manifest(tmp_path, name, mid, schedule=None):
@@ -51,6 +62,25 @@ class TestRunManifestAtStartup:
         with caplog.at_level(logging.ERROR):
             await _run_manifest_at_startup("/nonexistent.yml")
         assert "Error running startup manifest" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_acquires_manifest_lock(self, tmp_path):
+        """Startup task holds the manifest lock while running."""
+        _write_manifest(tmp_path, "m.yml", "lock-test")
+        lock_was_held = False
+
+        async def fake_run(manifest):
+            nonlocal lock_was_held
+            lock_was_held = is_manifest_running("lock-test")
+            return {"results": []}
+
+        with patch(
+            "soliplex.agents.manifest.runner.run_manifest",
+            side_effect=fake_run,
+        ):
+            await _run_manifest_at_startup(str(tmp_path / "m.yml"))
+
+        assert lock_was_held
 
 
 class TestSetupManifestSchedules:
@@ -146,3 +176,68 @@ class TestSetupManifestSchedules:
             mock_settings.manifest_dir = str(tmp_path)
             setup_manifest_schedules(crons)
         crons.cron.assert_not_called()
+
+
+class TestCronHandlerSkipsWhenBusy:
+    """Cron handler must skip execution when the manifest is already running."""
+
+    @pytest.mark.asyncio
+    async def test_cron_handler_skips_if_locked(self, tmp_path, caplog):
+        _write_manifest(tmp_path, "a.yml", "busy-cron", schedule="* * * * *")
+        crons = MagicMock()
+        registered_handler = None
+
+        def capture_handler(fn):
+            nonlocal registered_handler
+            registered_handler = fn
+            return fn
+
+        crons.cron.return_value = capture_handler
+
+        with (
+            patch("soliplex.agents.server.settings") as mock_settings,
+            caplog.at_level(logging.WARNING),
+        ):
+            mock_settings.manifest_dir = str(tmp_path)
+            setup_manifest_schedules(crons)
+
+        assert registered_handler is not None
+
+        # Simulate the manifest already running by holding its lock
+        lock = get_manifest_lock("busy-cron")
+        await lock.acquire()
+        try:
+            await registered_handler()
+        finally:
+            lock.release()
+
+        assert "previous run still in progress" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_cron_handler_runs_when_free(self, tmp_path, caplog):
+        _write_manifest(tmp_path, "a.yml", "free-cron", schedule="* * * * *")
+        crons = MagicMock()
+        registered_handler = None
+
+        def capture_handler(fn):
+            nonlocal registered_handler
+            registered_handler = fn
+            return fn
+
+        crons.cron.return_value = capture_handler
+
+        with (
+            patch("soliplex.agents.server.settings") as mock_settings,
+            patch(
+                "soliplex.agents.manifest.runner.run_manifest",
+                new_callable=AsyncMock,
+                return_value={"results": [{"component": "comp"}]},
+            ),
+            caplog.at_level(logging.INFO),
+        ):
+            mock_settings.manifest_dir = str(tmp_path)
+            setup_manifest_schedules(crons)
+            await registered_handler()
+
+        assert "completed" in caplog.text
+        assert "previous run still in progress" not in caplog.text

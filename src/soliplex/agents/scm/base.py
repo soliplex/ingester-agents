@@ -15,10 +15,14 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+from tenacity import AsyncRetrying
 
 from soliplex.agents.config import settings
+from soliplex.agents.retry import RETRYABLE_STATUS_CODES
+from soliplex.agents.retry import RetryableHTTPError
+from soliplex.agents.retry import parse_retry_after
+from soliplex.agents.retry import retry_policy
 from soliplex.agents.scm import APIFetchError
-from soliplex.agents.scm import RateLimitError
 from soliplex.agents.scm import SCMException
 from soliplex.agents.scm.lib.utils import compute_file_hash
 from soliplex.agents.scm.lib.utils import decode_base64_if_needed
@@ -104,6 +108,53 @@ class BaseSCMProvider(ABC):
         path = path.lstrip("/")
         return f"{base_url}/{path}"
 
+    async def _request_with_retry(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        semaphore: asyncio.Semaphore | None = None,
+    ) -> aiohttp.ClientResponse:
+        """Perform an HTTP GET with tenacity retry, rate-limit and 5xx handling.
+
+        Args:
+            session: Active aiohttp session.
+            url: URL to GET.
+            semaphore: Optional concurrency limiter.
+
+        Returns:
+            The successful ``aiohttp.ClientResponse``.
+
+        Raises:
+            RetryableHTTPError: After all retries exhausted on 429/5xx.
+            aiohttp.ClientError / TimeoutError: After all retries exhausted.
+        """
+        policy = retry_policy(
+            max_attempts=settings.scm_retry_attempts,
+            max_delay=settings.scm_retry_backoff_max,
+        )
+        async for attempt in AsyncRetrying(**policy):
+            with attempt:
+                await asyncio.sleep(random.uniform(0.01, 0.05))
+                if semaphore:
+                    async with semaphore:
+                        resp = await session.get(url)
+                else:
+                    resp = await session.get(url)
+
+                if resp.status in RETRYABLE_STATUS_CODES:
+                    ra = parse_retry_after(resp.headers)
+                    body = ""
+                    try:
+                        body = await resp.text()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    resp.release()
+                    raise RetryableHTTPError(resp.status, retry_after=ra, body=body)
+
+                return resp
+
+        raise AssertionError("unreachable")  # pragma: no cover
+
     async def paginate(
         self, url_template: str, owner: str, repo: str, process_response: Callable | None = None
     ) -> list[dict[str, Any]]:
@@ -128,46 +179,26 @@ class BaseSCMProvider(ABC):
                 url = url_template.format(owner=owner, repo=repo, page=page)
                 logger.info(f"fetching page={page} {owner}/{repo}")
 
-                # Retry loop for each page
-                for attempt in range(settings.scm_retry_attempts):  # pragma: no branch
-                    try:
-                        await asyncio.sleep(random.uniform(0.01, 0.05))
+                response = await self._request_with_retry(session, url)
+                async with response:
+                    if response.status == 404:
+                        msg = f"repo {owner}/{repo} not found"
+                        raise SCMException(msg)
 
-                        async with session.get(url) as response:
-                            if await self._should_retry_response(response, url, attempt):
-                                continue
+                    items = await response.json()
 
-                            if response.status == 404:
-                                msg = f"repo {owner}/{repo} not found"
-                                raise SCMException(msg)
+                    if response.status != 200:
+                        if "errors" in items:
+                            raise SCMException(str(items["errors"]))
+                        logger.error(f"Failed to fetch from {url}: {items}")
+                        raise APIFetchError
 
-                            items = await response.json()
+                    if process_response:
+                        items = process_response(items)
 
-                            if response.status != 200:
-                                if "errors" in items:
-                                    raise SCMException(str(items["errors"]))
-                                logger.error(f"Failed to fetch from {url}: {items}")
-                                raise APIFetchError
-
-                            if process_response:
-                                items = process_response(items)
-
-                            logger.info(f"found {len(items)} items on page {page}")
-                            ret.extend(items)
-                            page += 1
-                            break  # Success, exit retry loop
-
-                    except (aiohttp.ClientError, TimeoutError) as e:
-                        backoff = min(
-                            settings.scm_retry_backoff_base * (2**attempt),
-                            settings.scm_retry_backoff_max,
-                        )
-                        logger.warning(f"Request failed for {url}: {e}, retrying in {backoff}s (attempt {attempt + 1})")
-
-                        if attempt < settings.scm_retry_attempts - 1:
-                            await asyncio.sleep(backoff)
-                        else:
-                            raise
+                    logger.info(f"found {len(items)} items on page {page}")
+                    ret.extend(items)
+                    page += 1
 
         return ret
 
@@ -293,46 +324,6 @@ class BaseSCMProvider(ABC):
         """
         return rec
 
-    async def _should_retry_response(self, response: aiohttp.ClientResponse, url: str, attempt: int) -> bool:
-        """
-        Check if response indicates we should retry.
-
-        Args:
-            response: HTTP response
-            url: Request URL (for logging)
-            attempt: Current attempt number (0-indexed)
-
-        Returns:
-            True if we should retry, False otherwise
-
-        Raises:
-            RateLimitError: If rate limit exceeded on final attempt
-        """
-        # Handle rate limiting (429)
-        if response.status == 429:
-            retry_after = int(response.headers.get("Retry-After", 60))
-            logger.warning(f"Rate limited on {url}, waiting {retry_after}s (attempt {attempt + 1})")
-
-            if attempt < settings.scm_retry_attempts - 1:
-                await asyncio.sleep(retry_after)
-                return True
-            else:
-                raise RateLimitError(retry_after)
-
-        # Handle server errors (5xx) with retry
-        if response.status >= 500:
-            backoff = min(
-                settings.scm_retry_backoff_base * (2**attempt),
-                settings.scm_retry_backoff_max,
-            )
-            logger.warning(f"Server error {response.status} on {url}, retrying in {backoff}s (attempt {attempt + 1})")
-
-            if attempt < settings.scm_retry_attempts - 1:
-                await asyncio.sleep(backoff)
-                return True
-
-        return False
-
     async def _fetch_json(self, url: str) -> dict[str, Any] | list[dict[str, Any]]:
         """
         Fetch JSON from URL with retry logic and rate limiting.
@@ -349,36 +340,15 @@ class BaseSCMProvider(ABC):
         Raises:
             aiohttp.ClientError: If request fails after all retries
             TimeoutError: If request times out after all retries
+            RetryableHTTPError: If server returns 429/5xx after all retries
         """
         logger.debug(f"_fetch_json url={url}")
 
         async with self.get_session() as session:
-            for attempt in range(settings.scm_retry_attempts):
-                try:
-                    # Add small jitter to avoid thundering herd
-                    await asyncio.sleep(random.uniform(0.01, 0.05))
-
-                    async with session.get(url) as response:
-                        if await self._should_retry_response(response, url, attempt):
-                            continue
-
-                        response.raise_for_status()
-                        return await response.json()
-
-                except (aiohttp.ClientError, TimeoutError) as e:
-                    backoff = min(
-                        settings.scm_retry_backoff_base * (2**attempt),
-                        settings.scm_retry_backoff_max,
-                    )
-                    logger.warning(f"Request failed for {url}: {e}, retrying in {backoff}s (attempt {attempt + 1})")
-
-                    if attempt < settings.scm_retry_attempts - 1:
-                        await asyncio.sleep(backoff)
-                    else:
-                        raise
-
-        # This should never be reached - loop always returns or raises
-        raise APIFetchError  # pragma: no cover
+            response = await self._request_with_retry(session, url)
+            async with response:
+                response.raise_for_status()
+                return await response.json()
 
     async def get_data_from_url(
         self,
@@ -405,67 +375,34 @@ class BaseSCMProvider(ABC):
         """
         logger.debug(f"get_data_from_url = {url}")
 
-        last_exception: Exception | None = None
+        try:
+            response = await self._request_with_retry(session, url, semaphore)
+            async with response:
+                response.raise_for_status()
+                res = await response.json()
 
-        for attempt in range(settings.scm_retry_attempts):
-            try:
-                # Add small jitter to avoid thundering herd
-                await asyncio.sleep(random.uniform(0.01, 0.05))
+            if isinstance(res, dict):
+                # This is a file, fetch content if needed and parse
+                if owner and repo:
+                    res = await self.get_file_content(res, session, owner, repo)
+                return self.parse_file_rec(res)
+            else:
+                # This is a directory, recursively fetch all files
+                parsed = []
+                for r in res:
+                    if allowed_extensions is None or Path(r["name"]).suffix.lstrip(".") in allowed_extensions:
+                        logger.debug(f"fetching file in dir for url = {r['url']}")
+                        parsed.append(
+                            await self.get_data_from_url(r["url"], session, owner, repo, allowed_extensions, semaphore)
+                        )
+                    else:
+                        logger.debug(f"ignoring {r['name']} in dir for url = {r['url']}")
 
-                # Use semaphore if provided for concurrency control
-                if semaphore:
-                    async with semaphore:
-                        async with session.get(url) as response:
-                            if await self._should_retry_response(response, url, attempt):
-                                continue
+                return parsed
 
-                            response.raise_for_status()
-                            res = await response.json()
-                else:
-                    async with session.get(url) as response:
-                        if await self._should_retry_response(response, url, attempt):
-                            continue
-
-                        response.raise_for_status()
-                        res = await response.json()
-
-                if isinstance(res, dict):
-                    # This is a file, fetch content if needed and parse
-                    if owner and repo:
-                        res = await self.get_file_content(res, session, owner, repo)
-                    return self.parse_file_rec(res)
-                else:
-                    # This is a directory, recursively fetch all files
-                    parsed = []
-                    for r in res:
-                        if allowed_extensions is None or Path(r["name"]).suffix.lstrip(".") in allowed_extensions:
-                            logger.debug(f"fetching file in dir for url = {r['url']}")
-                            parsed.append(
-                                await self.get_data_from_url(r["url"], session, owner, repo, allowed_extensions, semaphore)
-                            )
-                        else:
-                            logger.debug(f"ignoring {r['name']} in dir for url = {r['url']}")
-
-                    return parsed
-
-            except (aiohttp.ClientError, TimeoutError) as e:
-                last_exception = e
-                backoff = min(
-                    settings.scm_retry_backoff_base * (2**attempt),
-                    settings.scm_retry_backoff_max,
-                )
-                logger.warning(f"Request failed for {url}: {e}, retrying in {backoff}s (attempt {attempt + 1})")
-
-                if attempt < settings.scm_retry_attempts - 1:
-                    await asyncio.sleep(backoff)
-                else:
-                    logger.exception(f"Error fetching from {url}")
-                    return {"error": str(e)}
-
-        # Should not reach here, but handle gracefully
-        if last_exception:  # pragma: no cover
-            return {"error": str(last_exception)}
-        return {"error": f"Failed to fetch {url} after {settings.scm_retry_attempts} attempts"}  # pragma: no cover
+        except Exception as e:
+            logger.exception(f"Error fetching from {url}")
+            return {"error": str(e)}
 
     async def list_repo_files(
         self,
@@ -634,39 +571,16 @@ class BaseSCMProvider(ABC):
         found_marker = False
 
         async with self.get_session() as session:
-            # Fetch commits (paginated if needed)
             page = 1
             max_pages = 10  # Safety limit
 
             while page <= max_pages and not found_marker:
                 paginated_url = f"{url}&page={page}"
-                resp = None
 
-                for attempt in range(settings.scm_retry_attempts):  # pragma: no branch
-                    try:
-                        await asyncio.sleep(random.uniform(0.01, 0.05))
-                        async with session.get(paginated_url) as response:
-                            if await self._should_retry_response(response, paginated_url, attempt):
-                                continue
-                            resp = await response.json()
-                            await self.validate_response(response, resp)
-                        break  # Success
-                    except (aiohttp.ClientError, TimeoutError) as e:
-                        backoff = min(
-                            settings.scm_retry_backoff_base * (2**attempt),
-                            settings.scm_retry_backoff_max,
-                        )
-                        logger.warning(
-                            "Request failed for %s: %s, retrying in %ss (attempt %d)",
-                            paginated_url,
-                            e,
-                            backoff,
-                            attempt + 1,
-                        )
-                        if attempt < settings.scm_retry_attempts - 1:
-                            await asyncio.sleep(backoff)
-                        else:
-                            raise
+                response = await self._request_with_retry(session, paginated_url)
+                async with response:
+                    resp = await response.json()
+                    await self.validate_response(response, resp)
 
                 page_commits = resp if isinstance(resp, list) else []
 
@@ -674,14 +588,11 @@ class BaseSCMProvider(ABC):
                     break  # No more commits
 
                 for commit in page_commits:
-                    # If we have a marker and found it, stop collecting
                     if since_commit_sha and commit.get("sha") == since_commit_sha:
                         found_marker = True
                         break
-                    # Add commits until we hit the marker
                     commits.append(commit)
 
-                # Stop if got fewer commits than limit (last page)
                 if len(page_commits) < limit:
                     break
 

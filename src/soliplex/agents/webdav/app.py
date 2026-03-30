@@ -2,50 +2,21 @@
 
 import hashlib
 import logging
-from io import BytesIO
 from pathlib import Path
 
 import aiofiles
-import httpx
-from webdav4.client import Client as WebDAVClient
+import aiohttp
 
 from soliplex.agents import client
 from soliplex.agents.common.config import check_config
 from soliplex.agents.common.config import detect_mime_type
 from soliplex.agents.config import settings
 from soliplex.agents.webdav import state as webdav_state
+from soliplex.agents.webdav.async_client import AsyncWebDAVClient
+from soliplex.agents.webdav.async_client import ResourceNotFound
+from soliplex.agents.webdav.async_client import create_async_webdav_client
 
 logger = logging.getLogger(__name__)
-
-
-def create_webdav_client(url: str = None, username: str = None, password: str = None) -> WebDAVClient:
-    """
-    Create a WebDAV client with credentials from settings or parameters.
-
-    Args:
-        url: WebDAV server URL (uses settings.webdav_url if not provided)
-        username: WebDAV username (uses settings.webdav_username if not provided)
-        password: WebDAV password (uses settings.webdav_password if not provided)
-
-    Returns:
-        Configured WebDAV client
-
-    Raises:
-        ValueError: If required credentials are missing
-    """
-    webdav_url = url or settings.webdav_url
-    webdav_username = username or settings.webdav_username
-    webdav_password = password or (settings.webdav_password.get_secret_value() if settings.webdav_password else None)
-
-    if not webdav_url:
-        raise ValueError("WebDAV URL is required (set WEBDAV_URL environment variable)")
-
-    auth = None
-    if webdav_username and webdav_password:
-        auth = (webdav_username, webdav_password)
-    headers = {"User-Agent": "soliplex-agent/curl"}
-    timeout = httpx.Timeout(60.0, connect=20.0)
-    return WebDAVClient(webdav_url, auth=auth, verify=settings.ssl_verify, headers=headers, timeout=timeout)
 
 
 async def validate_config(path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None):
@@ -147,7 +118,7 @@ async def build_config_from_urls(
     """
     from soliplex.agents.common.urls_file import read_urls_file
 
-    webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
+    webdav_client = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
     allowed_extensions = settings.extensions
     config = []
     results = []
@@ -164,73 +135,74 @@ async def build_config_from_urls(
         webdav_password=webdav_password,
     )
 
-    for full_path in lines:
-        current_paths.add(full_path)
-        ext = Path(full_path).suffix.lstrip(".")
-        if ext not in allowed_extensions:
-            logger.info(f"skipping {full_path}")
-            results.append({"url": full_path, "status": "skipped", "error_message": f"Extension .{ext} not allowed"})
-            continue
+    async with webdav_client:
+        for full_path in lines:
+            current_paths.add(full_path)
+            ext = Path(full_path).suffix.lstrip(".")
+            if ext not in allowed_extensions:
+                logger.info(f"skipping {full_path}")
+                results.append({"url": full_path, "status": "skipped", "error_message": f"Extension .{ext} not allowed"})
+                continue
 
-        try:
-            # Try to get ETag via info() or HEAD for cache check
-            server_etag = None
             try:
-                info = webdav_client.info(full_path)
-                server_etag = info.get("etag")
-            except Exception:
-                logger.debug(f"Could not get info for {full_path}")
-            if not server_etag:
+                # Try to get ETag via info() or HEAD for cache check
+                server_etag = None
                 try:
-                    resp = webdav_client.http.head(full_path)
-                    server_etag = resp.headers.get("etag")
+                    info = await webdav_client.info(full_path)
+                    server_etag = info.get("etag")
                 except Exception:
-                    logger.debug(f"Could not HEAD {full_path}")
+                    logger.debug(f"Could not get info for {full_path}")
+                if not server_etag:
+                    try:
+                        resp = await webdav_client.head(full_path)
+                        server_etag = resp.headers.get("etag")
+                    except Exception:
+                        logger.debug(f"Could not HEAD {full_path}")
 
-            cached_entry = cached_state.get(full_path)
+                cached_entry = cached_state.get(full_path)
 
-            if server_etag and cached_entry and cached_entry.get("etag") == server_etag:
-                # ETag cache hit — use cached SHA256, no download
-                sha256_hash = cached_entry["sha256"]
+                if server_etag and cached_entry and cached_entry.get("etag") == server_etag:
+                    # ETag cache hit — use cached SHA256, no download
+                    sha256_hash = cached_entry["sha256"]
+                    mime_type = detect_mime_type(full_path)
+                    rec = {
+                        "path": full_path,
+                        "sha256": sha256_hash,
+                        "metadata": {
+                            "size": cached_entry.get("size", 0),
+                            "content-type": mime_type,
+                        },
+                    }
+                    if server_etag:
+                        rec["_etag"] = server_etag
+                    webdav_state.upsert_entry(
+                        resolved_url,
+                        full_path,
+                        server_etag,
+                        sha256_hash,
+                        cached_entry.get("size", 0),
+                    )
+                    config.append(rec)
+                    results.append({"url": full_path, "status": "success", "error_message": None})
+                    continue
+
+                # ETag cache miss — skip download, defer to ingestion
                 mime_type = detect_mime_type(full_path)
                 rec = {
                     "path": full_path,
-                    "sha256": sha256_hash,
+                    "sha256": None,
                     "metadata": {
-                        "size": cached_entry.get("size", 0),
+                        "size": 0,
                         "content-type": mime_type,
                     },
                 }
                 if server_etag:
                     rec["_etag"] = server_etag
-                webdav_state.upsert_entry(
-                    resolved_url,
-                    full_path,
-                    server_etag,
-                    sha256_hash,
-                    cached_entry.get("size", 0),
-                )
                 config.append(rec)
                 results.append({"url": full_path, "status": "success", "error_message": None})
-                continue
-
-            # ETag cache miss — skip download, defer to ingestion
-            mime_type = detect_mime_type(full_path)
-            rec = {
-                "path": full_path,
-                "sha256": None,
-                "metadata": {
-                    "size": 0,
-                    "content-type": mime_type,
-                },
-            }
-            if server_etag:
-                rec["_etag"] = server_etag
-            config.append(rec)
-            results.append({"url": full_path, "status": "success", "error_message": None})
-        except Exception as e:
-            logger.exception(f"Error processing {full_path}")
-            results.append({"url": full_path, "status": "error", "error_message": str(e)})
+            except Exception as e:
+                logger.exception(f"Error processing {full_path}")
+                results.append({"url": full_path, "status": "error", "error_message": str(e)})
 
     # Prune deleted files
     removed = webdav_state.prune_state(resolved_url, current_paths)
@@ -258,11 +230,12 @@ async def list_config(
     Returns:
         List of file configuration dictionaries (without sha256)
     """
-    webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
+    webdav_client = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
     allowed_extensions = settings.extensions
     config = []
 
-    files = await recursive_listdir_webdav(webdav_client, webdav_path)
+    async with webdav_client:
+        files = await recursive_listdir_webdav(webdav_client, webdav_path)
 
     for file_info in files:
         full_path = file_info["path"]
@@ -313,7 +286,7 @@ async def build_config(
     Returns:
         List of file configuration dictionaries
     """
-    webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
+    webdav_client = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
     allowed_extensions = settings.extensions
     config = []
     failed = 0
@@ -322,74 +295,75 @@ async def build_config(
     resolved_url = webdav_url or settings.webdav_url or ""
     cached_state = webdav_state.load_state(resolved_url)
 
-    # Recursively list all files
-    files = await recursive_listdir_webdav(webdav_client, webdav_path)
-    current_paths = set()
+    async with webdav_client:
+        # Recursively list all files
+        files = await recursive_listdir_webdav(webdav_client, webdav_path)
+        current_paths = set()
 
-    for file_info in files:
-        full_path = file_info["path"]  # This is the absolute WebDAV path
-        current_paths.add(full_path)
-        ext = Path(full_path).suffix.lstrip(".")
+        for file_info in files:
+            full_path = file_info["path"]  # This is the absolute WebDAV path
+            current_paths.add(full_path)
+            ext = Path(full_path).suffix.lstrip(".")
 
-        if ext not in allowed_extensions:
-            logger.info(f"skipping {full_path}")
-            continue
+            if ext not in allowed_extensions:
+                logger.info(f"skipping {full_path}")
+                continue
 
-        server_etag = file_info.get("etag")
-        if not server_etag:
-            try:
-                resp = webdav_client.http.head(full_path)
-                server_etag = resp.headers.get("etag")
-            except Exception:
-                logger.debug(f"Could not HEAD {full_path}")
-        cached_entry = cached_state.get(full_path)
-        etag_for_rec = None
+            server_etag = file_info.get("etag")
+            if not server_etag:
+                try:
+                    resp = await webdav_client.head(full_path)
+                    server_etag = resp.headers.get("etag")
+                except Exception:
+                    logger.debug(f"Could not HEAD {full_path}")
+            cached_entry = cached_state.get(full_path)
+            etag_for_rec = None
 
-        # Check ETag cache
-        if server_etag and cached_entry and cached_entry.get("etag") == server_etag:
-            sha256_hash = cached_entry["sha256"]
-            cache_hits += 1
-            logger.debug(f"ETag cache hit for {full_path}")
-            webdav_state.upsert_entry(
-                resolved_url,
-                full_path,
-                server_etag,
-                sha256_hash,
-            )
-        else:
-            # ETag cache miss — skip download, defer to ingestion
-            sha256_hash = None
-            etag_for_rec = server_etag
+            # Check ETag cache
+            if server_etag and cached_entry and cached_entry.get("etag") == server_etag:
+                sha256_hash = cached_entry["sha256"]
+                cache_hits += 1
+                logger.debug(f"ETag cache hit for {full_path}")
+                webdav_state.upsert_entry(
+                    resolved_url,
+                    full_path,
+                    server_etag,
+                    sha256_hash,
+                )
+            else:
+                # ETag cache miss — skip download, defer to ingestion
+                sha256_hash = None
+                etag_for_rec = server_etag
 
-        # Detect MIME type
-        mime_type = detect_mime_type(full_path)
+            # Detect MIME type
+            mime_type = detect_mime_type(full_path)
 
-        # Make path relative to webdav_path
-        normalized_base = webdav_path.strip("/")
-        normalized_full = full_path.strip("/")
+            # Make path relative to webdav_path
+            normalized_base = webdav_path.strip("/")
+            normalized_full = full_path.strip("/")
 
-        logger.debug(f"Comparing - Full: '{normalized_full}', Base: '{normalized_base}'")
+            logger.debug(f"Comparing - Full: '{normalized_full}', Base: '{normalized_base}'")
 
-        if normalized_full.startswith(normalized_base + "/"):
-            relative_path = normalized_full[len(normalized_base) + 1 :]
-        elif normalized_full == normalized_base:
-            relative_path = ""
-        else:
-            relative_path = normalized_full
+            if normalized_full.startswith(normalized_base + "/"):
+                relative_path = normalized_full[len(normalized_base) + 1 :]
+            elif normalized_full == normalized_base:
+                relative_path = ""
+            else:
+                relative_path = normalized_full
 
-        logger.debug(f"Full WebDAV path: {full_path}, Base: {webdav_path}, Relative: {relative_path}")
+            logger.debug(f"Full WebDAV path: {full_path}, Base: {webdav_path}, Relative: {relative_path}")
 
-        rec = {
-            "path": relative_path,
-            "sha256": sha256_hash,
-            "metadata": {
-                "size": file_info["size"],
-                "content-type": mime_type,
-            },
-        }
-        if sha256_hash is None and etag_for_rec:
-            rec["_etag"] = etag_for_rec
-        config.append(rec)
+            rec = {
+                "path": relative_path,
+                "sha256": sha256_hash,
+                "metadata": {
+                    "size": file_info["size"],
+                    "content-type": mime_type,
+                },
+            }
+            if sha256_hash is None and etag_for_rec:
+                rec["_etag"] = etag_for_rec
+            config.append(rec)
 
     # Prune deleted files and log warnings
     removed = webdav_state.prune_state(resolved_url, current_paths)
@@ -400,12 +374,12 @@ async def build_config(
     return config
 
 
-async def recursive_listdir_webdav(client: WebDAVClient, path: str) -> list[dict]:
+async def recursive_listdir_webdav(webdav_client: AsyncWebDAVClient, path: str) -> list[dict]:
     """
     Recursively list files in a WebDAV directory.
 
     Args:
-        client: WebDAV client instance
+        webdav_client: Async WebDAV client instance
         path: Directory path to list
 
     Returns:
@@ -416,7 +390,7 @@ async def recursive_listdir_webdav(client: WebDAVClient, path: str) -> list[dict
     logger.debug(f"Listing WebDAV directory: {path}")
 
     try:
-        resources = client.ls(path, detail=True)
+        resources = await webdav_client.ls(path, detail=True)
         for resource in resources:
             resource_path = resource["name"]
             logger.debug(f"Found resource: {resource_path}, type: {resource.get('type', 'unknown')}")
@@ -427,7 +401,7 @@ async def recursive_listdir_webdav(client: WebDAVClient, path: str) -> list[dict
 
             if resource["type"] == "directory":
                 # Recursively list subdirectory
-                subdir_files = await recursive_listdir_webdav(client, resource_path)
+                subdir_files = await recursive_listdir_webdav(webdav_client, resource_path)
                 file_list.extend(subdir_files)
             else:
                 rec = {"path": resource_path, "size": resource.get("content_length", 0)}
@@ -436,11 +410,11 @@ async def recursive_listdir_webdav(client: WebDAVClient, path: str) -> list[dict
                 for key in [x for x in resource.keys() if x not in ["href", "etag", "type", "name"]]:
                     rec[key] = resource.get(key)
                 file_list.append(rec)
-    except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException):
+    except (TimeoutError, ConnectionError, aiohttp.ClientError, ResourceNotFound):
         logger.exception(f"Connection error listing {path}")
         raise
     except Exception:
-        logger.warning(
+        logger.error(
             "Error listing WebDAV directory %s, returning partial results",
             path,
             exc_info=True,
@@ -541,46 +515,50 @@ async def load_inventory(
     ingested = []
     errors = []
     for idx, row in enumerate(to_process):
-        meta = row["metadata"].copy()
-        for k in [
-            "path",
-            "sha256",
-            "size",
-            "source",
-            "batch_id",
-            "source_uri",
-        ]:
-            if k in meta:
-                del meta[k]
-        if extra_metadata:
-            meta.update(extra_metadata)
-        etag = row.get("_etag")
-        if etag:
-            meta["_etag"] = etag
-        logger.info(f"starting ingest for {row['path']} {idx}/{len(to_process)} ")
-        mime_type = None
-        if "metadata" in row and "content-type" in row["metadata"]:
-            mime_type = row["metadata"]["content-type"]
-        res = await do_ingest(
-            base_path,
-            row["path"],
-            meta,
-            source,
-            batch_id,
-            mime_type,
-            webdav_url,
-            webdav_username,
-            webdav_password,
-        )
-        if "error" in res:
-            logger.error(f"Error ingesting {row['path']}: {res['error']}")
-            res["uri"] = row["path"]
-            res["source"] = source
-            res["batch_id"] = batch_id
-            errors.append(res)
-        else:
-            res["_path"] = row["path"]
-            ingested.append(res)
+        try:
+            meta = row["metadata"].copy()
+            for k in [
+                "path",
+                "sha256",
+                "size",
+                "source",
+                "batch_id",
+                "source_uri",
+            ]:
+                if k in meta:
+                    del meta[k]
+            if extra_metadata:
+                meta.update(extra_metadata)
+            etag = row.get("_etag")
+            if etag:
+                meta["_etag"] = etag
+            logger.info(f"starting ingest for {row['path']} {idx}/{len(to_process)} ")
+            mime_type = None
+            if "metadata" in row and "content-type" in row["metadata"]:
+                mime_type = row["metadata"]["content-type"]
+            res = await do_ingest(
+                base_path,
+                row["path"],
+                meta,
+                source,
+                batch_id,
+                mime_type,
+                webdav_url,
+                webdav_username,
+                webdav_password,
+            )
+            if "error" in res:
+                logger.error(f"Error ingesting {row['path']}: {res['error']}")
+                res["uri"] = row["path"]
+                res["source"] = source
+                res["batch_id"] = batch_id
+                errors.append(res)
+            else:
+                res["_path"] = row["path"]
+                ingested.append(res)
+        except Exception as e:
+            logger.exception("Failed to ingest %s", row.get("path", "unknown"))
+            errors.append({"uri": row.get("path", "unknown"), "error": str(e)})
     wf_res = None
     if len(errors) == 0 and start_workflows:
         wf_res = await client.start_workflows_for_batch(
@@ -648,12 +626,11 @@ async def do_ingest(
     else:
         # WebDAV file ingestion
         try:
-            webdav_client = create_webdav_client(webdav_url, webdav_username, webdav_password)
+            webdav_client = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
             full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}"
             logger.info(f"Downloading from WebDAV: {full_path}")
-            buffer = BytesIO()
-            webdav_client.download_fileobj(full_path, buffer)
-            doc_body = buffer.getvalue()
+            async with webdav_client:
+                doc_body = await webdav_client.download(full_path)
         except Exception as e:
             logger.exception(f"Error downloading {uri} from WebDAV")
             return {"error": str(e)}
@@ -663,9 +640,10 @@ async def do_ingest(
     # Capture ETag via HTTP HEAD if not already in metadata
     if "_etag" not in meta and webdav_url:
         try:
-            wc = create_webdav_client(webdav_url, webdav_username, webdav_password)
+            wc = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
             head_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}" if base_path else uri
-            resp = wc.http.head(head_path)
+            async with wc:
+                resp = await wc.head(head_path)
             head_etag = resp.headers.get("etag")
             if head_etag:
                 meta["_etag"] = head_etag

@@ -161,7 +161,11 @@ async def load_inventory(
         config = [x for x in filtered if x["valid"]]
 
     logger.info(f"found {len(config)} files in {path}")
-    to_process = await client.check_status(config, source, delete_stale=True)
+    try:
+        to_process = await client.check_status(config, source, delete_stale=True)
+    except Exception:
+        logger.exception("check_status failed, treating all files as new")
+        to_process = list(config)
     logger.info(f"found {len(to_process)}  out of {len(config)} to process in {data_path}")
     if end is None:
         end = len(config)
@@ -190,39 +194,43 @@ async def load_inventory(
     ingested = []
     errors = []
     for row in to_process:
-        meta = row["metadata"].copy()
-        for k in [
-            "path",
-            "sha256",
-            "size",
-            "source",
-            "batch_id",
-            "source_uri",
-        ]:
-            if k in meta:
-                del meta[k]
-        if extra_metadata:
-            meta.update(extra_metadata)
-        logger.info(f"starting ingest for {row['path']}")
-        mime_type = None
-        if "metadata" in row and "content-type" in row["metadata"]:
-            mime_type = row["metadata"]["content-type"]
-        res = await do_ingest(
-            data_path,
-            row["path"],
-            meta,
-            source,
-            batch_id,
-            mime_type,
-        )
-        if "error" in res:
-            logger.error(f"Error ingesting {row['path']}: {res['error']}")
-            res["uri"] = row["path"]
-            res["source"] = source
-            res["batch_id"] = batch_id
-            errors.append(res)
-        else:
-            ingested.append(res)
+        try:
+            meta = row["metadata"].copy()
+            for k in [
+                "path",
+                "sha256",
+                "size",
+                "source",
+                "batch_id",
+                "source_uri",
+            ]:
+                if k in meta:
+                    del meta[k]
+            if extra_metadata:
+                meta.update(extra_metadata)
+            logger.info(f"starting ingest for {row['path']}")
+            mime_type = None
+            if "metadata" in row and "content-type" in row["metadata"]:
+                mime_type = row["metadata"]["content-type"]
+            res = await do_ingest(
+                data_path,
+                row["path"],
+                meta,
+                source,
+                batch_id,
+                mime_type,
+            )
+            if "error" in res:
+                logger.error(f"Error ingesting {row['path']}: {res['error']}")
+                res["uri"] = row["path"]
+                res["source"] = source
+                res["batch_id"] = batch_id
+                errors.append(res)
+            else:
+                ingested.append(res)
+        except Exception as e:
+            logger.exception("Failed to ingest %s", row.get("path", "unknown"))
+            errors.append({"uri": row.get("path", "unknown"), "error": str(e)})
     wf_res = None
     if len(errors) == 0 and start_workflows:
         wf_res = await client.start_workflows_for_batch(

@@ -1,7 +1,6 @@
 """Shared utility for reading URL list files from local paths, S3, or WebDAV."""
 
 import logging
-from io import BytesIO
 from pathlib import Path
 
 import aiofiles
@@ -48,7 +47,7 @@ def resolve_local_path(
     return urls_file
 
 
-def read_text_from_webdav(
+async def read_text_from_webdav(
     url: str,
     webdav_url: str | None = None,
     webdav_username: str | None = None,
@@ -59,7 +58,7 @@ def read_text_from_webdav(
     The full file URL is split into a base URL (scheme + host) and a
     path component.  Authentication credentials fall back to the
     global settings when not provided explicitly.  Client creation is
-    delegated to :func:`~soliplex.agents.webdav.app.create_webdav_client`
+    delegated to :func:`~soliplex.agents.webdav.async_client.create_async_webdav_client`
     so that timeout, header, and TLS settings stay consistent.
 
     Args:
@@ -74,17 +73,16 @@ def read_text_from_webdav(
     """
     from urllib.parse import urlparse
 
-    from soliplex.agents.webdav.app import create_webdav_client
+    from soliplex.agents.webdav.async_client import create_async_webdav_client
 
     parsed = urlparse(url)
     base_url = webdav_url or f"{parsed.scheme}://{parsed.netloc}"
     path = parsed.path
 
-    client = create_webdav_client(base_url, webdav_username, webdav_password)
-
-    buffer = BytesIO()
-    client.download_fileobj(path, buffer)
-    return buffer.getvalue().decode("utf-8")
+    client = create_async_webdav_client(base_url, webdav_username, webdav_password)
+    async with client:
+        content = await client.download(path)
+    return content.decode("utf-8")
 
 
 async def read_urls_file(
@@ -114,7 +112,7 @@ async def read_urls_file(
     if is_s3_url(urls_file):
         content = await read_text_from_s3(urls_file, settings.s3_endpoint_url)
     elif is_webdav_url(urls_file):
-        content = read_text_from_webdav(urls_file, webdav_url, webdav_username, webdav_password)
+        content = await read_text_from_webdav(urls_file, webdav_url, webdav_username, webdav_password)
     else:
         resolved = resolve_local_path(urls_file, base_dir)
         async with aiofiles.open(resolved) as f:

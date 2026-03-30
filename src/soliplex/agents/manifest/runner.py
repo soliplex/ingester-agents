@@ -345,6 +345,7 @@ async def run_manifest(manifest: Manifest) -> dict:
         Dict with manifest id/name, per-component results list,
         and optional delete_stale result.
     """
+    logger.info("Starting manifest '%s' (%s) with %d components", manifest.id, manifest.name, len(manifest.components))
     wf_params = _resolve_workflow_params(manifest)
     results: list[dict[str, Any]] = []
     all_uri_hashes: list[dict[str, str]] = []
@@ -352,6 +353,7 @@ async def run_manifest(manifest: Manifest) -> dict:
     incremental_scm_components: list[SCMComponent] = []
 
     for component in manifest.components:
+        logger.info("Running component '%s' (type=%s)", component.name, type(component).__name__)
         metadata = manifest.get_metadata(component)
         handler = _DISPATCH.get(type(component))
         if handler is None:
@@ -367,6 +369,7 @@ async def run_manifest(manifest: Manifest) -> dict:
             else:
                 all_uri_hashes.extend(collect_inventory_uris(result))
             results.append({"component": component.name, "result": result})
+            logger.info("Component '%s' completed successfully", component.name)
         except Exception as e:
             logger.exception(f"Error running component {component.name}")
             results.append({"component": component.name, "error": str(e)})
@@ -392,6 +395,14 @@ async def run_manifest(manifest: Manifest) -> dict:
                 manifest.source,
                 delete_stale=True,
             )
+
+    error_count = sum(1 for r in results if "error" in r)
+    logger.info(
+        "Manifest '%s' finished: %d components, %d errors",
+        manifest.id,
+        len(results),
+        error_count,
+    )
 
     return {
         "manifest_id": manifest.id,

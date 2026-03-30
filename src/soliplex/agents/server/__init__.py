@@ -16,6 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from soliplex.agents.config import configure_logging
 from soliplex.agents.config import settings
 
+from .locks import _scheduler_lock
+from .locks import get_manifest_lock
+from .locks import is_manifest_running
 from .routes.fs import fs_router
 from .routes.manifest import manifest_router
 from .routes.scm import scm_router
@@ -31,13 +34,15 @@ async def _run_manifest_at_startup(manifest_path: str) -> None:
 
     try:
         m = manifest_runner.load_manifest(manifest_path)
-        result = await manifest_runner.run_manifest(m)
-        count = len(result.get("results", []))
-        logger.info(
-            "Startup manifest '%s' completed: %d components",
-            m.id,
-            count,
-        )
+        lock = get_manifest_lock(m.id)
+        async with lock:
+            result = await manifest_runner.run_manifest(m)
+            count = len(result.get("results", []))
+            logger.info(
+                "Startup manifest '%s' completed: %d components",
+                m.id,
+                count,
+            )
     except Exception:
         logger.exception("Error running startup manifest %s", manifest_path)
 
@@ -72,22 +77,30 @@ def setup_manifest_schedules(crons) -> None:
     for m_obj, yml_path in pairs:
         if m_obj.schedule:
 
-            def make_handler(mpath):
+            def make_handler(mpath, mid):
                 async def handler():
-                    loaded = manifest_runner.load_manifest(mpath)
-                    result = await manifest_runner.run_manifest(loaded)
-                    logger.info(
-                        "Manifest %s completed: %d components",
-                        mpath,
-                        len(result.get("results", [])),
-                    )
+                    if is_manifest_running(mid):
+                        logger.warning(
+                            "Skipping manifest '%s': previous run still in progress",
+                            mid,
+                        )
+                        return
+                    lock = get_manifest_lock(mid)
+                    async with lock:
+                        loaded = manifest_runner.load_manifest(mpath)
+                        result = await manifest_runner.run_manifest(loaded)
+                        logger.info(
+                            "Manifest %s completed: %d components",
+                            mpath,
+                            len(result.get("results", [])),
+                        )
 
                 return handler
 
             crons.cron(
                 m_obj.schedule.cron,
                 name=f"manifest_{m_obj.id}",
-            )(make_handler(yml_path))
+            )(make_handler(yml_path, m_obj.id))
             logger.info(
                 "Scheduled manifest '%s' cron='%s'",
                 m_obj.id,
@@ -169,18 +182,22 @@ if settings.scheduler_enabled:
 
     @_crons.cron("*/1 * * * *", name="run_scheduled_jobs")
     async def run_jobs():
-        logger.info("start jobs")
-        if settings.scheduler_modules:
-            for module_name in settings.scheduler_modules:
-                try:
-                    module = importlib.import_module(module_name)
-                    await module.run_schedule_minute()
-                except Exception as e:
-                    logger.exception(
-                        f"Error running module {module_name}",
-                        exc_info=e,
-                    )
-        logger.info("end jobs")
+        if _scheduler_lock.locked():
+            logger.warning("Skipping run_scheduled_jobs: previous run still in progress")
+            return
+        async with _scheduler_lock:
+            logger.info("start jobs")
+            if settings.scheduler_modules:
+                for module_name in settings.scheduler_modules:
+                    try:
+                        module = importlib.import_module(module_name)
+                        await module.run_schedule_minute()
+                    except Exception as e:
+                        logger.exception(
+                            f"Error running module {module_name}",
+                            exc_info=e,
+                        )
+            logger.info("end jobs")
 
 
 # Include the parent router in the app

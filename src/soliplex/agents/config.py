@@ -1,6 +1,11 @@
 import enum
+import json
 import logging
+import logging.handlers
 import os
+import time
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 from typing import Literal
@@ -52,6 +57,18 @@ class Settings(BaseSettings):
     log_format: str = "{name}|{asctime}|{levelname}|{message}"
     endpoint_url: str = "http://localhost:8000/api/v1"
 
+    # SMTP email alert settings (handler only added when smtp_host is set)
+    smtp_host: str | None = None
+    smtp_port: int = 25
+    smtp_from: str | None = None
+    smtp_to: list[str] | None = None
+    smtp_subject: str = "Soliplex Agents Log Alert"
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_use_tls: bool = False
+    smtp_log_level: str = "ERROR"
+    smtp_cooldown: int = 30  # minimum seconds between emails
+
     # Ingester API authentication (for outgoing requests to the Ingester API)
     ingester_api_key: SecretStr | None = None
 
@@ -65,6 +82,9 @@ class Settings(BaseSettings):
     http_timeout_total: int = 120
     http_timeout_connect: int = 10
     http_timeout_sock_read: int = 60
+
+    # WebDAV concurrency settings
+    webdav_max_concurrent_requests: int = 3
 
     # SCM concurrency and retry settings
     scm_max_concurrent_requests: int = 3
@@ -98,23 +118,122 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
-def configure_logging():
-    """Configure logging from settings, with safe fallback."""
+class JsonFormatter(logging.Formatter):
+    """Emit each log record as a single JSON object."""
+
+    _BUILTIN_ATTRS = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None)))
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = datetime.fromtimestamp(record.created, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")
+        obj: dict = {
+            "timestamp": ts,
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[0] is not None:
+            obj["exception"] = self.formatException(record.exc_info)
+        for key, val in record.__dict__.items():
+            if key not in self._BUILTIN_ATTRS:
+                obj[key] = val
+        return json.dumps(obj, default=str)
+
+
+class _ThrottledSMTPHandler(logging.handlers.SMTPHandler):
+    """SMTPHandler that suppresses emails within a cooldown period."""
+
+    def __init__(self, *args, cooldown: int = 30, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._cooldown = cooldown
+        self._last_emit: float = 0
+
+    def emit(self, record):
+        now = time.monotonic()
+        if now - self._last_emit < self._cooldown:
+            return
+        self._last_emit = now
+        super().emit(record)
+
+
+def _add_smtp_handler():
+    """Attach an SMTPHandler to the root logger if SMTP settings are configured."""
+    if not (settings.smtp_host and settings.smtp_from and settings.smtp_to):
+        return
     try:
-        logging.basicConfig(
-            level=settings.log_level,
-            format=settings.log_format,
-            datefmt="%Y-%m-%dT%H:%M:%S",
-            style="{",
+        credentials = None
+        if settings.smtp_username and settings.smtp_password:
+            credentials = (
+                settings.smtp_username,
+                settings.smtp_password.get_secret_value(),
+            )
+        secure = () if settings.smtp_use_tls else None
+        handler = _ThrottledSMTPHandler(
+            mailhost=(settings.smtp_host, settings.smtp_port),
+            fromaddr=settings.smtp_from,
+            toaddrs=settings.smtp_to,
+            subject=settings.smtp_subject,
+            credentials=credentials,
+            secure=secure,
+            cooldown=settings.smtp_cooldown,
         )
+        handler.setLevel(settings.smtp_log_level)
+        if settings.log_format == "json":
+            handler.setFormatter(JsonFormatter())
+        else:
+            handler.setFormatter(
+                logging.Formatter(
+                    fmt=settings.log_format,
+                    datefmt="%Y-%m-%dT%H:%M:%S",
+                    style="{",
+                )
+            )
+        logging.getLogger().addHandler(handler)
     except Exception:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="{name}|{asctime}|{levelname}|{message}",
-            datefmt="%Y-%m-%dT%H:%M:%S",
-            style="{",
+        logger.warning(
+            "Failed to configure SMTP log handler",
+            exc_info=True,
         )
-        logging.getLogger().warning("invalid settings. environment variables might not be set. ")
+
+
+def _make_formatter():
+    """Return the appropriate formatter based on settings."""
+    if settings.log_format == "json":
+        return JsonFormatter()
+    return logging.Formatter(
+        fmt=settings.log_format,
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        style="{",
+    )
+
+
+def configure_logging():
+    """Configure logging from settings, with safe fallback.
+
+    When ``settings.log_format`` equals ``"json"``, a
+    `JsonFormatter` is installed; otherwise the value is
+    used as a ``str.format``-style pattern.
+    """
+    root = logging.getLogger()
+    try:
+        root.setLevel(settings.log_level)
+        handler = logging.StreamHandler()
+        handler.setFormatter(_make_formatter())
+        root.handlers.clear()
+        root.addHandler(handler)
+    except Exception:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter(
+                fmt="{name}|{asctime}|{levelname}|{message}",
+                datefmt="%Y-%m-%dT%H:%M:%S",
+                style="{",
+            )
+        )
+        root.handlers.clear()
+        root.addHandler(handler)
+        root.setLevel(logging.INFO)
+        root.warning("invalid settings. environment variables might not be set. ")
+    _add_smtp_handler()
 
 
 # --- Credential Resolution ---
