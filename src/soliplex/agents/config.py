@@ -1,5 +1,6 @@
 import enum
 import logging
+import logging.handlers
 import os
 from pathlib import Path
 from typing import Annotated
@@ -52,6 +53,17 @@ class Settings(BaseSettings):
     log_format: str = "{name}|{asctime}|{levelname}|{message}"
     endpoint_url: str = "http://localhost:8000/api/v1"
 
+    # SMTP email alert settings (handler only added when smtp_host is set)
+    smtp_host: str | None = None
+    smtp_port: int = 25
+    smtp_from: str | None = None
+    smtp_to: list[str] | None = None
+    smtp_subject: str = "Soliplex Agents Log Alert"
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_use_tls: bool = False
+    smtp_log_level: str = "ERROR"
+
     # Ingester API authentication (for outgoing requests to the Ingester API)
     ingester_api_key: SecretStr | None = None
 
@@ -101,14 +113,56 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+def _add_smtp_handler():
+    """Attach an SMTPHandler to the root logger if SMTP settings are configured."""
+    if not (settings.smtp_host and settings.smtp_from and settings.smtp_to):
+        return
+    try:
+        credentials = None
+        if settings.smtp_username and settings.smtp_password:
+            credentials = (
+                settings.smtp_username,
+                settings.smtp_password.get_secret_value(),
+            )
+        secure = () if settings.smtp_use_tls else None
+        handler = logging.handlers.SMTPHandler(
+            mailhost=(settings.smtp_host, settings.smtp_port),
+            fromaddr=settings.smtp_from,
+            toaddrs=settings.smtp_to,
+            subject=settings.smtp_subject,
+            credentials=credentials,
+            secure=secure,
+        )
+        handler.setLevel(settings.smtp_log_level)
+        handler.setFormatter(
+            logging.Formatter(
+                fmt=settings.log_format,
+                datefmt="%Y-%m-%dT%H:%M:%S",
+                style="{",
+            )
+        )
+        logging.getLogger().addHandler(handler)
+    except Exception:
+        logger.warning(
+            "Failed to configure SMTP log handler",
+            exc_info=True,
+        )
+
+
 def configure_logging():
-    """Configure logging from settings, with safe fallback."""
+    """Configure logging from settings, with safe fallback.
+
+    Uses ``force=True`` so the configuration takes effect even when
+    handlers already exist on the root logger (e.g. added by uvicorn
+    before the ASGI lifespan runs).
+    """
     try:
         logging.basicConfig(
             level=settings.log_level,
             format=settings.log_format,
             datefmt="%Y-%m-%dT%H:%M:%S",
             style="{",
+            force=True,
         )
     except Exception:
         logging.basicConfig(
@@ -116,8 +170,10 @@ def configure_logging():
             format="{name}|{asctime}|{levelname}|{message}",
             datefmt="%Y-%m-%dT%H:%M:%S",
             style="{",
+            force=True,
         )
         logging.getLogger().warning("invalid settings. environment variables might not be set. ")
+    _add_smtp_handler()
 
 
 # --- Credential Resolution ---
