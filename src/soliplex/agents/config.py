@@ -1,8 +1,11 @@
 import enum
+import json
 import logging
 import logging.handlers
 import os
 import time
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 from typing import Literal
@@ -115,6 +118,27 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+class JsonFormatter(logging.Formatter):
+    """Emit each log record as a single JSON object."""
+
+    _BUILTIN_ATTRS = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None)))
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = datetime.fromtimestamp(record.created, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")
+        obj: dict = {
+            "timestamp": ts,
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[0] is not None:
+            obj["exception"] = self.formatException(record.exc_info)
+        for key, val in record.__dict__.items():
+            if key not in self._BUILTIN_ATTRS:
+                obj[key] = val
+        return json.dumps(obj, default=str)
+
+
 class _ThrottledSMTPHandler(logging.handlers.SMTPHandler):
     """SMTPHandler that suppresses emails within a cooldown period."""
 
@@ -153,13 +177,16 @@ def _add_smtp_handler():
             cooldown=settings.smtp_cooldown,
         )
         handler.setLevel(settings.smtp_log_level)
-        handler.setFormatter(
-            logging.Formatter(
-                fmt=settings.log_format,
-                datefmt="%Y-%m-%dT%H:%M:%S",
-                style="{",
+        if settings.log_format == "json":
+            handler.setFormatter(JsonFormatter())
+        else:
+            handler.setFormatter(
+                logging.Formatter(
+                    fmt=settings.log_format,
+                    datefmt="%Y-%m-%dT%H:%M:%S",
+                    style="{",
+                )
             )
-        )
         logging.getLogger().addHandler(handler)
     except Exception:
         logger.warning(
@@ -168,30 +195,44 @@ def _add_smtp_handler():
         )
 
 
+def _make_formatter():
+    """Return the appropriate formatter based on settings."""
+    if settings.log_format == "json":
+        return JsonFormatter()
+    return logging.Formatter(
+        fmt=settings.log_format,
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        style="{",
+    )
+
+
 def configure_logging():
     """Configure logging from settings, with safe fallback.
 
-    Uses ``force=True`` so the configuration takes effect even when
-    handlers already exist on the root logger (e.g. added by uvicorn
-    before the ASGI lifespan runs).
+    When ``settings.log_format`` equals ``"json"``, a
+    `JsonFormatter` is installed; otherwise the value is
+    used as a ``str.format``-style pattern.
     """
+    root = logging.getLogger()
     try:
-        logging.basicConfig(
-            level=settings.log_level,
-            format=settings.log_format,
-            datefmt="%Y-%m-%dT%H:%M:%S",
-            style="{",
-            force=True,
-        )
+        root.setLevel(settings.log_level)
+        handler = logging.StreamHandler()
+        handler.setFormatter(_make_formatter())
+        root.handlers.clear()
+        root.addHandler(handler)
     except Exception:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="{name}|{asctime}|{levelname}|{message}",
-            datefmt="%Y-%m-%dT%H:%M:%S",
-            style="{",
-            force=True,
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter(
+                fmt="{name}|{asctime}|{levelname}|{message}",
+                datefmt="%Y-%m-%dT%H:%M:%S",
+                style="{",
+            )
         )
-        logging.getLogger().warning("invalid settings. environment variables might not be set. ")
+        root.handlers.clear()
+        root.addHandler(handler)
+        root.setLevel(logging.INFO)
+        root.warning("invalid settings. environment variables might not be set. ")
     _add_smtp_handler()
 
 
