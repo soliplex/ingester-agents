@@ -190,7 +190,7 @@ async def test_get_blob_success(github_provider, mock_response):
     blob_content = b"This is the blob content"
     blob_response = mock_response(200)
     blob_response.read = AsyncMock(return_value=blob_content)
-    session.get.return_value = create_async_context_manager(blob_response)
+    session.get = AsyncMock(return_value=blob_response)
 
     result = await github_provider.get_blob("test-repo", "test-owner", rec, session)
 
@@ -204,12 +204,13 @@ async def test_get_blob_raises_on_error(github_provider, mock_response):
     rec = {"sha": "abc123"}
     session = MagicMock()
 
-    # Mock error response
+    # Mock error response - 404 is not retryable, so _request_with_retry
+    # returns the response; raise_for_status then raises.
     blob_response = mock_response(404)
     blob_response.raise_for_status = MagicMock(
         side_effect=aiohttp.ClientResponseError(request_info=MagicMock(), history=(), status=404, message="Not found")
     )
-    session.get.return_value = create_async_context_manager(blob_response)
+    session.get = AsyncMock(return_value=blob_response)
 
     with pytest.raises(aiohttp.ClientResponseError):
         await github_provider.get_blob("test-repo", "test-owner", rec, session)
@@ -224,19 +225,16 @@ async def test_get_blob_retries_on_429(github_provider, mock_response):
     # First call returns 429, second returns success
     resp_429 = mock_response(429)
     resp_429.headers = {"Retry-After": "0"}
+    resp_429.text = AsyncMock(return_value="rate limited")
 
     blob_content = b"blob data"
     resp_200 = mock_response(200)
     resp_200.read = AsyncMock(return_value=blob_content)
 
-    session.get.side_effect = [
-        create_async_context_manager(resp_429),
-        create_async_context_manager(resp_200),
-    ]
+    session.get = AsyncMock(side_effect=[resp_429, resp_200])
 
-    with patch("soliplex.agents.scm.github.settings") as mock_settings:
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
         mock_settings.scm_retry_attempts = 3
-        mock_settings.scm_retry_backoff_base = 0.01
         mock_settings.scm_retry_backoff_max = 0.02
 
         result = await github_provider.get_blob("test-repo", "test-owner", rec, session)
@@ -250,14 +248,15 @@ async def test_get_blob_retries_on_network_error(github_provider, mock_response)
     rec = {"sha": "abc123"}
     session = MagicMock()
 
-    session.get.side_effect = aiohttp.ClientError("Connection refused")
+    session.get = AsyncMock(
+        side_effect=aiohttp.ClientConnectorError(connection_key=MagicMock(), os_error=OSError("Connection refused"))
+    )
 
-    with patch("soliplex.agents.scm.github.settings") as mock_settings:
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
         mock_settings.scm_retry_attempts = 2
-        mock_settings.scm_retry_backoff_base = 0.01
         mock_settings.scm_retry_backoff_max = 0.02
 
-        with pytest.raises(aiohttp.ClientError):
+        with pytest.raises(aiohttp.ClientConnectorError):
             await github_provider.get_blob("test-repo", "test-owner", rec, session)
 
 

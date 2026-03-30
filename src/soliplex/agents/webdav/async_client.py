@@ -14,9 +14,10 @@ import aiohttp
 from tenacity import AsyncRetrying
 from tenacity import retry_if_exception_type
 from tenacity import stop_after_attempt
-from tenacity import wait_exponential
 
 from soliplex.agents.config import settings
+from soliplex.agents.retry import WaitWithRetryAfter
+from soliplex.agents.retry import parse_retry_after
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +54,10 @@ class InsufficientStorage(ClientError):
 class RetryableHTTPError(ClientError):
     """Raised on retryable HTTP status codes to trigger tenacity retry."""
 
-    def __init__(self, status: int, body: str = "") -> None:
+    def __init__(self, status: int, body: str = "", retry_after: float | None = None) -> None:
         self.status = status
         self.body = body
+        self.retry_after = retry_after
         super().__init__(f"HTTP {status}")
 
 
@@ -343,7 +345,7 @@ class AsyncWebDAVClient:
         async with self._semaphore:
             async for attempt in AsyncRetrying(
                 retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
-                wait=wait_exponential(multiplier=1, max=RETRY_MAX_DELAY),
+                wait=WaitWithRetryAfter(multiplier=1, max=RETRY_MAX_DELAY),
                 stop=stop_after_attempt(self._max_retries),
                 reraise=True,
             ):
@@ -367,9 +369,10 @@ class AsyncWebDAVClient:
                         resp.release()
                         raise InsufficientStorage(path)
                     if resp.status in RETRYABLE_STATUS_CODES:
+                        ra = parse_retry_after(resp.headers)
                         body = await resp.text()
                         resp.release()
-                        raise RetryableHTTPError(resp.status, body)
+                        raise RetryableHTTPError(resp.status, body, retry_after=ra)
                     if resp.status >= 400:
                         body = await resp.text()
                         resp.release()

@@ -13,6 +13,7 @@ from soliplex.agents.common.config import detect_mime_type
 from soliplex.agents.config import settings
 from soliplex.agents.webdav import state as webdav_state
 from soliplex.agents.webdav.async_client import AsyncWebDAVClient
+from soliplex.agents.webdav.async_client import ResourceNotFound
 from soliplex.agents.webdav.async_client import create_async_webdav_client
 
 logger = logging.getLogger(__name__)
@@ -409,11 +410,11 @@ async def recursive_listdir_webdav(webdav_client: AsyncWebDAVClient, path: str) 
                 for key in [x for x in resource.keys() if x not in ["href", "etag", "type", "name"]]:
                     rec[key] = resource.get(key)
                 file_list.append(rec)
-    except (TimeoutError, ConnectionError, aiohttp.ClientError):
+    except (TimeoutError, ConnectionError, aiohttp.ClientError, ResourceNotFound):
         logger.exception(f"Connection error listing {path}")
         raise
     except Exception:
-        logger.warning(
+        logger.error(
             "Error listing WebDAV directory %s, returning partial results",
             path,
             exc_info=True,
@@ -514,46 +515,50 @@ async def load_inventory(
     ingested = []
     errors = []
     for idx, row in enumerate(to_process):
-        meta = row["metadata"].copy()
-        for k in [
-            "path",
-            "sha256",
-            "size",
-            "source",
-            "batch_id",
-            "source_uri",
-        ]:
-            if k in meta:
-                del meta[k]
-        if extra_metadata:
-            meta.update(extra_metadata)
-        etag = row.get("_etag")
-        if etag:
-            meta["_etag"] = etag
-        logger.info(f"starting ingest for {row['path']} {idx}/{len(to_process)} ")
-        mime_type = None
-        if "metadata" in row and "content-type" in row["metadata"]:
-            mime_type = row["metadata"]["content-type"]
-        res = await do_ingest(
-            base_path,
-            row["path"],
-            meta,
-            source,
-            batch_id,
-            mime_type,
-            webdav_url,
-            webdav_username,
-            webdav_password,
-        )
-        if "error" in res:
-            logger.error(f"Error ingesting {row['path']}: {res['error']}")
-            res["uri"] = row["path"]
-            res["source"] = source
-            res["batch_id"] = batch_id
-            errors.append(res)
-        else:
-            res["_path"] = row["path"]
-            ingested.append(res)
+        try:
+            meta = row["metadata"].copy()
+            for k in [
+                "path",
+                "sha256",
+                "size",
+                "source",
+                "batch_id",
+                "source_uri",
+            ]:
+                if k in meta:
+                    del meta[k]
+            if extra_metadata:
+                meta.update(extra_metadata)
+            etag = row.get("_etag")
+            if etag:
+                meta["_etag"] = etag
+            logger.info(f"starting ingest for {row['path']} {idx}/{len(to_process)} ")
+            mime_type = None
+            if "metadata" in row and "content-type" in row["metadata"]:
+                mime_type = row["metadata"]["content-type"]
+            res = await do_ingest(
+                base_path,
+                row["path"],
+                meta,
+                source,
+                batch_id,
+                mime_type,
+                webdav_url,
+                webdav_username,
+                webdav_password,
+            )
+            if "error" in res:
+                logger.error(f"Error ingesting {row['path']}: {res['error']}")
+                res["uri"] = row["path"]
+                res["source"] = source
+                res["batch_id"] = batch_id
+                errors.append(res)
+            else:
+                res["_path"] = row["path"]
+                ingested.append(res)
+        except Exception as e:
+            logger.exception("Failed to ingest %s", row.get("path", "unknown"))
+            errors.append({"uri": row.get("path", "unknown"), "error": str(e)})
     wf_res = None
     if len(errors) == 0 and start_workflows:
         wf_res = await client.start_workflows_for_batch(

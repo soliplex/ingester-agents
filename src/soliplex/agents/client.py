@@ -6,11 +6,12 @@ from typing import Any
 
 import aiohttp
 from tenacity import AsyncRetrying
-from tenacity import retry_if_exception_type
-from tenacity import stop_after_attempt
-from tenacity import wait_exponential
 
 from .config import settings
+from .retry import RETRYABLE_STATUS_CODES
+from .retry import RetryableHTTPError
+from .retry import parse_retry_after
+from .retry import retry_policy
 from .scm import UnexpectedResponseError
 
 """
@@ -23,26 +24,16 @@ STATUS_NEW = "new"
 STATUS_MISMATCH = "mismatch"
 PROCESSABLE_STATUSES = {STATUS_NEW, STATUS_MISMATCH}
 
-# Retry settings for transient errors (429, timeouts)
+# Retry settings for transient errors (429, timeouts, 5xx)
 RETRY_MAX_ATTEMPTS = 5
 RETRY_MAX_DELAY = 120
 
 
-class RateLimitError(Exception):
+class RateLimitError(RetryableHTTPError):
     """Raised when the server returns 429 Too Many Requests."""
 
-    pass
-
-
-# Exception types that trigger a retry
-RETRYABLE_EXCEPTIONS = (
-    RateLimitError,
-    TimeoutError,
-    aiohttp.ServerDisconnectedError,
-    aiohttp.ClientConnectorError,
-    aiohttp.ClientOSError,
-    ConnectionResetError,
-)
+    def __init__(self, msg: str = "", retry_after: float | None = None) -> None:
+        super().__init__(status=429, retry_after=retry_after, body=msg)
 
 
 def validate_parameters(start_workflows: bool, workflow_definition_id: str | None, param_set_id: str | None) -> None:
@@ -80,14 +71,13 @@ class _RetryRequestContext:
 
     async def __aenter__(self) -> aiohttp.ClientResponse:
         async for attempt in AsyncRetrying(
-            retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
-            wait=wait_exponential(multiplier=1, max=RETRY_MAX_DELAY),
-            stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
-            reraise=True,
+            **retry_policy(RETRY_MAX_ATTEMPTS, RETRY_MAX_DELAY),
         ):
             with attempt:
                 self._response = await self._method(self._url, **self._kwargs)
-                if self._response.status == 429:
+                status = self._response.status
+                if status == 429:
+                    ra = parse_retry_after(self._response.headers)
                     logger.warning(
                         "Rate limited (429) on %s (attempt %d/%d)",
                         self._url,
@@ -95,7 +85,21 @@ class _RetryRequestContext:
                         RETRY_MAX_ATTEMPTS,
                     )
                     self._response.release()
-                    raise RateLimitError(f"429 Too Many Requests on {self._url}")
+                    raise RateLimitError(
+                        f"429 Too Many Requests on {self._url}",
+                        retry_after=ra,
+                    )
+                if status in RETRYABLE_STATUS_CODES and status != 429:
+                    ra = parse_retry_after(self._response.headers)
+                    logger.warning(
+                        "Retryable %d on %s (attempt %d/%d)",
+                        status,
+                        self._url,
+                        attempt.retry_state.attempt_number,
+                        RETRY_MAX_ATTEMPTS,
+                    )
+                    self._response.release()
+                    raise RetryableHTTPError(status, retry_after=ra)
         return self._response  # type: ignore[return-value]
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:

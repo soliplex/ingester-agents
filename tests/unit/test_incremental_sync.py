@@ -298,7 +298,7 @@ async def test_list_commits_since(mock_response):
     )
 
     mock_sess = MagicMock()
-    mock_sess.get = MagicMock(return_value=create_async_context_manager(first_page_resp))
+    mock_sess.get = AsyncMock(return_value=first_page_resp)
 
     # Create async context manager for get_session
     session_ctx = create_async_context_manager(mock_sess)
@@ -346,12 +346,7 @@ async def test_list_commits_since_no_marker(mock_response):
     empty_resp = mock_response(200, [])
 
     mock_sess = MagicMock()
-    mock_sess.get = MagicMock(
-        side_effect=[
-            create_async_context_manager(page_resp),
-            create_async_context_manager(empty_resp),
-        ]
-    )
+    mock_sess.get = AsyncMock(side_effect=[page_resp, empty_resp])
 
     session_ctx = create_async_context_manager(mock_sess)
 
@@ -395,16 +390,15 @@ async def test_get_commit_details(mock_response):
     )
 
     mock_sess = MagicMock()
-    mock_sess.get = MagicMock(return_value=create_async_context_manager(commit_resp))
+    mock_sess.get = AsyncMock(return_value=commit_resp)
 
     session_ctx = create_async_context_manager(mock_sess)
 
     with patch.object(provider, "get_session", return_value=session_ctx):
-        with patch.object(provider, "validate_response", AsyncMock()):
-            result = await provider.get_commit_details("test", "admin", "abc123")
+        result = await provider.get_commit_details("test", "admin", "abc123")
 
-            assert result["sha"] == "abc123"
-            assert len(result["files"]) == 2
+        assert result["sha"] == "abc123"
+        assert len(result["files"]) == 2
 
 
 @pytest.mark.asyncio
@@ -440,17 +434,16 @@ async def test_get_single_file(mock_response):
     )
 
     mock_sess = MagicMock()
-    mock_sess.get = MagicMock(return_value=create_async_context_manager(file_resp))
+    mock_sess.get = AsyncMock(return_value=file_resp)
 
     session_ctx = create_async_context_manager(mock_sess)
 
     with patch.object(provider, "get_session", return_value=session_ctx):
-        with patch.object(provider, "validate_response", AsyncMock()):
-            result = await provider.get_single_file("test", "admin", "docs/test.md", "main")
+        result = await provider.get_single_file("test", "admin", "docs/test.md", "main")
 
-            assert result["name"] == "test.md"
-            assert result["uri"] == "docs/test.md"
-            assert "sha256" in result
+        assert result["name"] == "test.md"
+        assert result["uri"] == "docs/test.md"
+        assert "sha256" in result
 
 
 # Additional coverage tests for exception handling
@@ -548,12 +541,7 @@ async def test_list_commits_since_pagination(mock_response):
     second_page = mock_response(200, [{"sha": "commit1"}])
 
     mock_sess = MagicMock()
-    mock_sess.get = MagicMock(
-        side_effect=[
-            create_async_context_manager(first_page),
-            create_async_context_manager(second_page),
-        ]
-    )
+    mock_sess.get = AsyncMock(side_effect=[first_page, second_page])
 
     session_ctx = create_async_context_manager(mock_sess)
 
@@ -587,7 +575,7 @@ async def test_list_commits_since_empty_first_page(mock_response):
     empty_resp = mock_response(200, [])
 
     mock_sess = MagicMock()
-    mock_sess.get = MagicMock(return_value=create_async_context_manager(empty_resp))
+    mock_sess.get = AsyncMock(return_value=empty_resp)
 
     session_ctx = create_async_context_manager(mock_sess)
 
@@ -621,10 +609,10 @@ async def test_list_commits_since_max_pages_limit(mock_response):
     for i in range(11):
         # Each page returns exactly limit commits so pagination continues
         page_commits = [{"sha": f"commit_{i}_{j}"} for j in range(100)]
-        responses.append(create_async_context_manager(mock_response(200, page_commits)))
+        responses.append(mock_response(200, page_commits))
 
     mock_sess = MagicMock()
-    mock_sess.get = MagicMock(side_effect=responses)
+    mock_sess.get = AsyncMock(side_effect=responses)
 
     session_ctx = create_async_context_manager(mock_sess)
 

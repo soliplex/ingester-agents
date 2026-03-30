@@ -281,6 +281,12 @@ class TestExceptions:
         e = RetryableHTTPError(429, "rate limited")
         assert e.status == 429
         assert e.body == "rate limited"
+        assert e.retry_after is None
+
+    def test_retryable_http_error_with_retry_after(self):
+        e = RetryableHTTPError(429, "rate limited", retry_after=30.0)
+        assert e.status == 429
+        assert e.retry_after == 30.0
 
     def test_client_error(self):
         e = ClientError("test")

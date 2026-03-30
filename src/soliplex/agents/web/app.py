@@ -4,15 +4,24 @@ import hashlib
 import logging
 
 import aiohttp
+from tenacity import AsyncRetrying
 
 from soliplex.agents import client
 from soliplex.agents.config import settings
+from soliplex.agents.retry import RETRYABLE_STATUS_CODES
+from soliplex.agents.retry import RetryableHTTPError
+from soliplex.agents.retry import parse_retry_after
+from soliplex.agents.retry import retry_policy
 
 logger = logging.getLogger(__name__)
 
+# Retry settings for web fetches
+_WEB_RETRY_MAX_ATTEMPTS = 5
+_WEB_RETRY_MAX_DELAY = 120
+
 
 async def fetch_url(url: str) -> tuple[bytes, str]:
-    """Fetch URL content.
+    """Fetch URL content with retry on transient errors.
 
     Args:
         url: The URL to fetch.
@@ -21,15 +30,23 @@ async def fetch_url(url: str) -> tuple[bytes, str]:
         Tuple of (content_bytes, content_type).
 
     Raises:
-        aiohttp.ClientResponseError: If the response status indicates an error.
+        aiohttp.ClientResponseError: If the response status indicates a non-retryable error.
+        RetryableHTTPError: If retries are exhausted on 429/5xx.
     """
     timeout = aiohttp.ClientTimeout(total=settings.http_timeout_total)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url) as response:
-            response.raise_for_status()
-            content_bytes = await response.read()
-            content_type = response.content_type or "text/html"
-            return content_bytes, content_type
+        async for attempt in AsyncRetrying(
+            **retry_policy(_WEB_RETRY_MAX_ATTEMPTS, _WEB_RETRY_MAX_DELAY),
+        ):
+            with attempt:
+                async with session.get(url) as response:
+                    if response.status in RETRYABLE_STATUS_CODES:
+                        ra = parse_retry_after(response.headers)
+                        raise RetryableHTTPError(response.status, retry_after=ra)
+                    response.raise_for_status()
+                    content_bytes = await response.read()
+                    content_type = response.content_type or "text/html"
+                    return content_bytes, content_type
 
 
 async def resolve_urls(

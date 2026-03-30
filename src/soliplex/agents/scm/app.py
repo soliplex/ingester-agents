@@ -62,7 +62,11 @@ async def load_inventory(
 
     source = source or f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
 
-    to_process = await client.check_status(data, source, delete_stale=True)
+    try:
+        to_process = await client.check_status(data, source, delete_stale=True)
+    except Exception:
+        logger.exception("check_status failed, treating all files as new")
+        to_process = list(data)
     ingested = []
     ret = {"inventory": data, "to_process": to_process, "ingested": ingested}
     logger.info(f"found {len(to_process)} to process")
@@ -89,43 +93,47 @@ async def load_inventory(
     errors = []
 
     for row in to_process:
-        meta = row["metadata"].copy()
+        try:
+            meta = row["metadata"].copy()
 
-        for k in [
-            "path",
-            "sha256",
-            "size",
-            "source",
-            "batch_id",
-            "source_uri",
-        ]:
-            if k in meta:
-                del meta[k]
-        meta = clean_meta(meta)
-        if extra_metadata:
-            meta.update(extra_metadata)
-        logger.info(f"starting ingest for {row['uri']}")
-        mime_type = detect_mime_type(row["uri"])
-        if "metadata" in row and "content-type" in row["metadata"] and row["metadata"]["content-type"]:
-            mime_type = row["metadata"]["content-type"]
+            for k in [
+                "path",
+                "sha256",
+                "size",
+                "source",
+                "batch_id",
+                "source_uri",
+            ]:
+                if k in meta:
+                    del meta[k]
+            meta = clean_meta(meta)
+            if extra_metadata:
+                meta.update(extra_metadata)
+            logger.info(f"starting ingest for {row['uri']}")
+            mime_type = detect_mime_type(row["uri"])
+            if "metadata" in row and "content-type" in row["metadata"] and row["metadata"]["content-type"]:
+                mime_type = row["metadata"]["content-type"]
 
-        res = await client.do_ingest(
-            row["file_bytes"],
-            row["uri"],
-            meta,
-            source,
-            batch_id,
-            mime_type,
-        )
-        if "error" in res:
-            logger.error(f"Error ingesting {row['uri']}: {res['error']}")
-            res["uri"] = row["uri"]
-            res["source"] = source
-            res["resumed_batch"] = resume_batch
-            res["batch_id"] = batch_id
-            errors.append(res)
-        else:
-            ingested.append(row["uri"])
+            res = await client.do_ingest(
+                row["file_bytes"],
+                row["uri"],
+                meta,
+                source,
+                batch_id,
+                mime_type,
+            )
+            if "error" in res:
+                logger.error(f"Error ingesting {row['uri']}: {res['error']}")
+                res["uri"] = row["uri"]
+                res["source"] = source
+                res["resumed_batch"] = resume_batch
+                res["batch_id"] = batch_id
+                errors.append(res)
+            else:
+                ingested.append(row["uri"])
+        except Exception as e:
+            logger.exception("Failed to ingest %s", row.get("uri", "unknown"))
+            errors.append({"uri": row.get("uri", "unknown"), "error": str(e)})
     wf_res = None
     if len(errors) == 0 and start_workflows:
         wf_res = await client.start_workflows_for_batch(
