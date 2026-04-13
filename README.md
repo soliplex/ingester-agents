@@ -694,9 +694,7 @@ The server loads all manifests from the directory at startup, validates that all
 ### Document Ingestion Flow
 
 1. **Discovery**: Files are discovered from the source (filesystem, WebDAV, SCM, or web)
-2. **Hashing**: Each file's hash is calculated
-   - Filesystem/WebDAV/Web sources: SHA256 hash
-   - SCM sources: SHA3-256 hash for files, SHA256 for issues
+2. **Hashing**: Each file's SHA-256 hash is calculated
 3. **Status Check**: The system checks which files have changed or are new against the ingester database
 4. **Batch Management**:
    - The system searches for an existing batch matching the source name
@@ -880,7 +878,7 @@ si-agent serve
 Clients must include the API key in the `Authorization` header:
 
 ```bash
-curl -H "Authorization: Bearer your-api-key" http://localhost:8001/api/fs/status
+curl -H "Authorization: Bearer your-api-key" http://localhost:8001/api/v1/fs/check-status
 ```
 
 #### 3. OAuth2 Proxy Headers
@@ -929,24 +927,25 @@ curl -X POST http://localhost:8001/api/v1/fs/run-inventory \
   -F "source=my-source"
 ```
 
-#### SCM Routes (`/api/scm/`)
+#### SCM Routes (`/api/v1/scm/`)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/scm/{platform}/{repo}/issues` | List repository issues |
-| `GET` | `/api/scm/{platform}/{repo}/files` | List repository files |
-| `POST` | `/api/scm/{platform}/{repo}/ingest` | Ingest repo files and issues |
+| `GET` | `/api/v1/scm/{scm}/issues` | List repository issues |
+| `GET` | `/api/v1/scm/{scm}/repo` | List repository files |
+| `POST` | `/api/v1/scm/run-inventory` | Ingest repo files and issues |
+| `POST` | `/api/v1/scm/incremental-sync` | Incremental sync from SCM |
 
 **Example:**
 
 ```bash
 # List GitHub issues
-curl http://localhost:8001/api/scm/github/my-repo/issues?owner=myuser
+curl "http://localhost:8001/api/v1/scm/github/issues?owner=myuser&repo=my-repo"
 
 # Ingest repository
-curl -X POST http://localhost:8001/api/scm/github/my-repo/ingest \
+curl -X POST http://localhost:8001/api/v1/scm/run-inventory \
   -H "Content-Type: application/json" \
-  -d '{"owner": "myuser", "source": "my-source"}'
+  -d '{"scm": "github", "owner": "myuser", "repo": "my-repo", "source": "my-source"}'
 ```
 
 #### WebDAV Routes (`/api/v1/webdav/`)
@@ -1161,9 +1160,11 @@ soliplex.agents/
 │   ├── cli.py              # Main CLI entry point (includes 'serve' command)
 │   ├── client.py           # Soliplex Ingester API client
 │   ├── config.py           # Configuration, settings, and manifest models
+│   ├── retry.py            # Shared retry utilities (tenacity-based)
 │   ├── server/             # FastAPI server
 │   │   ├── __init__.py     # FastAPI app initialization, scheduler
 │   │   ├── auth.py         # Authentication (API key & OAuth2 proxy)
+│   │   ├── locks.py        # Async locks for manifest execution
 │   │   └── routes/
 │   │       ├── __init__.py
 │   │       ├── fs.py       # Filesystem API endpoints
@@ -1178,11 +1179,13 @@ soliplex.agents/
 │   ├── fs/                 # Filesystem agent
 │   │   ├── app.py          # Core filesystem logic
 │   │   └── cli.py          # Filesystem CLI commands
-│   ├── web/                # Web agent
+│   ├── web/                # Web agent (no CLI, manifest/API only)
 │   │   └── app.py          # Core web fetching logic
 │   ├── webdav/             # WebDAV agent
 │   │   ├── app.py          # Core WebDAV logic
-│   │   └── cli.py          # WebDAV CLI commands
+│   │   ├── cli.py          # WebDAV CLI commands
+│   │   ├── async_client.py # Async WebDAV client wrapper
+│   │   └── state.py        # ETag-based cache state
 │   ├── manifest/           # Manifest runner
 │   │   ├── runner.py       # YAML loading, validation, dispatch
 │   │   └── cli.py          # Manifest CLI commands
@@ -1190,11 +1193,12 @@ soliplex.agents/
 │       ├── app.py          # Core SCM logic
 │       ├── cli.py          # SCM CLI commands
 │       ├── base.py         # Base SCM provider interface
+│       ├── git_cli.py      # Git CLI decorator (local clone mode)
 │       ├── github/         # GitHub implementation
 │       ├── gitea/          # Gitea implementation
 │       └── lib/
 │           ├── templates/  # Issue rendering templates
-│           └── utils.py    # Utility functions
+│           └── utils.py    # SHA-256 hashing, base64 decoding
 ├── example-manifests/      # Example manifests (fs, scm, web, webdav, composite, delete-stale)
 ├── tests/                  # Test suite
 │   └── unit/

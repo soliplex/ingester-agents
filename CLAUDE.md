@@ -1,6 +1,8 @@
 # Soliplex Ingester-Agents
 
-Document ingestion CLI for loading files from filesystem, WebDAV, SCM platforms, and web pages into Soliplex Ingester. Supports declarative YAML manifests for multi-source ingestion.
+Document ingestion agents for loading files from filesystem, WebDAV, SCM
+platforms (GitHub, Gitea), and web pages into Soliplex Ingester. Supports
+declarative YAML manifests for multi-source ingestion.
 
 ## Quick Reference
 
@@ -24,7 +26,7 @@ si-agent fs check-status <path> <source>
 si-agent fs build-config <path>
 si-agent fs validate-config <path>
 
-# SCM agent (github/gitea) - uses owner/repo notation
+# SCM agent (github/gitea) -- uses owner/repo notation
 si-agent scm run-inventory <platform> <owner>/<repo>
 si-agent scm run-incremental <platform> <owner>/<repo>
 si-agent scm list-issues <platform> <owner>/<repo>
@@ -39,6 +41,8 @@ si-agent webdav check-status <path> <source>
 si-agent webdav export-urls <path> <output-file>
 si-agent webdav validate-config <path>
 
+# Web agent (no CLI -- available via manifest and REST API only)
+
 # Manifest runner
 si-agent manifest run <path>            # Run manifest file or directory
 si-agent manifest run <path> --json     # Output results as JSON
@@ -51,12 +55,9 @@ si-agent serve --reload
 
 ## Critical Constraints
 
-- **Test coverage:** 100% branch coverage required for non-CLI code
-- **Hashing algorithms:**
-  - Filesystem/WebDAV/Web: SHA256
-  - SCM files: SHA3-256 (see src/soliplex/agents/scm/lib/utils.py)
-  - SCM issues: SHA256
-- **Async patterns:** All I/O uses aiohttp/aiofiles
+- **Test coverage:** 100% branch coverage required for non-excluded code
+- **Hashing:** SHA-256 used throughout (filesystem, WebDAV, web, SCM files, SCM issues)
+- **Async patterns:** All I/O uses aiohttp/aiofiles with async/await
 - **Provider pattern:** SCM uses strategy pattern (base.py + implementations)
 
 ## Project Structure
@@ -66,15 +67,21 @@ src/soliplex/agents/
 ├── cli.py              # Main Typer entry point
 ├── client.py           # Ingester API client (batch, status, ingest, sync state)
 ├── config.py           # Pydantic Settings, manifest/component models
-├── common/config.py    # Shared validation utilities
+├── retry.py            # Shared retry utilities (tenacity-based)
+├── common/
+│   ├── config.py       # File validation utilities (MIME detection)
+│   ├── s3.py           # S3 URL parsing and aioboto3 integration
+│   └── urls_file.py    # Multi-source URL list reading
 ├── fs/                 # Filesystem agent
 │   ├── cli.py          # CLI commands
-│   └── app.py          # Business logic
-├── web/                # Web agent
+│   └── app.py          # Async file scanning, hashing, ingestion
+├── web/                # Web agent (manifest/API only, no CLI)
 │   └── app.py          # HTTP fetch and ingest logic
 ├── webdav/             # WebDAV agent
 │   ├── cli.py          # CLI commands
-│   └── app.py          # Business logic
+│   ├── app.py          # Directory scanning, ingestion
+│   ├── async_client.py # Async WebDAV client wrapper
+│   └── state.py        # ETag-based cache state
 ├── manifest/           # Manifest runner
 │   ├── runner.py       # YAML loading, validation, agent dispatch
 │   └── cli.py          # CLI commands
@@ -82,14 +89,16 @@ src/soliplex/agents/
 │   ├── cli.py          # CLI commands
 │   ├── app.py          # Orchestration logic
 │   ├── base.py         # BaseSCMProvider abstract class
+│   ├── git_cli.py      # Git CLI decorator (local clone mode)
 │   ├── github/         # GitHub implementation
 │   ├── gitea/          # Gitea implementation
 │   └── lib/
-│       ├── utils.py    # SHA3-256 hashing, base64 decoding
+│       ├── utils.py    # SHA-256 hashing, base64 decoding
 │       └── templates/  # Jinja2 issue rendering
 └── server/             # FastAPI REST API
-    ├── __init__.py     # App setup, CORS, scheduler
+    ├── __init__.py     # App setup, CORS, cron scheduler
     ├── auth.py         # API key and OAuth2 proxy auth
+    ├── locks.py        # Async locks for manifest execution
     └── routes/         # Endpoint handlers (fs, scm, webdav, web, manifest)
 ```
 
@@ -119,56 +128,34 @@ EXTENSIONS=md,pdf,doc,docx
 # Git CLI mode (alternative to API for file operations)
 scm_use_git_cli=true
 scm_git_cli_timeout=300
-scm_git_repo_base_dir=/path/to/repos
 
 # Server settings
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8001
-API_KEY=server-api-key
 API_KEY_ENABLED=false
-AUTH_TRUST_PROXY_HEADERS=false
 
 # Manifest scheduling
-MANIFEST_DIR=/path/to/manifests       # Directory with manifest .yml files
+MANIFEST_DIR=/path/to/manifests
 ```
 
 ## Key Patterns
 
-### Batch Management
-
-Documents are grouped into batches by source name. The system reuses existing batches for incremental ingestion.
-
-### Status Checking
-
-Files are hashed and compared against the Ingester database:
-- **new:** File does not exist
-- **mismatch:** File changed (hash differs)
-- **match:** File unchanged (skipped)
-
-### Incremental Sync (SCM)
-
-The run-incremental command tracks the last processed commit SHA to only fetch changed files on subsequent runs.
+- **Batch management:** Documents grouped by source name; system reuses existing batches
+- **Status checking:** Files hashed (SHA-256) and compared; only new/changed files ingested
+- **Incremental sync (SCM):** Tracks last commit SHA to only fetch changes
+- **Manifests:** Declarative YAML for multi-source orchestration with delete_stale support
 
 ## Testing
 
 ```bash
-# Unit tests (required)
-uv run pytest tests/unit/
-
-# Specific test file
-uv run pytest tests/unit/test_client.py
-
-# Coverage report
-uv run pytest --cov-report=html
+uv run pytest                           # Unit tests (required)
+uv run pytest tests/unit/test_client.py # Specific test file
+uv run pytest --cov-report=html         # Coverage report
 ```
 
-Coverage exclusions (pyproject.toml):
-- CLI modules (cli.py)
-- App orchestration (app.py)
-- Templates
-- Test fixtures (conftest.py)
+Coverage exclusions: `*/cli.py`, `*/app.py`, `*/templates/*`, `*/conftest.py`, `*/server/*`
 
 ## Documentation
 
-- [README.md](README.md) - User guide, examples, API reference
-- [tmp_docs/](tmp_docs/) - Development notes and implementation guides
+- [README.md](README.md) - User guide, installation, examples, full configuration reference
+- [example-manifests/](example-manifests/) - Sample manifest YAML files
