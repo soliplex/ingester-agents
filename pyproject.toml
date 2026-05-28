@@ -1,6 +1,6 @@
 [project]
 name = "soliplex.agents"
-version = "0.6.0"
+version = "0.6.1"
 description = "Agents for use with soliplex-ingester"
 authors = [{ name = "Enfold Systems", email = "info@enfoldsystems.net" }]
 readme = "README.md"
@@ -59,7 +59,7 @@ module-name = "soliplex.agents"
 [tool.uv]
 # 2-week cooldown: don't resolve packages newer than this date.
 exclude-newer = "2 weeks"
-
+exclude-newer-package = { starlette = "1 hour"  }
 
 [project.scripts]
 si-agent = "soliplex.agents.cli:cli"
