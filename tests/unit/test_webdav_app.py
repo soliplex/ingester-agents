@@ -14,10 +14,11 @@ from soliplex.agents.webdav.async_client import WebDAVResponse
 def mock_webdav_client():
     """Create a mock async WebDAV client."""
     client = AsyncMock()
+    # AsyncWebDAVClient.ls() returns entry names RELATIVE to the listed
+    # directory (e.g. "test.md", not "/documents/test.md"). Mirror that here.
     client.ls.return_value = [
-        {"name": "/documents", "type": "directory"},
-        {"name": "/documents/test.md", "type": "file", "size": 100, "etag": '"etag1"', "content_length": 100},
-        {"name": "/documents/readme.pdf", "type": "file", "size": 200, "etag": '"etag2"', "content_length": 200},
+        {"name": "test.md", "type": "file", "size": 100, "etag": '"etag1"', "content_length": 100},
+        {"name": "readme.pdf", "type": "file", "size": 200, "etag": '"etag2"', "content_length": 200},
     ]
 
     # Mock download to return bytes
@@ -199,31 +200,42 @@ async def test_recursive_listdir_webdav_flat(mock_webdav_client):
     assert isinstance(files, list)
     assert len(files) == 2
     assert all("path" in f and "size" in f for f in files)
+    # Relative names from ls() must be joined with the parent path.
+    assert sorted(f["path"] for f in files) == ["/documents/readme.pdf", "/documents/test.md"]
     # ETag should be preserved in output
     assert all("etag" in f for f in files)
 
 
 @pytest.mark.asyncio
 async def test_recursive_listdir_webdav_nested():
-    """Test listing files in nested WebDAV directories."""
+    """Recursion must join parent path with each child's relative name.
+
+    AsyncWebDAVClient.ls() returns entry names relative to the listed
+    directory. The recursive call must therefore join those names with the
+    current path; otherwise the next PROPFIND lands on the server root
+    (e.g. /subdir instead of /documents/subdir) and 405s.
+    """
     mock_client = AsyncMock()
     mock_client.ls = AsyncMock(
         side_effect=[
             [
-                {"name": "/documents", "type": "directory"},
-                {"name": "/documents/subdir", "type": "directory"},
-                {"name": "/documents/file1.md", "type": "file", "size": 100},
+                {"name": "subdir", "type": "directory"},
+                {"name": "file1.md", "type": "file", "size": 100, "content_length": 100},
             ],
             [
-                {"name": "/documents/subdir", "type": "directory"},
-                {"name": "/documents/subdir/file2.md", "type": "file", "size": 200},
+                {"name": "file2.md", "type": "file", "size": 200, "content_length": 200},
             ],
         ]
     )
 
     files = await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
 
-    assert len(files) == 2  # file1.md and file2.md
+    # Second ls() call must be against the joined path, not the bare relative name.
+    second_call_path = mock_client.ls.call_args_list[1].args[0]
+    assert second_call_path == "/documents/subdir"
+
+    paths = sorted(f["path"] for f in files)
+    assert paths == ["/documents/file1.md", "/documents/subdir/file2.md"]
 
 
 # --- list_config ---
