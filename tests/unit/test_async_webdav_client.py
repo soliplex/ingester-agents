@@ -363,6 +363,104 @@ class TestClientLifecycle:
         client = AsyncWebDAVClient(base_url="https://example.com", max_concurrent=7)
         assert client._max_concurrent == 7
 
+    @pytest.mark.asyncio
+    async def test_ensure_session_attaches_trace_config_when_debug(self, caplog):
+        caplog.set_level(logging.DEBUG, logger="soliplex.agents.webdav.async_client")
+        client = AsyncWebDAVClient(base_url="https://example.com")
+        session = await client._ensure_session()
+        assert session._trace_configs
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_ensure_session_no_trace_config_when_not_debug(self, caplog):
+        caplog.set_level(logging.INFO, logger="soliplex.agents.webdav.async_client")
+        client = AsyncWebDAVClient(base_url="https://example.com")
+        session = await client._ensure_session()
+        assert not session._trace_configs
+        await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# _build_debug_trace_config — verify each callback logs at DEBUG
+# ---------------------------------------------------------------------------
+
+
+class TestDebugTraceConfig:
+    @pytest.mark.asyncio
+    async def test_all_callbacks_log_debug(self, caplog):
+        from types import SimpleNamespace
+
+        from soliplex.agents.webdav.async_client import _build_debug_trace_config
+
+        caplog.set_level(logging.DEBUG, logger="soliplex.agents.webdav.async_client")
+        trace = _build_debug_trace_config()
+        ctx = SimpleNamespace()
+
+        await trace.on_request_start[0](
+            MagicMock(),
+            ctx,
+            SimpleNamespace(method="GET", url="https://example.com/x"),
+        )
+        await trace.on_request_end[0](
+            MagicMock(),
+            ctx,
+            SimpleNamespace(
+                method="GET",
+                url="https://example.com/x",
+                response=SimpleNamespace(status=200),
+            ),
+        )
+        await trace.on_request_exception[0](
+            MagicMock(),
+            ctx,
+            SimpleNamespace(
+                method="GET",
+                url="https://example.com/x",
+                exception=RuntimeError("boom"),
+            ),
+        )
+        await trace.on_connection_queued_start[0](MagicMock(), ctx, SimpleNamespace())
+        await trace.on_dns_resolvehost_start[0](MagicMock(), ctx, SimpleNamespace(host="example.com"))
+        await trace.on_dns_resolvehost_end[0](MagicMock(), ctx, SimpleNamespace(host="example.com"))
+
+        debug_messages = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+        assert any("aiohttp ->" in m for m in debug_messages)
+        assert any("aiohttp <-" in m for m in debug_messages)
+        assert any("aiohttp !!" in m for m in debug_messages)
+        assert any("connection queued" in m for m in debug_messages)
+        assert any("dns resolve start" in m for m in debug_messages)
+        assert any("dns resolve end" in m for m in debug_messages)
+
+    @pytest.mark.asyncio
+    async def test_callbacks_tolerate_missing_start_ctx(self, caplog):
+        """request_end / request_exception use getattr(ctx, "start", 0) — exercise it."""
+        from types import SimpleNamespace
+
+        from soliplex.agents.webdav.async_client import _build_debug_trace_config
+
+        caplog.set_level(logging.DEBUG, logger="soliplex.agents.webdav.async_client")
+        trace = _build_debug_trace_config()
+        ctx = SimpleNamespace()  # no .start set
+
+        await trace.on_request_end[0](
+            MagicMock(),
+            ctx,
+            SimpleNamespace(
+                method="GET",
+                url="https://example.com/x",
+                response=SimpleNamespace(status=200),
+            ),
+        )
+        await trace.on_request_exception[0](
+            MagicMock(),
+            ctx,
+            SimpleNamespace(
+                method="GET",
+                url="https://example.com/x",
+                exception=RuntimeError("boom"),
+            ),
+        )
+
 
 # ---------------------------------------------------------------------------
 # AsyncWebDAVClient._request - transport, errors, retry

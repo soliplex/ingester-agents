@@ -392,19 +392,20 @@ async def recursive_listdir_webdav(webdav_client: AsyncWebDAVClient, path: str) 
     try:
         resources = await webdav_client.ls(path, detail=True)
         for resource in resources:
-            resource_path = resource["name"]
-            logger.debug(f"Found resource: {resource_path}, type: {resource.get('type', 'unknown')}")
+            rel_name = resource["name"]
+            logger.debug(f"Found resource: {rel_name}, type: {resource.get('type', 'unknown')}")
 
-            # Skip the directory itself
-            if resource_path.rstrip("/") == path.rstrip("/") or resource["name"].split("/")[-1] == "_data":
+            basename = rel_name.rstrip("/").split("/")[-1]
+            if not basename or basename == "_data":
                 continue
 
+            full_resource_path = f"{path.rstrip('/')}/{rel_name.lstrip('/')}"
+
             if resource["type"] == "directory":
-                # Recursively list subdirectory
-                subdir_files = await recursive_listdir_webdav(webdav_client, resource_path)
+                subdir_files = await recursive_listdir_webdav(webdav_client, full_resource_path)
                 file_list.extend(subdir_files)
             else:
-                rec = {"path": resource_path, "size": resource.get("content_length", 0)}
+                rec = {"path": full_resource_path, "size": resource.get("content_length", 0)}
                 if "etag" in resource:
                     rec["etag"] = resource["etag"]
                 for key in [x for x in resource.keys() if x not in ["href", "etag", "type", "name"]]:

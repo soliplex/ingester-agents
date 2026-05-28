@@ -255,6 +255,76 @@ class WebDAVResponse:
     headers: dict[str, str]
 
 
+def _build_debug_trace_config() -> aiohttp.TraceConfig:
+    """Emit DEBUG logs for aiohttp client request lifecycle events."""
+    trace = aiohttp.TraceConfig()
+
+    async def _on_request_start(
+        session: aiohttp.ClientSession,
+        ctx: Any,
+        params: aiohttp.TraceRequestStartParams,
+    ) -> None:
+        ctx.start = asyncio.get_event_loop().time()
+        logger.debug("aiohttp -> %s %s", params.method, params.url)
+
+    async def _on_request_end(
+        session: aiohttp.ClientSession,
+        ctx: Any,
+        params: aiohttp.TraceRequestEndParams,
+    ) -> None:
+        elapsed = asyncio.get_event_loop().time() - getattr(ctx, "start", 0)
+        logger.debug(
+            "aiohttp <- %s %s %d (%.3fs)",
+            params.method,
+            params.url,
+            params.response.status,
+            elapsed,
+        )
+
+    async def _on_request_exception(
+        session: aiohttp.ClientSession,
+        ctx: Any,
+        params: aiohttp.TraceRequestExceptionParams,
+    ) -> None:
+        elapsed = asyncio.get_event_loop().time() - getattr(ctx, "start", 0)
+        logger.debug(
+            "aiohttp !! %s %s %r (%.3fs)",
+            params.method,
+            params.url,
+            params.exception,
+            elapsed,
+        )
+
+    async def _on_connection_queued_start(
+        session: aiohttp.ClientSession,
+        ctx: Any,
+        params: aiohttp.TraceConnectionQueuedStartParams,
+    ) -> None:
+        logger.debug("aiohttp connection queued")
+
+    async def _on_dns_resolvehost_start(
+        session: aiohttp.ClientSession,
+        ctx: Any,
+        params: aiohttp.TraceDnsResolveHostStartParams,
+    ) -> None:
+        logger.debug("aiohttp dns resolve start: %s", params.host)
+
+    async def _on_dns_resolvehost_end(
+        session: aiohttp.ClientSession,
+        ctx: Any,
+        params: aiohttp.TraceDnsResolveHostEndParams,
+    ) -> None:
+        logger.debug("aiohttp dns resolve end: %s", params.host)
+
+    trace.on_request_start.append(_on_request_start)
+    trace.on_request_end.append(_on_request_end)
+    trace.on_request_exception.append(_on_request_exception)
+    trace.on_connection_queued_start.append(_on_connection_queued_start)
+    trace.on_dns_resolvehost_start.append(_on_dns_resolvehost_start)
+    trace.on_dns_resolvehost_end.append(_on_dns_resolvehost_end)
+    return trace
+
+
 # ---------------------------------------------------------------------------
 # Async WebDAV Client
 # ---------------------------------------------------------------------------
@@ -293,11 +363,13 @@ class AsyncWebDAVClient:
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._connector = aiohttp.TCPConnector(limit=self._max_concurrent)
+            trace_configs = [_build_debug_trace_config()] if logger.isEnabledFor(logging.DEBUG) else None
             self._session = aiohttp.ClientSession(
                 auth=self._auth,
                 headers=self._headers,
                 timeout=self._timeout,
                 connector=self._connector,
+                trace_configs=trace_configs,
             )
         return self._session
 
