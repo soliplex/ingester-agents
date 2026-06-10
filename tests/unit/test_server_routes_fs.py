@@ -199,7 +199,7 @@ def test_check_status_success(client, temp_inventory_file):
 
     with (
         patch("soliplex.agents.server.routes.fs.fs_app") as mock_fs_app,
-        patch("soliplex.agents.client.check_status") as mock_check_status,
+        patch("soliplex.agents.local_state.compute_to_process") as mock_check_status,
     ):
         mock_fs_app.resolve_config_path = AsyncMock(
             return_value=(
@@ -232,7 +232,7 @@ def test_check_status_with_detail(client, temp_inventory_file):
 
     with (
         patch("soliplex.agents.server.routes.fs.fs_app") as mock_fs_app,
-        patch("soliplex.agents.client.check_status") as mock_check_status,
+        patch("soliplex.agents.local_state.compute_to_process") as mock_check_status,
     ):
         to_process = [{"path": "doc1.md", "sha256": "abc123", "status": "new"}]
         mock_fs_app.resolve_config_path = AsyncMock(
@@ -293,7 +293,6 @@ def test_run_inventory_success(client, temp_inventory_file):
         assert data["to_process_count"] == 1
         assert data["ingested_count"] == 1
         assert data["error_count"] == 0
-        assert data["batch_id"] == 123
 
 
 def test_run_inventory_with_errors(client, temp_inventory_file):
@@ -368,20 +367,15 @@ def test_run_inventory_with_all_options(client, temp_inventory_file):
                 "source": "test-source",
                 "start": "5",
                 "end": "10",
-                "start_workflows": "false",
-                "workflow_definition_id": "wf-123",
-                "param_set_id": "params-456",
-                "priority": "5",
             },
         )
 
         assert response.status_code == 200
         mock_fs_app.load_inventory.assert_called_once()
-        call_kwargs = mock_fs_app.load_inventory.call_args
-        assert call_kwargs[1]["start_workflows"] is False
-        assert call_kwargs[1]["workflow_definition_id"] == "wf-123"
-        assert call_kwargs[1]["param_set_id"] == "params-456"
-        assert call_kwargs[1]["priority"] == 5
+        call_args = mock_fs_app.load_inventory.call_args
+        # positional: config_file, source, start, end
+        assert call_args[0][2] == 5
+        assert call_args[0][3] == 10
 
 
 def test_run_inventory_path_not_found(client):

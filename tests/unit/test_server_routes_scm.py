@@ -342,20 +342,16 @@ def test_run_inventory_with_all_options(client):
                 "scm": "github",
                 "repo_name": "test-repo",
                 "owner": "test-owner",
-                "start_workflows": "false",
-                "workflow_definition_id": "wf-custom",
-                "param_set_id": "params-custom",
-                "priority": "10",
+                "content_filter": "files",
+                "metadata": '{"team": "docs"}',
             },
         )
 
         assert response.status_code == 200
         mock_scm_app.load_inventory.assert_called_once()
         call_kwargs = mock_scm_app.load_inventory.call_args[1]
-        assert call_kwargs["start_workflows"] is False
-        assert call_kwargs["workflow_definition_id"] == "wf-custom"
-        assert call_kwargs["param_set_id"] == "params-custom"
-        assert call_kwargs["priority"] == 10
+        assert call_kwargs["content_filter"] == "files"
+        assert call_kwargs["extra_metadata"] == {"team": "docs"}
 
 
 def test_run_inventory_nothing_to_process(client):
@@ -603,10 +599,8 @@ def test_incremental_sync_with_all_options(client):
                 "repo_name": "test-repo",
                 "owner": "test-owner",
                 "branch": "feature-branch",
-                "start_workflows": "false",
-                "workflow_definition_id": "wf-custom",
-                "param_set_id": "params-custom",
-                "priority": "5",
+                "content_filter": "files",
+                "metadata": '{"team": "docs"}',
             },
         )
 
@@ -614,10 +608,8 @@ def test_incremental_sync_with_all_options(client):
         mock_scm_app.incremental_sync.assert_called_once()
         call_kwargs = mock_scm_app.incremental_sync.call_args[1]
         assert call_kwargs["branch"] == "feature-branch"
-        assert call_kwargs["start_workflows"] is False
-        assert call_kwargs["workflow_definition_id"] == "wf-custom"
-        assert call_kwargs["param_set_id"] == "params-custom"
-        assert call_kwargs["priority"] == 5
+        assert call_kwargs["content_filter"] == "files"
+        assert call_kwargs["extra_metadata"] == {"team": "docs"}
 
 
 def test_incremental_sync_falls_back_to_full_sync(client):

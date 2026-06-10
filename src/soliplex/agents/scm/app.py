@@ -5,7 +5,8 @@ import logging
 from soliplex.agents.common.config import detect_mime_type
 from soliplex.agents.scm.base import BaseSCMProvider
 
-from .. import client
+from .. import local_state
+from .. import local_store
 from ..config import SCM
 from ..config import ContentFilter
 from ..config import settings
@@ -43,116 +44,73 @@ def clean_meta(meta: dict):
     return meta
 
 
+# Keys that are recorded separately (mime_type, hash, source) and should not
+# be duplicated into the sidecar's ``metadata`` block.
+_STRIP_KEYS = ("path", "sha256", "size", "source", "batch_id", "source_uri", "content-type")
+
+
+def _doc_meta(row: dict, extra_metadata: dict[str, str] | None) -> dict:
+    """Build the sidecar metadata for an inventory row."""
+    meta = dict(row.get("metadata") or {})
+    for k in _STRIP_KEYS:
+        meta.pop(k, None)
+    meta = clean_meta(meta)
+    if extra_metadata:
+        meta.update(extra_metadata)
+    return meta
+
+
+def _resolve_mime(row: dict) -> str:
+    """Resolve the MIME type for a row from its metadata or its URI."""
+    ct = row.get("content-type") or (row.get("metadata") or {}).get("content-type")
+    if ct:
+        return ct
+    return detect_mime_type(row.get("uri") or row.get("path"))
+
+
 async def load_inventory(
     scm: str,
     repo_name: str,
     owner: str = None,
-    resume_batch: int | None = None,
-    priority: int = 0,
-    start_workflows: bool = False,
-    workflow_definition_id: str | None = None,
-    param_set_id: str | None = None,
     content_filter: ContentFilter = ContentFilter.ALL,
     extra_metadata: dict[str, str] | None = None,
     source: str | None = None,
     delete_stale: bool = False,
 ):
-    client.validate_parameters(start_workflows, workflow_definition_id, param_set_id)
+    """Fetch a repository's full inventory and write changed documents locally.
+
+    Files (and/or issues) are written under the configured ``download_dir``;
+    local state tracks content hashes so unchanged documents are skipped on
+    subsequent runs. When ``delete_stale`` is set, documents no longer present
+    in the source are removed from disk.
+    """
     data = await get_data(scm, repo_name, owner, content_filter=content_filter)
 
     source = source or f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
 
-    try:
-        to_process = await client.check_status(data, source, delete_stale=True)
-    except Exception:
-        logger.exception("check_status failed, treating all files as new")
-        to_process = list(data)
+    to_process = local_state.compute_to_process(data, source)
     ingested = []
-    ret = {"inventory": data, "to_process": to_process, "ingested": ingested}
-    logger.info(f"found {len(to_process)} to process")
-    if len(to_process) == 0:
-        logger.info("nothing to process")
-        if start_workflows:
-            batch_id = await client.find_or_create_batch(source)
-            ret["workflow_result"] = await client.start_workflows_for_batch(
-                batch_id, workflow_definition_id, param_set_id, priority
-            )
-        return ret
-    found_batch_id = await client.find_batch_for_source(source)
-    if found_batch_id:
-        logger.info(f"found batch {found_batch_id} for {source}")
-        batch_id = found_batch_id
-    else:
-        logger.info(f"no batch found for {source}. creating")
-        batch_id = await client.create_batch(
-            source,
-            source,
-        )
-    logger.info(f"batch_id={batch_id}")
-
     errors = []
+    ret = {"inventory": data, "to_process": to_process, "ingested": ingested, "errors": errors}
+    logger.info(f"found {len(to_process)} to process")
 
     for row in to_process:
+        uri = row["uri"]
         try:
-            meta = row["metadata"].copy()
-
-            for k in [
-                "path",
-                "sha256",
-                "size",
-                "source",
-                "batch_id",
-                "source_uri",
-            ]:
-                if k in meta:
-                    del meta[k]
-            meta = clean_meta(meta)
-            if extra_metadata:
-                meta.update(extra_metadata)
-            logger.info(f"starting ingest for {row['uri']}")
-            mime_type = detect_mime_type(row["uri"])
-            if "metadata" in row and "content-type" in row["metadata"] and row["metadata"]["content-type"]:
-                mime_type = row["metadata"]["content-type"]
-
-            res = await client.do_ingest(
-                row["file_bytes"],
-                row["uri"],
-                meta,
-                source,
-                batch_id,
-                mime_type,
-            )
-            if "error" in res:
-                logger.error(f"Error ingesting {row['uri']}: {res['error']}")
-                res["uri"] = row["uri"]
-                res["source"] = source
-                res["resumed_batch"] = resume_batch
-                res["batch_id"] = batch_id
-                errors.append(res)
-            else:
-                ingested.append(row["uri"])
+            mime_type = _resolve_mime(row)
+            meta = _doc_meta(row, extra_metadata)
+            doc_bytes = row["file_bytes"]
+            logger.info(f"writing {uri}")
+            local_store.write_document(source, uri, doc_bytes, mime_type, meta)
+            local_state.upsert_file(source, uri, row.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
+            ingested.append(uri)
         except Exception as e:
-            logger.exception("Failed to ingest %s", row.get("uri", "unknown"))
-            errors.append({"uri": row.get("uri", "unknown"), "error": str(e)})
-    wf_res = None
-    if len(errors) == 0 and start_workflows:
-        wf_res = await client.start_workflows_for_batch(
-            batch_id,
-            workflow_definition_id,
-            param_set_id,
-            priority,
-        )
+            logger.exception("Failed to write %s", uri)
+            errors.append({"uri": uri, "error": str(e)})
 
     delete_stale_result = None
     if delete_stale and len(errors) == 0:
-        delete_stale_result = await client.check_status(
-            data,
-            source,
-            delete_stale=True,
-        )
-    ret["ingested"] = ingested
-    ret["errors"] = errors
-    ret["workflow_result"] = wf_res
+        delete_stale_result = local_state.prune_documents(source, {r["uri"] for r in data})
     ret["delete_stale_result"] = delete_stale_result
     return ret
 
@@ -275,10 +233,6 @@ async def incremental_sync(
     repo_name: str,
     owner: str = None,
     branch: str = "main",
-    priority: int = 0,
-    start_workflows: bool = False,
-    workflow_definition_id: str | None = None,
-    param_set_id: str | None = None,
     content_filter: ContentFilter = ContentFilter.ALL,
     extra_metadata: dict[str, str] | None = None,
     source: str | None = None,
@@ -287,18 +241,17 @@ async def incremental_sync(
     """
     Perform incremental sync based on commit history.
 
-    Only fetches and processes files that changed since last sync.
-    Falls back to full sync if no sync state exists.
+    Only fetches and writes files that changed since the last sync. Falls
+    back to a full sync if no local sync state exists. Sync state (commit
+    sha, branch, timestamp) is tracked locally.
 
     Args:
         scm: SCM type (gitea/github)
         repo_name: Repository name
         owner: Repository owner
         branch: Branch to sync
-        priority: Workflow priority
-        start_workflows: Whether to start workflows after ingestion
-        workflow_definition_id: Optional workflow ID
-        param_set_id: Optional parameter set ID
+        content_filter: Whether to sync files, issues, or both
+        extra_metadata: Extra metadata attached to every document
         source: Optional source name override (used by manifests)
         delete_stale: Remove documents not in full inventory (default: False)
 
@@ -310,13 +263,8 @@ async def incremental_sync(
 
     logger.info(f"Starting incremental sync for {source}")
 
-    # Get last sync state
-    sync_state = await client.get_sync_state(source)
-
-    if "error" in sync_state:
-        logger.error(f"Error getting sync state: {sync_state['error']}")
-        return {"error": sync_state["error"]}
-
+    # Get last sync state (local)
+    sync_state = local_state.get_sync_meta(source)
     last_commit_sha = sync_state.get("last_commit_sha")
 
     if not last_commit_sha:
@@ -325,10 +273,6 @@ async def incremental_sync(
             scm,
             repo_name,
             owner,
-            priority=priority,
-            start_workflows=start_workflows,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
             content_filter=content_filter,
             extra_metadata=extra_metadata,
             source=source,
@@ -336,16 +280,19 @@ async def incremental_sync(
         )
 
         latest_commit_sha = None
+        for i in inventory_res["inventory"]:
+            meta = i.get("metadata")
+            if meta and meta.get("last_commit_sha"):
+                latest_commit_sha = meta["last_commit_sha"]
+                break
 
-        if len(inventory_res["inventory"]) > 0:
-            for i in inventory_res["inventory"]:
-                if "metadata" in i:
-                    meta = i.get("metadata")
-                    if meta and "last_commit_sha" in meta:
-                        latest_commit_sha = meta["last_commit_sha"]
-                        break
-
-        update_result = await client.update_sync_state(source, latest_commit_sha, branch=branch, metadata={})
+        local_state.set_sync_meta(
+            source,
+            latest_commit_sha,
+            branch=branch,
+            last_sync_date=datetime.datetime.now(datetime.UTC),
+            metadata={},
+        )
 
         return inventory_res
 
@@ -359,7 +306,7 @@ async def incremental_sync(
         if content_filter == ContentFilter.ISSUES:
             all_issues = await get_issues(scm, repo_name, owner)
             logger.info(f"Reconciling issue inventory ({len(all_issues)} total issues)")
-            await client.check_status(all_issues, source, delete_stale=True)
+            local_state.prune_documents(source, {i["uri"] for i in all_issues})
     # Fetch commits since last sync
     logger.info(f"Last sync was at commit {last_commit_sha}")
 
@@ -374,19 +321,13 @@ async def incremental_sync(
 
         if not new_commits and not issues:
             logger.info("No new commits since last sync, repository is up to date")
-            ret = {
+            return {
                 "status": "up-to-date",
                 "commits_processed": 0,
                 "files_changed": 0,
                 "ingested": [],
                 "errors": [],
             }
-            if start_workflows:
-                batch_id = await client.find_or_create_batch(source)
-                ret["workflow_result"] = await client.start_workflows_for_batch(
-                    batch_id, workflow_definition_id, param_set_id, priority
-                )
-            return ret
 
         logger.info(f"Found {len(new_commits)} new commits to process")
 
@@ -416,11 +357,11 @@ async def incremental_sync(
 
         logger.info(f"Files changed: {len(changed_files)}, removed: {len(removed_files)}")
 
-        # Delete removed files from ingester
+        # Delete removed files locally
         for removed_path in removed_files:
-            uri = removed_path
-            logger.info(f"Deleting removed file from ingester: {uri}")
-            await client.delete_source_uri(uri, source)
+            logger.info(f"Deleting removed file: {removed_path}")
+            local_store.delete_document(source, removed_path)
+            local_state.delete_file(source, removed_path)
 
         # Fetch only changed files
         allowed_extensions = settings.extensions
@@ -442,64 +383,33 @@ async def incremental_sync(
         logger.info(f"Fetched {len(file_data)} changed files with allowed extensions")
     elif not issues:
         logger.info("No new issues since last sync, repository is up to date")
-        ret = {
+        return {
             "status": "up-to-date",
             "commits_processed": 0,
             "files_changed": 0,
             "ingested": [],
             "errors": [],
         }
-        if start_workflows:
-            batch_id = await client.find_or_create_batch(source)
-            ret["workflow_result"] = await client.start_workflows_for_batch(
-                batch_id, workflow_definition_id, param_set_id, priority
-            )
-        return ret
 
-    # Get or create batch
-    found_batch_id = await client.find_batch_for_source(source)
-    if found_batch_id:
-        logger.info(f"Using existing batch {found_batch_id}")
-        batch_id = found_batch_id
-    else:
-        logger.info("Creating new batch")
-        batch_id = await client.create_batch(source, source)
-
-    # Ingest changed files
+    # Write changed files and issues locally
     errors = []
     ingested = []
 
     file_data.extend(issues)
 
     for file in file_data:
+        uri = file["uri"]
         try:
-            meta = file.get("metadata", {}).copy()
-            # Clean metadata
-            for k in ["path", "sha256", "size", "source", "batch_id", "source_uri"]:
-                meta.pop(k, None)
-            if extra_metadata:
-                meta.update(extra_metadata)
-
-            mime_type = file.get("content-type") or meta.get("content-type", "application/octet-stream")
-
-            res = await client.do_ingest(file["file_bytes"], file["uri"], meta, source, batch_id, mime_type)
-
-            if "error" in res:
-                logger.error(f"Error ingesting {file['uri']}: {res['error']}")
-                errors.append({"uri": file["uri"], "error": res["error"]})
-            else:
-                ingested.append(file["uri"])
-                logger.info(f"Ingested {file['uri']}")
-
+            mime_type = _resolve_mime(file)
+            meta = _doc_meta(file, extra_metadata)
+            doc_bytes = file["file_bytes"]
+            local_store.write_document(source, uri, doc_bytes, mime_type, meta)
+            local_state.upsert_file(source, uri, file.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
+            ingested.append(uri)
+            logger.info(f"wrote {uri}")
         except Exception as e:
-            logger.exception(f"Failed to ingest {file.get('uri', 'unknown')}")
-            errors.append({"uri": file.get("uri", "unknown"), "error": str(e)})
-
-    # Start workflows if requested and no errors
-    wf_res = None
-    if len(errors) == 0 and start_workflows:
-        logger.info("Starting workflows")
-        wf_res = await client.start_workflows_for_batch(batch_id, workflow_definition_id, param_set_id, priority)
+            logger.exception(f"Failed to write {file.get('uri', 'unknown')}")
+            errors.append({"uri": uri, "error": str(e)})
 
     # Update sync state with latest commit only if no fetch/ingest errors
     latest_commit_sha = last_commit_sha
@@ -513,10 +423,11 @@ async def incremental_sync(
             fetch_errors,
             len(errors),
         )
-    update_result = await client.update_sync_state(
+    local_state.set_sync_meta(
         source,
         latest_commit_sha,
         branch=branch,
+        last_sync_date=datetime.datetime.now(datetime.UTC),
         metadata={
             "commits_processed": len(new_commits),
             "files_changed": len(changed_files),
@@ -524,11 +435,7 @@ async def incremental_sync(
             "files_ingested": len(ingested),
         },
     )
-
-    if "error" in update_result:
-        logger.error(f"Error updating sync state: {update_result['error']}")
-    else:
-        logger.info(f"Incremental sync complete. Updated sync state to {latest_commit_sha}")
+    logger.info(f"Incremental sync complete. Updated sync state to {latest_commit_sha}")
 
     # Delete stale documents using full URI listing
     delete_stale_result = None
@@ -540,11 +447,7 @@ async def incremental_sync(
             branch=branch,
             content_filter=content_filter,
         )
-        delete_stale_result = await client.check_status(
-            all_uris,
-            source,
-            delete_stale=True,
-        )
+        delete_stale_result = local_state.prune_documents(source, {u["uri"] for u in all_uris})
 
     return {
         "status": "synced",
@@ -553,7 +456,6 @@ async def incremental_sync(
         "files_removed": len(removed_files),
         "ingested": ingested,
         "errors": errors,
-        "workflow_result": wf_res,
         "new_commit_sha": latest_commit_sha,
         "delete_stale_result": delete_stale_result,
     }

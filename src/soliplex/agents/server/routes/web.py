@@ -24,19 +24,15 @@ web_router = APIRouter(
 
 @web_router.post("/run-inventory")
 async def run_inventory(
-    urls: str = Form(..., description="JSON array of URLs to fetch and ingest"),
+    urls: str = Form(..., description="JSON array of URLs to fetch and write"),
     source: str = Form(..., description="Source name"),
-    start_workflows: bool = Form(False, description="Start workflows after ingestion"),
-    workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
-    param_set_id: str | None = Form(None, description="Parameter set ID"),
-    priority: int = Form(0, description="Workflow priority"),
     metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
-    Fetch and ingest web pages from a list of URLs.
+    Fetch and write web pages from a list of URLs.
 
     URLs are fetched via HTTP GET, hashed, checked for changes,
-    and ingested into the system.
+    and written to the download directory.
     """
     try:
         url_list = json.loads(urls)
@@ -52,10 +48,6 @@ async def run_inventory(
         result = await web_app.load_inventory(
             url_list,
             source,
-            start_workflows=start_workflows,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            priority=priority,
             extra_metadata=extra_metadata,
         )
 
@@ -65,9 +57,7 @@ async def run_inventory(
             "to_process_count": len(result.get("to_process", [])),
             "ingested_count": len(result.get("ingested", [])),
             "error_count": len(result.get("errors", [])),
-            "batch_id": result.get("batch_id"),
             "errors": result.get("errors", []),
-            "workflow_result": result.get("workflow_result"),
         }
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -79,17 +69,13 @@ async def run_inventory(
 async def run_from_file(
     file: UploadFile = File(..., description="Text file containing URLs (one per line)"),
     source: str = Form(..., description="Source name"),
-    start_workflows: bool = Form(False, description="Start workflows after ingestion"),
-    workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
-    param_set_id: str | None = Form(None, description="Parameter set ID"),
-    priority: int = Form(0, description="Workflow priority"),
     metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
-    Fetch and ingest web pages from an uploaded URL list file.
+    Fetch and write web pages from an uploaded URL list file.
 
     Accepts a file upload containing URLs (one per line), fetches each via HTTP GET,
-    and ingests into the system.
+    and writes them to the download directory.
     """
     try:
         content = await file.read()
@@ -101,10 +87,6 @@ async def run_from_file(
         result = await web_app.load_inventory(
             url_list,
             source,
-            start_workflows=start_workflows,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            priority=priority,
             extra_metadata=extra_metadata,
         )
 
@@ -114,9 +96,7 @@ async def run_from_file(
             "to_process_count": len(result.get("to_process", [])),
             "ingested_count": len(result.get("ingested", [])),
             "error_count": len(result.get("errors", [])),
-            "batch_id": result.get("batch_id"),
             "errors": result.get("errors", []),
-            "workflow_result": result.get("workflow_result"),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error running web inventory from file: {str(e)}") from e

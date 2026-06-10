@@ -58,8 +58,7 @@ module-name = "soliplex.agents"
 
 [tool.uv]
 # 2-week cooldown: don't resolve packages newer than this date.
-exclude-newer = "2 weeks"
-exclude-newer-package = { starlette = "1 hour"  }
+exclude-newer = "1 weeks"
 
 [project.scripts]
 si-agent = "soliplex.agents.cli:cli"
@@ -70,7 +69,6 @@ scm_auth_username="gitea_admin"
 scm_auth_password="test_password"
 scm_base_url="http://localhost:3000/api/v1"
 LOG_LEVEL="INFO"
-INGESTER_URL="http://localhost:8000/ingest_document"
 
 
 

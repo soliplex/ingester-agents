@@ -6,7 +6,8 @@ from pathlib import Path
 import aiofiles
 import aiofiles.os as aos
 
-from soliplex.agents import client
+from soliplex.agents import local_state
+from soliplex.agents import local_store
 from soliplex.agents.common.config import check_config
 from soliplex.agents.common.config import detect_mime_type
 from soliplex.agents.common.config import read_config
@@ -125,161 +126,80 @@ async def load_inventory(
     start: int = 0,
     end: int = None,
     skip_invalid: bool = False,
-    workflow_definition_id: str | None = None,
-    start_workflows: bool = False,
-    param_set_id: str | None = None,
-    priority: int = 0,
     extra_metadata: dict[str, str] | None = None,
     delete_stale: bool = False,
 ):
     """
-    Load and process an inventory for ingestion.
+    Load an inventory and write changed files to the download directory.
 
     If path is a file, treats it as a config file.
     If path is a directory, builds config from directory contents.
 
     Args:
         path: Path to either a config file or directory to process
-        source: Source identifier for the batch
+        source: Source identifier (becomes the per-source download folder)
         start: Starting index for processing (default: 0)
         end: Ending index for processing (default: None, processes all)
         skip_invalid: Skip files that fail validation (default: False)
-        workflow_definition_id: Optional workflow to start after ingestion
-        start_workflows: Whether to start workflows (default: False)
-        param_set_id: Parameter set for workflows
-        priority: Workflow priority (default: 0)
+        extra_metadata: Extra metadata attached to every document
         delete_stale: Remove documents not in inventory (default: False)
 
     Returns:
-        Dictionary with inventory, to_process, batch_id, ingested, errors,
-        and workflow_result
+        Dictionary with inventory, to_process, ingested, errors, and
+        delete_stale_result
     """
-    client.validate_parameters(start_workflows, workflow_definition_id, param_set_id)
     config, data_path = await resolve_config_path(path)
     if skip_invalid:
         filtered = check_config(config)
         config = [x for x in filtered if x["valid"]]
 
     logger.info(f"found {len(config)} files in {path}")
-    try:
-        to_process = await client.check_status(config, source, delete_stale=True)
-    except Exception:
-        logger.exception("check_status failed, treating all files as new")
-        to_process = list(config)
-    logger.info(f"found {len(to_process)}  out of {len(config)} to process in {data_path}")
+    to_process = local_state.compute_to_process(config, source)
     if end is None:
         end = len(config)
-        to_process = to_process[start:end]
-    ret = {"inventory": config, "to_process": to_process}
-    if len(to_process) == 0:
-        logger.info("nothing to process")
-        if start_workflows:
-            batch_id = await client.find_or_create_batch(source)
-            ret["workflow_result"] = await client.start_workflows_for_batch(
-                batch_id, workflow_definition_id, param_set_id, priority
-            )
-        return ret
+    to_process = to_process[start:end]
+    logger.info(f"found {len(to_process)} out of {len(config)} to process in {data_path}")
 
-    found_batch_id = await client.find_batch_for_source(source)
-    if found_batch_id:
-        logger.info(f"found batch {found_batch_id} for {source}")
-        batch_id = found_batch_id
-    else:
-        logger.info(f"no batch found for {source}. creating")
-        batch_id = await client.create_batch(
-            source,
-            source,
-        )
-    ret["batch_id"] = batch_id
     ingested = []
     errors = []
+    ret = {"inventory": config, "to_process": to_process, "ingested": ingested, "errors": errors}
     for row in to_process:
+        uri = row["path"]
         try:
-            meta = row["metadata"].copy()
-            for k in [
-                "path",
-                "sha256",
-                "size",
-                "source",
-                "batch_id",
-                "source_uri",
-            ]:
-                if k in meta:
-                    del meta[k]
+            meta = dict(row.get("metadata") or {})
+            for k in ("path", "sha256", "size", "source", "batch_id", "source_uri", "content-type"):
+                meta.pop(k, None)
             if extra_metadata:
                 meta.update(extra_metadata)
-            logger.info(f"starting ingest for {row['path']}")
-            mime_type = None
-            if "metadata" in row and "content-type" in row["metadata"]:
-                mime_type = row["metadata"]["content-type"]
-            res = await do_ingest(
-                data_path,
-                row["path"],
-                meta,
-                source,
-                batch_id,
-                mime_type,
-            )
-            if "error" in res:
-                logger.error(f"Error ingesting {row['path']}: {res['error']}")
-                res["uri"] = row["path"]
-                res["source"] = source
-                res["batch_id"] = batch_id
-                errors.append(res)
-            else:
-                ingested.append(res)
+            logger.info(f"writing {uri}")
+            mime_type = (row.get("metadata") or {}).get("content-type") or detect_mime_type(uri)
+            await _write_local(data_path, uri, meta, source, mime_type, row.get("sha256"))
+            ingested.append(uri)
         except Exception as e:
-            logger.exception("Failed to ingest %s", row.get("path", "unknown"))
-            errors.append({"uri": row.get("path", "unknown"), "error": str(e)})
-    wf_res = None
-    if len(errors) == 0 and start_workflows:
-        wf_res = await client.start_workflows_for_batch(
-            batch_id,
-            workflow_definition_id,
-            param_set_id,
-            priority,
-        )
+            logger.exception("Failed to write %s", uri)
+            errors.append({"uri": uri, "error": str(e)})
+
     delete_stale_result = None
     if delete_stale and len(errors) == 0:
-        delete_stale_result = await client.check_status(
-            config,
-            source,
-            delete_stale=True,
-        )
-    ret["ingested"] = ingested
-    ret["errors"] = errors
-    ret["workflow_result"] = wf_res
+        delete_stale_result = local_state.prune_documents(source, {r["path"] for r in config})
     ret["delete_stale_result"] = delete_stale_result
     return ret
 
 
-async def do_ingest(
+async def _write_local(
     data_path: Path,
     uri: str,
     meta: dict[str, str],
     source: str,
-    batch_id: int,
     mime_type: str,
+    sha256: str | None,
 ):
-    logger.info(f"path={data_path / uri}")
-    load_path = uri
-    if not uri.startswith("/"):
-        load_path = data_path / uri
-    try:
-        async with aiofiles.open(load_path, "rb") as f:
-            doc_body = await f.read()
-    except OSError as e:
-        logger.exception("Failed to read file %s", load_path)
-        return {"error": f"Failed to read file {load_path}: {e}"}
-
-    return await client.do_ingest(
-        doc_body,
-        uri,
-        meta,
-        source,
-        batch_id,
-        mime_type,
-    )
+    """Read a source file and write it (plus its sidecar) to the download dir."""
+    load_path = uri if uri.startswith("/") else data_path / uri
+    async with aiofiles.open(load_path, "rb") as f:
+        doc_body = await f.read()
+    local_store.write_document(source, uri, doc_body, mime_type, meta)
+    local_state.upsert_file(source, uri, sha256, size=len(doc_body), mime_type=mime_type)
 
 
 async def status_report(config_path: str, source: str, detail: bool = False):
@@ -296,7 +216,7 @@ async def status_report(config_path: str, source: str, detail: bool = False):
     """
     print(f"checking status for {config_path} source={source} ")
     config, _ = await resolve_config_path(config_path)
-    to_process = await client.check_status(config, source)
+    to_process = local_state.compute_to_process(config, source)
     print(f"Files to process: {len(to_process)}")
     print(f"Total files: {len(config)}")
     if detail and len(to_process) > 0:

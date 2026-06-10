@@ -105,10 +105,10 @@ async def check_status(
         raise HTTPException(status_code=404, detail=f"Path not found: {config_file}")
 
     try:
-        from soliplex.agents import client
+        from soliplex.agents import local_state
 
         config, _ = await fs_app.resolve_config_path(config_file)
-        to_process = await client.check_status(config, source)
+        to_process = local_state.compute_to_process(config, source)
     except Exception as e:
         logger.exception("Error checking status for %s", config_file)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -131,10 +131,6 @@ async def run_inventory(
     source: str = Form(..., description="Source name"),
     start: int = Form(0, description="Start index"),
     end: int | None = Form(None, description="End index"),
-    start_workflows: bool = Form(True, description="Start workflows after ingestion"),
-    workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
-    param_set_id: str | None = Form(None, description="Parameter set ID"),
-    priority: int = Form(0, description="Workflow priority"),
     metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
@@ -156,10 +152,6 @@ async def run_inventory(
             source,
             start,
             end,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            start_workflows=start_workflows,
-            priority=priority,
             extra_metadata=extra_metadata,
         )
 
@@ -169,9 +161,7 @@ async def run_inventory(
             "to_process_count": len(result.get("to_process", [])),
             "ingested_count": len(result.get("ingested", [])),
             "error_count": len(result.get("errors", [])),
-            "batch_id": result.get("batch_id"),
             "errors": result.get("errors", []),
-            "workflow_result": result.get("workflow_result"),
         }
     except Exception as e:
         logger.exception("Error running inventory for %s", config_file)

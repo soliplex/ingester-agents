@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/soliplex/ingester-agents/actions/workflows/soliplex.yaml/badge.svg)](https://github.com/soliplex/ingester-agents/actions/workflows/soliplex.yaml)
 
-Agents for loading documents into the [Soliplex Ingester](https://github.com/soliplex/ingester) system. This package provides tools to collect, validate, and ingest documents from multiple sources including local filesystems, WebDAV servers, and source code management platforms (GitHub, Gitea).
+Agents for collecting documents from multiple sources — local filesystems, WebDAV servers, web pages, and source code management platforms (GitHub, Gitea) — and writing them to a local download directory for downstream processing. Each document is written with a `.meta.json` sidecar capturing its MIME type and other metadata, and synchronization state is tracked locally so subsequent runs only fetch what changed.
 
 ## Features
 
@@ -54,9 +54,8 @@ Agents for loading documents into the [Soliplex Ingester](https://github.com/sol
 
 **Requirements:**
 - Python 3.13 or higher
-- Soliplex Ingester running and accessible
 
-Before using these tools, a working version of [Soliplex Ingester](https://github.com/soliplex/ingester) must be available. The URL will need to be configured in the environment variables to function.
+Documents are written to the local filesystem (`DOWNLOAD_DIR`), so no external Ingester service is required.
 
 ### Using uv (Recommended)
 
@@ -84,12 +83,19 @@ The agents use environment variables for configuration. Create a `.env` file or 
 
 ### Required Configuration
 
-```bash
-# Soliplex Ingester API endpoint
-ENDPOINT_URL=http://localhost:8000/api/v1
+Agents write fetched documents to the local filesystem. No Soliplex
+Ingester instance is required.
 
-# Ingester API authentication (for connecting to protected Ingester instances)
-INGESTER_API_KEY=your-api-key
+```bash
+# Directory where downloaded documents are written. Each run stores files
+# under <DOWNLOAD_DIR>/<source>/, preserving the source directory structure.
+# Every document is accompanied by a <filename>.meta.json sidecar containing
+# its MIME type and any other available metadata.
+DOWNLOAD_DIR=downloads
+
+# Directory for local synchronization state (content hashes + SCM commit
+# markers), one SQLite file per source.
+STATE_DIR=sync_state
 ```
 
 ### SCM Configuration
@@ -264,10 +270,10 @@ Add `--detail` flag to see the full list of files:
 si-agent fs check-status /path/to/documents my-source-name --detail
 ```
 
-The status check compares file hashes against the Ingester database:
-- **new**: File doesn't exist in the database
+The status check compares file hashes against the local sync state:
+- **new**: File doesn't exist in local state
 - **mismatch**: File exists but content has changed
-- **match**: File is unchanged (will be skipped during ingestion)
+- **match**: File is unchanged (will be skipped during the run)
 
 **4. Load Inventory**
 
@@ -333,7 +339,8 @@ si-agent scm run-inventory github myorg/my-repo
 si-agent scm run-inventory gitea admin/my-repo
 ```
 
-**Note on Workflows:** By default, `start_workflows=True`. To skip workflow triggering, explicitly set `--no-start-workflows`.
+Files and issues are written under `<DOWNLOAD_DIR>/<source>/`. Issues are
+saved as Markdown (`.md`) documents.
 
 #### 4. Incremental Sync
 
@@ -533,10 +540,6 @@ config:
     - md
     - pdf
   delete_stale: true
-  start_workflows: true
-  workflow_definition_id: my-workflow
-  param_set_id: my-params
-  priority: 5
 components:
   - name: local-docs
     type: fs
@@ -567,17 +570,14 @@ Top-level fields:
 
 - **id** (required): Unique identifier for the manifest. Must be unique across all manifests when running from a directory.
 - **name** (required): Human-readable name for display and logging.
-- **source** (required): Source name used for batch management in the Ingester.
+- **source** (required): Source name; also the per-source folder name under `DOWNLOAD_DIR` (sanitized for filesystem safety).
 - **schedule**: Optional cron schedule for automated execution via the REST API server.
   - **cron**: Cron expression (e.g., `"0 0 * * *"` for daily at midnight).
 - **config**: Optional shared configuration applied to all components.
   - **metadata**: Key-value pairs attached to all ingested documents.
   - **extensions**: File extensions to include (overrides the global `EXTENSIONS` setting).
-  - **delete_stale**: Remove documents from the Ingester that no longer appear in any component (default: false). See [Stale Document Removal](#stale-document-removal) below.
-  - **start_workflows**: Whether to start workflows after ingestion (default: false).
-  - **workflow_definition_id**: Workflow definition ID (required when start_workflows is true).
-  - **param_set_id**: Parameter set ID (required when start_workflows is true).
-  - **priority**: Workflow priority (default: 0).
+  - **delete_stale**: Remove locally-stored documents that no longer appear in any component (default: false). See [Stale Document Removal](#stale-document-removal) below.
+  - Workflow fields (`start_workflows`, `workflow_definition_id`, `param_set_id`, `priority`) are still accepted for backward compatibility but are ignored — there is no Ingester to start workflows on.
 - **components** (required): List of ingestion components (see below).
 
 #### Component Types
@@ -638,13 +638,13 @@ For metadata, config-level and component-level values are merged, with component
 
 #### Stale Document Removal
 
-When `delete_stale: true` is set in a manifest's `config` block, the runner will remove documents from the Ingester that no longer appear in any of the manifest's components. This keeps the Ingester in sync with the actual source data.
+When `delete_stale: true` is set in a manifest's `config` block, the runner removes locally-stored documents that no longer appear in any of the manifest's components. This keeps the download directory in sync with the actual source data.
 
 **How it works:**
 
 1. All components execute sequentially, collecting every discovered URI and its hash
-2. After **all** components complete successfully, a single `check_status` call is made to the Ingester with the consolidated URI set and `delete_stale=true`
-3. The Ingester compares the submitted URIs against what it has stored for the source. Any documents belonging to the source whose URI is **not** in the submitted set are deleted.
+2. After **all** components complete successfully, the consolidated URI set is compared against the local sync state for the source (all components in a manifest share one source, hence one download folder and state DB)
+3. Any document in local state whose URI is **not** in the consolidated set has its file, `.meta.json` sidecar, and state entry deleted.
 
 **Safety:**
 
@@ -669,7 +669,7 @@ components:
     path: /shared/docs
 ```
 
-If a file is removed from `/data/docs` or from the WebDAV server, the next manifest run will detect that its URI is no longer present and delete it from the Ingester.
+If a file is removed from `/data/docs` or from the WebDAV server, the next manifest run will detect that its URI is no longer present and delete it from the download directory.
 
 **Note:** SCM components using `incremental: true` only return files changed since the last sync, not the full file listing. When `delete_stale` is enabled with incremental SCM components, the stale detection may not have complete URI coverage for those components. Consider using full inventory mode (`incremental: false`) when `delete_stale` is needed with SCM sources.
 
@@ -697,25 +697,21 @@ The server loads all manifests from the directory at startup, validates that all
 2. **Hashing**: Each file's hash is calculated
    - Filesystem/WebDAV/Web sources: SHA256 hash
    - SCM sources: SHA3-256 hash for files, SHA256 for issues
-3. **Status Check**: The system checks which files have changed or are new against the ingester database
-4. **Batch Management**:
-   - The system searches for an existing batch matching the source name
-   - If found, new documents are added to the existing batch (incremental ingestion)
-   - If not found, a new batch is created
-   - This enables efficient re-ingestion: only new or changed files are processed
-5. **Ingestion**: Files are uploaded to the Soliplex Ingester API
-6. **Workflow Trigger** (optional): Workflows can be started to process the ingested documents. See Ingester documentation for details.
+3. **Status Check**: The system checks which files are new or changed against the local sync state, so only new or changed files are processed
+4. **Write**: Each file is written to `<DOWNLOAD_DIR>/<source>/<source-relative-path>`, with a `<filename>.meta.json` sidecar containing its MIME type and other metadata
+5. **State Update**: Content hashes (and, for SCM, the latest commit SHA) are recorded in local state
+6. **Stale Removal** (optional): When `delete_stale` is enabled, documents no longer present in the source are deleted from the download directory
 
 ### Incremental Sync (SCM Agent)
 
 The `run-incremental` command uses commit-based tracking for efficient synchronization:
 
-1. **Sync State Check**: Retrieves last processed commit SHA from the ingester
+1. **Sync State Check**: Retrieves last processed commit SHA from local state
 2. **Commit Enumeration**: Fetches only commits since the last sync
 3. **Change Detection**: Extracts changed and removed file paths from commits
 4. **Selective Fetch**: Downloads only files that were modified
-5. **Ingestion**: Uploads changed files to the ingester
-6. **State Update**: Stores the latest commit SHA for subsequent syncs
+5. **Write**: Writes changed files to `DOWNLOAD_DIR` and deletes removed ones
+6. **State Update**: Stores the latest commit SHA locally for subsequent syncs
 
 This approach reduces API calls and bandwidth by 80-95% compared to full repository scans. On first run (or after reset), a full sync is performed to establish the baseline.
 
@@ -755,15 +751,13 @@ As an example, the soliplex [documentation](https://github.com/soliplex/soliplex
 git clone https://github.com/soliplex/soliplex.git
 
 # Set up environment
-export ENDPOINT_URL=http://localhost:8000/api/v1
+export DOWNLOAD_DIR=./downloads
 
-# Ingest directly from directory!
+# Write directly from directory!
 uv run si-agent fs run-inventory <path-to-checkout>/soliplex/docs soliplex-docs
 
-# Check that documents are in the ingester (your batch id may be different)
-curl -X 'GET' \
-  'http://127.0.0.1:8000/api/v1/document/?batch_id=1' \
-  -H 'accept: application/json'
+# Files land under ./downloads/soliplex-docs/, each with a .meta.json sidecar
+ls ./downloads/soliplex-docs
 ```
 
 **Traditional version (with inventory.json):**
@@ -772,7 +766,7 @@ curl -X 'GET' \
 git clone https://github.com/soliplex/soliplex.git
 
 # Set up environment
-export ENDPOINT_URL=http://localhost:8000/api/v1
+export DOWNLOAD_DIR=./downloads
 
 # Create inventory (optional - only if you want to review/modify it)
 uv run si-agent fs build-config <path-to-checkout>/soliplex/docs
@@ -784,48 +778,40 @@ uv run si-agent fs build-config <path-to-checkout>/soliplex/docs
 uv run si-agent fs validate-config <path-to-checkout>/soliplex/docs/inventory.json
 # If there are errors, fix them now
 
-# Ingest
+# Write
 uv run si-agent fs run-inventory <path-to-checkout>/soliplex/docs/inventory.json soliplex-docs
 
-# Check that documents are in the ingester (your batch id may be different)
-curl -X 'GET' \
-  'http://127.0.0.1:8000/api/v1/document/?batch_id=1' \
-  -H 'accept: application/json'
+ls ./downloads/soliplex-docs
 ```
 
 ### Example 2: Ingest GitHub Repository
 
 ```bash
 # Set up environment
-export ENDPOINT_URL=http://localhost:8000/api/v1
+export DOWNLOAD_DIR=./downloads
 export scm_auth_token=ghp_your_token_here
 
-# Ingest repository
+# Write repository contents
 si-agent scm run-inventory github mycompany/soliplex
 
-#check that documents are in the ingester: (your batch id may be different)
-curl -X 'GET' \
-  'http://127.0.0.1:8000/api/v1/document/?batch_id=2' \
-  -H 'accept: application/json'
-
+# Files land under ./downloads/github_mycompany_soliplex_all/
+ls ./downloads
 ```
 
 ### Example 3: Ingest from WebDAV Server
 
 ```bash
 # Set up environment
-export ENDPOINT_URL=http://localhost:8000/api/v1
+export DOWNLOAD_DIR=./downloads
 export WEBDAV_URL=https://nextcloud.example.com/remote.php/dav/files/username
 export WEBDAV_USERNAME=your-username
 export WEBDAV_PASSWORD=your-password
 
-# Ingest directly from WebDAV directory
+# Write directly from WebDAV directory
 si-agent webdav run-inventory /Documents/project-docs webdav-docs
 
-# Check that documents are in the ingester (your batch id may be different)
-curl -X 'GET' \
-  'http://127.0.0.1:8000/api/v1/document/?batch_id=3' \
-  -H 'accept: application/json'
+# Files land under ./downloads/webdav-docs/
+ls ./downloads/webdav-docs
 ```
 
 ### Example 4: Batch Processing with Workflows
@@ -999,13 +985,10 @@ curl -X POST http://localhost:8001/api/v1/web/run-inventory \
   -F "urls=[\"https://example.com/page1\", \"https://example.com/page2\"]" \
   -F "source=my-source"
 
-# Ingest web pages with workflow and metadata
+# Ingest web pages with extra metadata
 curl -X POST http://localhost:8001/api/v1/web/run-inventory \
   -F "urls=[\"https://example.com/page1\"]" \
   -F "source=my-source" \
-  -F "start_workflows=true" \
-  -F "workflow_definition_id=my-workflow" \
-  -F "param_set_id=my-params" \
   -F "metadata={\"project\": \"test\"}"
 
 # Ingest web pages from uploaded file
@@ -1069,9 +1052,10 @@ docker build -t ingester-agents:latest .
 # Run with environment variables
 docker run -d \
   -p 8001:8000 \
-  -e ENDPOINT_URL=http://ingester:8000/api/v1 \
+  -e DOWNLOAD_DIR=/data/downloads \
   -e API_KEY_ENABLED=true \
   -e API_KEY=your-secret-key \
+  -v "$(pwd)/downloads:/data/downloads" \
   ingester-agents:latest
 
 # Check health
@@ -1094,11 +1078,9 @@ Ensure your tokens have the required permissions:
 
 ### Connection Errors
 
-Verify the `ENDPOINT_URL` is correct and the Ingester API is running:
-
-```bash
-curl http://localhost:8000/api/v1/batch/
-```
+For SCM and WebDAV sources, verify the source server is reachable and any
+required credentials (`scm_auth_token`, `WEBDAV_URL`/`WEBDAV_USERNAME`/
+`WEBDAV_PASSWORD`) are set. Downloaded files are written under `DOWNLOAD_DIR`.
 
 ### File Not Found Errors
 
@@ -1159,7 +1141,8 @@ uv run ruff format
 soliplex.agents/
 ├── src/soliplex/agents/
 │   ├── cli.py              # Main CLI entry point (includes 'serve' command)
-│   ├── client.py           # Soliplex Ingester API client
+│   ├── local_store.py      # Writes downloaded documents + .meta.json sidecars
+│   ├── local_state.py      # Per-source SQLite sync state (hashes + commit SHA)
 │   ├── config.py           # Configuration, settings, and manifest models
 │   ├── server/             # FastAPI server
 │   │   ├── __init__.py     # FastAPI app initialization, scheduler
@@ -1222,7 +1205,8 @@ soliplex.agents/
 - `webdav/app.py` - WebDAV operations (shared by CLI and API)
 - `scm/app.py` - SCM operations (shared by CLI and API)
 - `manifest/runner.py` - Manifest loading, validation, and dispatch to agents
-- `client.py` - HTTP client for Soliplex Ingester API
+- `local_store.py` - Writes fetched documents and metadata sidecars to `DOWNLOAD_DIR`
+- `local_state.py` - Local synchronization state (content hashes + SCM commit markers)
 
 **Configuration:**
 - `config.py` - Pydantic settings and manifest component models

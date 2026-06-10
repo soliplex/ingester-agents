@@ -7,6 +7,7 @@ from typing import Annotated
 import aiohttp
 import typer
 
+from .. import local_state
 from ..config import SCM
 from ..config import ContentFilter
 from ..config import settings
@@ -78,10 +79,6 @@ def get_repo(
 def run_inventory(
     scm: Annotated[SCM, typer.Argument(help="scm provider")],
     repo: Annotated[str, typer.Argument(help="repository in owner/repo format")],
-    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = False,
-    workflow_definition_id: Annotated[str, typer.Option(help="workflow definition id")] = None,
-    param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
-    priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
     content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
     metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
@@ -96,21 +93,12 @@ def run_inventory(
     """
     owner, repo_name = parse_repo(repo)
     extra_metadata = json.loads(metadata) if metadata else None
-    if start_workflows:
-        if workflow_definition_id is None:
-            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
-        if param_set_id is None:
-            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
     try:
         res = asyncio.run(
             app.load_inventory(
                 scm,
                 repo_name,
                 owner,
-                start_workflows=start_workflows,
-                workflow_definition_id=workflow_definition_id,
-                param_set_id=param_set_id,
-                priority=priority,
                 content_filter=content_filter,
                 extra_metadata=extra_metadata,
             )
@@ -136,9 +124,6 @@ def run_inventory(
                 print(f"{len(res['ingested'])} ingested")
             else:
                 print("no ingested files")
-            if start_workflows:
-                print("workflow result")
-                print(json.dumps(res["workflow_result"], indent=2))
 
 
 @cli.command("run-incremental")
@@ -146,10 +131,6 @@ def run_incremental(
     scm: Annotated[SCM, typer.Argument(help="scm provider")],
     repo: Annotated[str, typer.Argument(help="repository in owner/repo format")],
     branch: Annotated[str, typer.Option(help="branch name")] = "main",
-    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = False,
-    workflow_definition_id: Annotated[str, typer.Option(help="workflow definition id")] = None,
-    param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
-    priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
     content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
     metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
@@ -167,11 +148,6 @@ def run_incremental(
     """
     owner, repo_name = parse_repo(repo)
     extra_metadata = json.loads(metadata) if metadata else None
-    if start_workflows:
-        if workflow_definition_id is None:
-            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
-        if param_set_id is None:
-            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
     try:
         res = asyncio.run(
             app.incremental_sync(
@@ -179,10 +155,6 @@ def run_incremental(
                 repo_name,
                 owner,
                 branch=branch,
-                priority=priority,
-                start_workflows=start_workflows,
-                workflow_definition_id=workflow_definition_id,
-                param_set_id=param_set_id,
                 content_filter=content_filter,
                 extra_metadata=extra_metadata,
             )
@@ -211,10 +183,6 @@ def run_incremental(
         if res.get("new_commit_sha"):
             print(f"\nSync state updated to: {res['new_commit_sha']}")
 
-        if res.get("workflow_result"):
-            print("\nWorkflow result:")
-            print(json.dumps(res["workflow_result"], indent=2))
-
 
 @cli.command("reset-sync")
 def reset_sync(
@@ -232,16 +200,12 @@ def reset_sync(
         si-agent scm reset-sync github myorg/myrepo
     """
     owner, repo_name = parse_repo(repo)
-    from ... import client
-
     source = f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
 
-    res = asyncio.run(client.reset_sync_state(source))
-
-    if "error" in res:
-        print(f"Error: {res['error']}")
+    if local_state.reset_state(source):
+        print(f"Sync state reset for {source}")
     else:
-        print(res.get("message", f"Sync state reset for {source}"))
+        print(f"No sync state found for {source}")
 
 
 @cli.command("get-sync-state")
@@ -258,16 +222,10 @@ def get_sync_state(
         si-agent scm get-sync-state github myorg/myrepo
     """
     owner, repo_name = parse_repo(repo)
-    from ... import client
-
     source = f"{scm.value}:{owner}:{repo_name}:{content_filter.value}"
 
-    res = asyncio.run(client.get_sync_state(source))
-
-    if "error" in res:
-        print(f"Error: {res['error']}")
-    else:
-        print(json.dumps(res, indent=2))
+    res = local_state.get_sync_meta(source)
+    print(json.dumps(res, indent=2, default=str))
 
 
 if __name__ == "__main__":

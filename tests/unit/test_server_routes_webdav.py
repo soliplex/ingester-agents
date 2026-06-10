@@ -98,7 +98,7 @@ def test_check_status_success(client):
     """Test successful status check."""
     with (
         patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app,
-        patch("soliplex.agents.client.check_status") as mock_check_status,
+        patch("soliplex.agents.local_state.compute_to_process") as mock_check_status,
     ):
         mock_app.build_config = AsyncMock(
             return_value=[
@@ -126,7 +126,7 @@ def test_check_status_with_detail(client):
     """Test status check with detail flag."""
     with (
         patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app,
-        patch("soliplex.agents.client.check_status") as mock_check_status,
+        patch("soliplex.agents.local_state.compute_to_process") as mock_check_status,
     ):
         to_process = [{"path": "doc1.md", "sha256": "abc123", "status": "new"}]
         mock_app.build_config = AsyncMock(return_value=[{"path": "doc1.md", "sha256": "abc123"}])
@@ -172,7 +172,6 @@ def test_run_inventory_success(client):
         assert data["to_process_count"] == 1
         assert data["ingested_count"] == 1
         assert data["error_count"] == 0
-        assert data["batch_id"] == 123
 
 
 def test_run_inventory_with_webdav_path(client):
@@ -310,7 +309,6 @@ def test_run_from_file_success(client):
         assert data["status"] == "ok"
         assert data["inventory_count"] == 1
         assert data["ingested_count"] == 1
-        assert data["batch_id"] == 456
         mock_app.load_inventory_from_urls.assert_called_once()
 
 

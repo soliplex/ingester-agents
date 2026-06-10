@@ -57,7 +57,6 @@ def test_run_inventory_success(client):
         assert data["to_process_count"] == 1
         assert data["ingested_count"] == 1
         assert data["error_count"] == 0
-        assert data["batch_id"] == 42
 
 
 def test_run_inventory_with_errors(client):
@@ -107,10 +106,6 @@ def test_run_inventory_with_all_options(client):
             data={
                 "urls": json.dumps(["http://example.com"]),
                 "source": "web-test",
-                "start_workflows": "true",
-                "workflow_definition_id": "wf-1",
-                "param_set_id": "ps-1",
-                "priority": "5",
                 "metadata": json.dumps({"project": "test"}),
             },
         )
@@ -118,8 +113,6 @@ def test_run_inventory_with_all_options(client):
         assert response.status_code == 200
         mock_web_app.load_inventory.assert_called_once()
         call_kwargs = mock_web_app.load_inventory.call_args
-        assert call_kwargs.kwargs["start_workflows"] is True
-        assert call_kwargs.kwargs["workflow_definition_id"] == "wf-1"
         assert call_kwargs.kwargs["extra_metadata"] == {"project": "test"}
 
 

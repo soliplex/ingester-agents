@@ -55,7 +55,6 @@ class Settings(BaseSettings):
     extensions: list[str] = ["md", "pdf", "doc", "docx"]
     log_level: str = "INFO"
     log_format: str = "{name}|{asctime}|{levelname}|{message}"
-    endpoint_url: str = "http://localhost:8000/api/v1"
 
     # SMTP email alert settings (handler only added when smtp_host is set)
     smtp_host: str | None = None
@@ -69,10 +68,7 @@ class Settings(BaseSettings):
     smtp_log_level: str = "ERROR"
     smtp_cooldown: int = 30  # minimum seconds between emails
 
-    # Ingester API authentication (for outgoing requests to the Ingester API)
-    ingester_api_key: SecretStr | None = None
-
-    # Authentication settings (matching soliplex_ingester - for this agent's own API server)
+    # Authentication settings (for this agent's own API server)
     api_key: SecretStr | None = None
     api_key_enabled: bool = False
     auth_trust_proxy_headers: bool = False
@@ -102,6 +98,9 @@ class Settings(BaseSettings):
 
     # State settings
     state_dir: str = "sync_state"
+
+    # Local download settings (where agents write fetched documents)
+    download_dir: str = "downloads"
 
     # Manifest settings
     manifest_dir: str | None = None  # Directory with manifest .yml files for scheduling
