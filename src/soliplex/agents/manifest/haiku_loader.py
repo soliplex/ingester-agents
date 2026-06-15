@@ -161,6 +161,8 @@ async def run_load(manifest: Manifest) -> dict:
     env["DOWNLOAD_DIR"] = settings.download_dir
     # Force the (Python) child to flush stdout so we can stream it live.
     env["PYTHONUNBUFFERED"] = "1"
+    if settings.logfire_token is not None:
+        env["LOGFIRE_TOKEN"] = settings.logfire_token.get_secret_value()
 
     logger.info("Starting haiku load for source '%s' -> %s", source, db)
     proc = await asyncio.create_subprocess_exec(

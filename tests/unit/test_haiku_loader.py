@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import ManifestConfig
@@ -186,6 +187,18 @@ class TestRunLoad:
         assert kwargs["env"]["DOWNLOAD_DIR"] == "downloads"
         assert kwargs["env"]["PYTHONUNBUFFERED"] == "1"
         assert kwargs["cwd"] is None
+
+    @pytest.mark.asyncio
+    async def test_logfire_token_passed_to_env(self, haiku_env, monkeypatch):
+        monkeypatch.setattr(settings, "logfire_token", SecretStr("lf-secret"), raising=False)
+        proc = _fake_proc(returncode=0)
+        with patch(
+            "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=proc,
+        ) as mock_exec:
+            await haiku_loader.run_load(_manifest())
+        assert mock_exec.call_args.kwargs["env"]["LOGFIRE_TOKEN"] == "lf-secret"
 
     @pytest.mark.asyncio
     async def test_nonzero_returncode_streams_stderr_and_logs(self, haiku_env, caplog):
