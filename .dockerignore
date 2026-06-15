@@ -2,8 +2,10 @@
 .git
 .gitignore
 .gitattributes
+.gitleaks.toml
+.pre-commit-config.yaml
 
-# Python
+# Python artifacts
 __pycache__/
 *.py[cod]
 *$py.class
@@ -13,6 +15,9 @@ __pycache__/
 venv/
 ENV/
 env/
+build/
+dist/
+*.egg-info/
 
 # Testing
 .pytest_cache/
@@ -37,19 +42,15 @@ docs/
 !README.md
 tmp_docs/
 
-# Databases
+# Runtime data
 *.db
 *.sqlite
 *.sqlite3
+sync_state/
+cron_state.db
 
-# Environment
-.env
-.env.*
-
-# Build artifacts
-build/
-dist/
-*.egg-info/
+# Environment and secrets
+.env*
 
 # Logs
 *.log
@@ -58,7 +59,11 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Tests
+# CI
+.github
+
+# Claude
+.claude
+
+# Tests (not needed in production image)
 tests/
-test_*.py
-*_test.py

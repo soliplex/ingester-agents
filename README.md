@@ -1092,15 +1092,29 @@ Interactive API documentation is available at:
 
 ### Docker Deployment
 
-The server is designed to run in containers:
+The server is designed to run in containers. The `Dockerfile` is a
+multi-stage build exposing two selectable targets:
+
+| Target | Purpose | Dependencies | Default command |
+|--------|---------|--------------|-----------------|
+| `production` | Minimal runtime image (**default target**) | Runtime only (`uv sync --no-dev`) | `si-agent serve --host=0.0.0.0` |
+| `development` | Local dev with live reload | Runtime **and** dev deps (`uv sync`) | `si-agent serve --host=0.0.0.0 --reload` |
+
+Both stages run as a non-root `appuser` (uid/gid `1000` by default,
+overridable via the `APP_UID`/`APP_GID` build args), include `git` for SCM
+CLI mode, expose port `8001`, and define a `/health` healthcheck.
+
+#### Production
+
+`production` is the last stage, so it is built when no `--target` is given:
 
 ```bash
-# Build image
+# Build the production image (default target)
 docker build -t ingester-agents:latest .
 
 # Run with environment variables
 docker run -d \
-  -p 8001:8000 \
+  -p 8001:8001 \
   -e DOWNLOAD_DIR=/data/downloads \
   -e API_KEY_ENABLED=true \
   -e API_KEY=your-secret-key \
@@ -1109,6 +1123,31 @@ docker run -d \
 
 # Check health
 curl http://localhost:8001/health
+```
+
+#### Development
+
+The `development` target includes the full toolchain and starts uvicorn
+with `--reload`. Bind-mount the source so code changes reload live:
+
+```bash
+# Build the development image
+docker build --target development -t ingester-agents:dev .
+
+# Run with the source bind-mounted for live reload
+docker run --rm -it \
+  -p 8001:8001 \
+  -v "$(pwd):/app" \
+  ingester-agents:dev
+```
+
+To match file ownership on bind mounts to your host user, pass build args:
+
+```bash
+docker build --target development \
+  --build-arg APP_UID="$(id -u)" \
+  --build-arg APP_GID="$(id -g)" \
+  -t ingester-agents:dev .
 ```
 
 The Docker image includes:

@@ -31,6 +31,7 @@ dependencies = [
     "typer>=0.21.1",
     "uvicorn[standard]>=0.34.0",
     "pyyaml>=6.0",
+    "haiku-rag[ingester]>=0.55.1",
 ]
 
 
