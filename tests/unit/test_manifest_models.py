@@ -199,21 +199,12 @@ class TestWebComponent:
 class TestManifestConfig:
     def test_defaults(self):
         c = ManifestConfig()
-        assert c.start_workflows is False
-        assert c.priority == 0
         assert c.delete_stale is True
+        assert c.haiku_config is None
 
-    def test_workflow_validation_passes(self):
-        c = ManifestConfig(start_workflows=True, workflow_definition_id="wf1", param_set_id="ps1")
-        assert c.start_workflows is True
-
-    def test_workflow_missing_params_raises(self):
-        with pytest.raises(ValueError, match="start_workflows requires"):
-            ManifestConfig(start_workflows=True)
-
-    def test_workflow_missing_param_set_raises(self):
-        with pytest.raises(ValueError, match="start_workflows requires"):
-            ManifestConfig(start_workflows=True, workflow_definition_id="wf1")
+    def test_haiku_config_override(self):
+        c = ManifestConfig(haiku_config="custom.yaml")
+        assert c.haiku_config == "custom.yaml"
 
 
 # --- Schedule ---
@@ -279,11 +270,11 @@ class TestManifest:
             id="t",
             name="test",
             source="src",
-            config={"metadata": {"project": "x"}, "priority": 5},
+            config={"metadata": {"project": "x"}, "haiku_config": "custom.yaml"},
             components=[{"type": "fs", "name": "a", "path": "/a"}],
         )
         assert m.config.metadata == {"project": "x"}
-        assert m.config.priority == 5
+        assert m.config.haiku_config == "custom.yaml"
 
     def test_manifest_dir_defaults_to_none(self):
         m = Manifest(id="t", name="test", source="src", components=[{"type": "fs", "name": "a", "path": "/a"}])

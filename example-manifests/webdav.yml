@@ -6,7 +6,6 @@ config:
     - md
     - pdf
     - docx
-  start_workflows: false
 components:
   # Scan an entire WebDAV directory recursively
   - name: shared-drive

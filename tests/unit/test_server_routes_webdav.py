@@ -156,7 +156,6 @@ def test_run_inventory_success(client):
                 "batch_id": 123,
                 "ingested": [{"path": "doc1.md"}],
                 "errors": [],
-                "workflow_result": {"status": "started"},
             }
         )
 
@@ -184,7 +183,6 @@ def test_run_inventory_with_webdav_path(client):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -211,7 +209,6 @@ def test_run_inventory_with_errors(client):
                 "batch_id": 123,
                 "ingested": [{"path": "doc1.md"}],
                 "errors": [{"path": "doc2.md", "error": "Failed to process"}],
-                "workflow_result": None,
             }
         )
 
@@ -249,7 +246,6 @@ def test_run_inventory_with_all_options(client):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -260,10 +256,6 @@ def test_run_inventory_with_all_options(client):
                 "source": "test-source",
                 "start": "10",
                 "end": "50",
-                "start_workflows": "true",
-                "workflow_definition_id": "my-workflow",
-                "param_set_id": "my-params",
-                "priority": "5",
                 "webdav_url": "https://webdav.example.com",
                 "webdav_username": "user",
                 "webdav_password": "pass",
@@ -293,7 +285,6 @@ def test_run_from_file_success(client):
                 "batch_id": 456,
                 "ingested": [{"path": "/documents/doc1.md"}],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 

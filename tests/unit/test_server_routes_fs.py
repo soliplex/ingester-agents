@@ -277,7 +277,6 @@ def test_run_inventory_success(client, temp_inventory_file):
                 "batch_id": 123,
                 "ingested": [{"path": "doc1.md"}],
                 "errors": [],
-                "workflow_result": {"status": "started"},
             }
         )
 
@@ -305,7 +304,6 @@ def test_run_inventory_with_errors(client, temp_inventory_file):
                 "batch_id": 123,
                 "ingested": [{"path": "doc1.md"}],
                 "errors": [{"path": "doc2.md", "error": "Failed to process"}],
-                "workflow_result": None,
             }
         )
 
@@ -330,7 +328,6 @@ def test_run_inventory_with_directory(client, temp_document_dir):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -356,7 +353,6 @@ def test_run_inventory_with_all_options(client, temp_inventory_file):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 

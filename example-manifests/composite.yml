@@ -4,7 +4,10 @@ source: composite source
 config:
   metadata:
     project: enfold
-  start_workflows: false
+  # Override the haiku-rag config used when loading this source.
+  # Absolute path is used as-is; a relative value resolves under HAIKU_PATH.
+  # Defaults to ${HAIKU_PATH}/haiku.rag.default.yaml when omitted.
+  # haiku_config: composite.haiku.rag.yaml
 components:
   - name: test-directory1
     type: fs

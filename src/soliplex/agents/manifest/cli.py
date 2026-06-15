@@ -6,6 +6,8 @@ import logging
 
 import typer
 
+from soliplex.agents.config import settings
+
 from . import runner
 
 logger = logging.getLogger(__name__)
@@ -17,10 +19,17 @@ cli = typer.Typer(no_args_is_help=True)
 def run(
     path: str = typer.Argument(help="Path to a manifest YAML file or directory of manifests"),
     do_json: bool = typer.Option(False, "--json", help="Output results as JSON"),
+    load: bool = typer.Option(
+        None,
+        "--load/--no-load",
+        help="Run a haiku-rag load after each manifest (default: HAIKU_LOAD_ENABLED)",
+    ),
 ):
     """Run one or more manifests from a YAML file or directory."""
+    if load is None:
+        load = settings.haiku_load_enabled
     try:
-        results = asyncio.run(runner.run_manifests(path))
+        results = asyncio.run(runner.run_manifests(path, load=load))
     except FileNotFoundError as e:
         print(f"Error: {e}")
         raise SystemExit(1) from None

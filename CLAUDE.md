@@ -1,6 +1,6 @@
 # Soliplex Ingester-Agents
 
-Document ingestion CLI for loading files from filesystem, WebDAV, SCM platforms, and web pages into Soliplex Ingester. Supports declarative YAML manifests for multi-source ingestion.
+Document ingestion CLI for collecting files from filesystem, WebDAV, SCM platforms, and web pages into a local download directory. Supports declarative YAML manifests for multi-source ingestion and an optional haiku-rag load step that indexes each source into LanceDB.
 
 ## Quick Reference
 
@@ -42,6 +42,7 @@ si-agent webdav validate-config <path>
 # Manifest runner
 si-agent manifest run <path>            # Run manifest file or directory
 si-agent manifest run <path> --json     # Output results as JSON
+si-agent manifest run <path> --load     # Also run a haiku-rag load per manifest
 
 # REST API server
 si-agent serve
@@ -64,8 +65,9 @@ si-agent serve --reload
 ```text
 src/soliplex/agents/
 ├── cli.py              # Main Typer entry point
-├── client.py           # Ingester API client (batch, status, ingest, sync state)
 ├── config.py           # Pydantic Settings, manifest/component models
+├── local_state.py      # Local sync state (hashes, commit SHAs, pruning)
+├── local_store.py      # Writes documents + .meta.json to DOWNLOAD_DIR
 ├── common/config.py    # Shared validation utilities
 ├── fs/                 # Filesystem agent
 │   ├── cli.py          # CLI commands
@@ -77,6 +79,7 @@ src/soliplex/agents/
 │   └── app.py          # Business logic
 ├── manifest/           # Manifest runner
 │   ├── runner.py       # YAML loading, validation, agent dispatch
+│   ├── haiku_loader.py # haiku-rag batch load subprocess
 │   └── cli.py          # CLI commands
 ├── scm/                # SCM agent
 │   ├── cli.py          # CLI commands
@@ -88,8 +91,10 @@ src/soliplex/agents/
 │       ├── utils.py    # SHA3-256 hashing, base64 decoding
 │       └── templates/  # Jinja2 issue rendering
 └── server/             # FastAPI REST API
-    ├── __init__.py     # App setup, CORS, scheduler
+    ├── __init__.py     # App setup, CORS, scheduler, lifespan
     ├── auth.py         # API key and OAuth2 proxy auth
+    ├── locks.py        # Per-manifest execution locks
+    ├── haiku_queue.py  # Global FIFO queue serializing haiku-rag loads
     └── routes/         # Endpoint handlers (fs, scm, webdav, web, manifest)
 ```
 
@@ -99,10 +104,13 @@ Key environment variables:
 
 ```bash
 # Required
-ENDPOINT_URL=http://localhost:8000/api/v1
+DOWNLOAD_DIR=downloads                 # Where fetched documents are written
+STATE_DIR=sync_state                   # Local sync state, one SQLite file per source
 
-# Ingester authentication
-INGESTER_API_KEY=your-key
+# haiku-rag loading (optional)
+HAIKU_LOAD_ENABLED=true                # Queue a haiku-rag load after each manifest run
+LANCEDB_DIR=/var/lib/lancedb           # Base dir for per-source <source>.lancedb
+HAIKU_PATH=/etc/haiku                  # Base dir for haiku-rag config files
 
 # SCM authentication
 scm_auth_token=your-token
@@ -134,20 +142,30 @@ MANIFEST_DIR=/path/to/manifests       # Directory with manifest .yml files
 
 ## Key Patterns
 
-### Batch Management
+### Per-Source Storage
 
-Documents are grouped into batches by source name. The system reuses existing batches for incremental ingestion.
+Each manifest maps to one `source`. Its documents live under
+`<DOWNLOAD_DIR>/<sanitized-source>/`, with one SQLite sync-state file per
+source under `STATE_DIR`. Recorded content hashes drive incremental
+ingestion.
+
+### haiku-rag Load Serialization
+
+After each manifest run, a `haiku-ingester` load is queued for the source.
+Inside the server one worker drains a global FIFO queue
+(`server/haiku_queue.py`) so only one load runs at a time; the CLI runs
+loads sequentially. See `manifest/haiku_loader.py`.
 
 ### Status Checking
 
-Files are hashed and compared against the Ingester database:
+Files are hashed and compared against the local sync state:
 - **new:** File does not exist
 - **mismatch:** File changed (hash differs)
 - **match:** File unchanged (skipped)
 
 ### Incremental Sync (SCM)
 
-The run-incremental command tracks the last processed commit SHA to only fetch changed files on subsequent runs.
+The run-incremental command tracks the last processed commit SHA in local sync state to only fetch changed files on subsequent runs.
 
 ## Testing
 
@@ -156,7 +174,7 @@ The run-incremental command tracks the last processed commit SHA to only fetch c
 uv run pytest tests/unit/
 
 # Specific test file
-uv run pytest tests/unit/test_client.py
+uv run pytest tests/unit/test_manifest_runner.py
 
 # Coverage report
 uv run pytest --cov-report=html

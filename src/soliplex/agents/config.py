@@ -105,6 +105,16 @@ class Settings(BaseSettings):
     # Manifest settings
     manifest_dir: str | None = None  # Directory with manifest .yml files for scheduling
 
+    # haiku-rag load settings (run after each manifest run)
+    haiku_load_enabled: bool = False  # Queue a haiku-rag load after each manifest run
+    lancedb_dir: str | None = None  # Base dir for per-source .lancedb databases (LANCEDB_DIR)
+    haiku_path: str | None = None  # Base dir for haiku-rag config files (HAIKU_PATH)
+    haiku_default_config: str = "haiku.rag.default.yaml"  # Default config filename under haiku_path
+    # Full command template; placeholders: {haiku_cfg} {db} {source} {lancedb_dir} {haiku_path}
+    haiku_load_command: str = "haiku-ingester --config={haiku_cfg} run-batch --db={db}"
+    haiku_load_timeout: int = 1800  # Timeout for a single load subprocess (seconds)
+    haiku_load_cwd: str | None = None  # Working dir for the load subprocess (default: inherit)
+
     # S3 settings
     s3_endpoint_url: str | None = None  # Custom S3 endpoint (for MinIO, etc.)
 
@@ -360,18 +370,8 @@ class ManifestConfig(BaseModel):
 
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
-    start_workflows: bool = False
-    workflow_definition_id: str | None = None
-    param_set_id: str | None = None
-    priority: int = 0
     delete_stale: bool = True
-
-    @model_validator(mode="after")
-    def validate_workflow_params(self):
-        if self.start_workflows:
-            if self.workflow_definition_id is None or self.param_set_id is None:
-                raise ValueError("start_workflows requires both workflow_definition_id and param_set_id")
-        return self
+    haiku_config: str | None = None  # Per-manifest haiku-rag config (abs path, or filename under HAIKU_PATH)
 
 
 class Schedule(BaseModel):

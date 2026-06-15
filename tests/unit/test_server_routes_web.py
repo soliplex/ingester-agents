@@ -38,7 +38,6 @@ def test_run_inventory_success(client):
                 "batch_id": 42,
                 "ingested": [{"result": "success"}],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -69,7 +68,6 @@ def test_run_inventory_with_errors(client):
                 "batch_id": 42,
                 "ingested": [{"result": "success"}],
                 "errors": [{"uri": "http://b.com", "error": "fetch failed"}],
-                "workflow_result": None,
             }
         )
 
@@ -97,7 +95,6 @@ def test_run_inventory_with_all_options(client):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -147,9 +144,7 @@ def test_run_inventory_urls_not_array(client):
 def test_run_inventory_value_error(client):
     """Test web inventory with validation error."""
     with patch("soliplex.agents.server.routes.web.web_app") as mock_web_app:
-        mock_web_app.load_inventory = AsyncMock(
-            side_effect=ValueError("start_workflows requires both workflow_definition_id and param_set_id")
-        )
+        mock_web_app.load_inventory = AsyncMock(side_effect=ValueError("invalid url list"))
 
         response = client.post(
             "/api/v1/web/run-inventory",
@@ -191,7 +186,6 @@ def test_run_from_file_success(client):
                 "batch_id": 42,
                 "ingested": [{"result": "success"}],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -237,7 +231,6 @@ def test_run_from_file_with_metadata(client):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -266,7 +259,6 @@ def test_run_from_file_empty(client):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 

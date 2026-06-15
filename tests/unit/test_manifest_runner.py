@@ -679,6 +679,33 @@ class TestRunManifests:
         assert len(results) == 2
 
     @pytest.mark.asyncio
+    async def test_load_triggers_haiku_load(self, tmp_path):
+        f = tmp_path / "test.yml"
+        f.write_text(
+            textwrap.dedent("""\
+            id: test
+            name: Test
+            source: src
+            components:
+              - type: fs
+                name: c
+                path: /data
+        """)
+        )
+        with (
+            patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run,
+            patch(
+                "soliplex.agents.manifest.haiku_loader.run_load",
+                new_callable=AsyncMock,
+            ) as mock_load,
+        ):
+            mock_run.return_value = {"manifest_id": "test", "results": []}
+            mock_load.return_value = {"source": "src", "returncode": 0}
+            results = await runner.run_manifests(str(f), load=True)
+        mock_load.assert_awaited_once()
+        assert results[0]["haiku_load"] == {"source": "src", "returncode": 0}
+
+    @pytest.mark.asyncio
     async def test_nonexistent_path(self):
         with pytest.raises(FileNotFoundError, match="not found"):
             await runner.run_manifests("/nonexistent/path")

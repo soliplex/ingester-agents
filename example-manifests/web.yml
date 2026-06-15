@@ -1,8 +1,6 @@
 id: web-pages
 name: Web Pages
 source: web-source
-config:
-  start_workflows: false
 components:
   # Single URL
   - name: homepage

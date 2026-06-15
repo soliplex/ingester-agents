@@ -25,23 +25,26 @@ Agents for collecting documents from multiple sources — local filesystems, Web
 - **Web Agent (`web`)**: Ingest web pages via HTTP
   - Fetch and ingest HTML content from URLs
   - URL list support (inline, file, or single URL)
-  - Batch processing with workflow support
 
 - **SCM Agent (`scm`)**: Ingest files and issues from Git repositories
   - Support for GitHub and Gitea platforms
   - Automatic file type filtering
   - Issue ingestion with comments (rendered as Markdown)
-  - Batch processing with workflow support
   - Status checking to avoid re-ingesting unchanged files
 
 - **Manifest Runner (`manifest`)**: Declarative multi-source ingestion
   - YAML-based manifest files defining ingestion components
   - Supports all agent types (fs, scm, webdav, web) in a single manifest
-  - Shared configuration (metadata, extensions, workflow settings)
+  - Shared configuration (metadata, extensions, haiku-rag load config)
   - Stale document removal (`delete_stale`) across all components in a manifest
   - Cron-based scheduling via the REST API server
   - Per-component credential and extension overrides
   - Directory-level execution for running multiple manifests at once
+
+- **haiku-rag Loading**: Index downloaded documents into LanceDB
+  - Runs `haiku-ingester run-batch` after each manifest run
+  - One per-source `.lancedb` database, configurable command and config file
+  - Globally serialized — only one load runs at a time
 
 - **REST API Server**: Run agents as a web service
   - FastAPI-based HTTP endpoints for all operations
@@ -55,7 +58,10 @@ Agents for collecting documents from multiple sources — local filesystems, Web
 **Requirements:**
 - Python 3.13 or higher
 
-Documents are written to the local filesystem (`DOWNLOAD_DIR`), so no external Ingester service is required.
+Documents are written to the local filesystem (`DOWNLOAD_DIR`). Indexing
+into a vector store is handled by an optional haiku-rag load step (see
+[haiku-rag Loading](#haiku-rag-loading)), which runs `haiku-ingester`
+against the downloaded files.
 
 ### Using uv (Recommended)
 
@@ -83,8 +89,7 @@ The agents use environment variables for configuration. Create a `.env` file or 
 
 ### Required Configuration
 
-Agents write fetched documents to the local filesystem. No Soliplex
-Ingester instance is required.
+Agents write fetched documents to the local filesystem.
 
 ```bash
 # Directory where downloaded documents are written. Each run stores files
@@ -165,9 +170,20 @@ AUTH_TRUST_PROXY_HEADERS=false
 # Manifest scheduling (requires SCHEDULER_ENABLED=true)
 MANIFEST_DIR=/path/to/manifests
 
+# haiku-rag loading (runs `haiku-ingester run-batch` after each manifest run)
+HAIKU_LOAD_ENABLED=false
+LANCEDB_DIR=/var/lib/lancedb          # holds <source>.lancedb per source
+HAIKU_PATH=/etc/haiku                  # base dir for haiku-rag config files
+# HAIKU_DEFAULT_CONFIG=haiku.rag.default.yaml   # config filename under HAIKU_PATH
+# HAIKU_LOAD_COMMAND=haiku-ingester --config={haiku_cfg} run-batch --db={db}
+# HAIKU_LOAD_TIMEOUT=1800
+# HAIKU_LOAD_CWD=/var/lib/ingester     # subprocess working dir (default: inherit)
+
 # S3-compatible storage (for urls_file references using s3:// URLs)
 S3_ENDPOINT_URL=https://minio.example.com:9000
 ```
+
+See [haiku-rag Loading](#haiku-rag-loading) for what these settings do.
 
 ### Git CLI Mode
 
@@ -292,13 +308,6 @@ si-agent fs run-inventory /path/to/documents my-source-name
 ```bash
 # Process a subset of files (e.g., files 10-50)
 si-agent fs run-inventory inventory.json my-source --start 10 --end 50
-
-# Start workflows after ingestion
-si-agent fs run-inventory /path/to/documents my-source \
-  --start-workflows \
-  --workflow-definition-id my-workflow \
-  --param-set-id my-params \
-  --priority 10
 ```
 
 ### SCM Agent
@@ -352,16 +361,6 @@ si-agent scm run-incremental gitea admin/my-repo
 
 # Subsequent runs only process changes since last sync
 si-agent scm run-incremental gitea admin/my-repo --branch main
-```
-
-**With workflow triggering:**
-
-```bash
-si-agent scm run-incremental gitea admin/my-repo \
-  --start-workflows \
-  --workflow-definition-id my-workflow \
-  --param-set-id my-params \
-  --priority 5
 ```
 
 **Output JSON format:**
@@ -467,10 +466,6 @@ si-agent webdav run-inventory /documents my-source-name
 
 ```bash
 si-agent webdav run-inventory /documents my-source \
-  --start-workflows \
-  --workflow-definition-id my-workflow \
-  --param-set-id my-params \
-  --priority 10 \
   --webdav-url https://webdav.example.com \
   --webdav-username user \
   --webdav-password pass
@@ -577,7 +572,7 @@ Top-level fields:
   - **metadata**: Key-value pairs attached to all ingested documents.
   - **extensions**: File extensions to include (overrides the global `EXTENSIONS` setting).
   - **delete_stale**: Remove locally-stored documents that no longer appear in any component (default: false). See [Stale Document Removal](#stale-document-removal) below.
-  - Workflow fields (`start_workflows`, `workflow_definition_id`, `param_set_id`, `priority`) are still accepted for backward compatibility but are ignored — there is no Ingester to start workflows on.
+  - **haiku_config**: Override the haiku-rag config file used when loading this manifest's source. Absolute paths are used as-is; relative values resolve under `HAIKU_PATH`. Defaults to `${HAIKU_PATH}/haiku.rag.default.yaml`. See [haiku-rag Loading](#haiku-rag-loading).
 - **components** (required): List of ingestion components (see below).
 
 #### Component Types
@@ -685,6 +680,56 @@ si-agent serve
 
 The server loads all manifests from the directory at startup, validates that all manifest IDs are unique, and registers cron jobs for manifests that have a `schedule` defined.
 
+#### haiku-rag Loading
+
+When `HAIKU_LOAD_ENABLED=true`, a haiku-rag load is queued after **each**
+manifest run (scheduled, startup, or CLI). The load indexes the documents
+that the manifest just wrote to `${DOWNLOAD_DIR}/<source>/` into a
+per-source LanceDB database. The default command is:
+
+```bash
+haiku-ingester --config=${HAIKU_CFG} run-batch --db=${LANCEDB_DIR}/<source>.lancedb
+```
+
+- **One load at a time.** Inside the server, loads are drained from a
+  single global FIFO queue by one worker, so only one `haiku-ingester`
+  process runs at any moment (a capacity constraint). The CLI achieves the
+  same by running loads sequentially after each manifest.
+- **Command** is fully configurable via `HAIKU_LOAD_COMMAND`. Supported
+  placeholders: `{haiku_cfg}`, `{db}`, `{source}`, `{lancedb_dir}`,
+  `{haiku_path}`. The template is tokenized before substitution, so values
+  containing spaces cannot inject extra arguments.
+- **Config file** resolves from the manifest's `config.haiku_config`
+  (absolute path used as-is; relative resolved under `HAIKU_PATH`),
+  falling back to `${HAIKU_PATH}/${HAIKU_DEFAULT_CONFIG}`
+  (`haiku.rag.default.yaml`).
+- **Database** path is `${LANCEDB_DIR}/<slug>.lancedb`, where `<slug>` is
+  the source with whitespace replaced by hyphens
+  (`composite source` → `composite-source.lancedb`).
+- **Environment.** The subprocess inherits the server's environment plus
+  two injected variables:
+  - `SOURCE` — the sanitized download-folder name, so a haiku-rag config
+    using `root: ${DOWNLOAD_DIR}/${SOURCE}` resolves to the ingested
+    documents.
+  - `DOWNLOAD_DIR` — `settings.download_dir`, so the path above resolves
+    even when it was left at its default.
+
+  Any other `${VAR}` interpolated by the haiku-rag config (e.g.
+  `OLLAMA_BASE_URL`, `DOCLING1_BASE_URL`, `DOCLING2_BASE_URL`,
+  `EMBEDDINGS_BASE_URL`) must be present in the server's environment.
+
+```bash
+export HAIKU_LOAD_ENABLED=true
+export LANCEDB_DIR=/var/lib/lancedb
+export HAIKU_PATH=/etc/haiku
+export SCHEDULER_ENABLED=true
+export MANIFEST_DIR=/path/to/manifests
+si-agent serve
+```
+
+The CLI honors the same `HAIKU_LOAD_ENABLED` default; override per
+invocation with `si-agent manifest run <path> --load` / `--no-load`.
+
 **Note:** All commands support WebDAV credentials via environment variables (`WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD`) or command-line options (`--webdav-url`, `--webdav-username`, `--webdav-password`).
 
 **Git Bash on Windows:** If using Git Bash on Windows, use double slashes for WebDAV paths to prevent path conversion (e.g., `//documents` instead of `/documents`).
@@ -701,6 +746,7 @@ The server loads all manifests from the directory at startup, validates that all
 4. **Write**: Each file is written to `<DOWNLOAD_DIR>/<source>/<source-relative-path>`, with a `<filename>.meta.json` sidecar containing its MIME type and other metadata
 5. **State Update**: Content hashes (and, for SCM, the latest commit SHA) are recorded in local state
 6. **Stale Removal** (optional): When `delete_stale` is enabled, documents no longer present in the source are deleted from the download directory
+7. **haiku-rag Load** (optional): When `HAIKU_LOAD_ENABLED` is set, the downloaded documents are indexed into a per-source LanceDB database via `haiku-ingester` (see [haiku-rag Loading](#haiku-rag-loading))
 
 ### Incremental Sync (SCM Agent)
 
@@ -814,14 +860,17 @@ si-agent webdav run-inventory /Documents/project-docs webdav-docs
 ls ./downloads/webdav-docs
 ```
 
-### Example 4: Batch Processing with Workflows
+### Example 4: Index Ingested Documents with haiku-rag
 
 ```bash
-# Ingest and trigger processing workflows
-si-agent fs run-inventory ./documents my-docs \
-  --start-workflows \
-  --workflow-definition-id document-analysis \
-  --priority 5
+# Set up environment
+export DOWNLOAD_DIR=./downloads
+export LANCEDB_DIR=./lancedb
+export HAIKU_PATH=./haiku-config
+export HAIKU_LOAD_ENABLED=true
+
+# Run a manifest and load the result into ./lancedb/<source>.lancedb
+si-agent manifest run /path/to/manifest.yml --load
 ```
 
 ## Server API

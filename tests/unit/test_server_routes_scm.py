@@ -242,7 +242,6 @@ def test_run_inventory_github_success(client):
                 "to_process": [{"uri": "/owner/repo/doc.md"}],
                 "ingested": ["/owner/repo/doc.md"],
                 "errors": [],
-                "workflow_result": {"status": "started", "run_group_id": 123},
             }
         )
 
@@ -276,7 +275,6 @@ def test_run_inventory_gitea_success(client):
                 "to_process": [],
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -303,7 +301,6 @@ def test_run_inventory_with_errors(client):
                 "to_process": [{"uri": "/owner/repo/doc1.md"}, {"uri": "/owner/repo/doc2.md"}],
                 "ingested": ["/owner/repo/doc1.md"],
                 "errors": [{"uri": "/owner/repo/doc2.md", "error": "API rate limit exceeded"}],
-                "workflow_result": None,
             }
         )
 
@@ -332,7 +329,6 @@ def test_run_inventory_with_all_options(client):
                 "to_process": [],
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -363,7 +359,6 @@ def test_run_inventory_nothing_to_process(client):
                 "to_process": [],
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -431,7 +426,6 @@ def test_incremental_sync_github_success(client):
                 "files_removed": 1,
                 "ingested": ["/owner/repo/doc.md", "/owner/repo/guide.md"],
                 "errors": [],
-                "workflow_result": {"status": "started", "run_group_id": 456},
                 "new_commit_sha": "abc123def456",
             }
         )
@@ -471,7 +465,6 @@ def test_incremental_sync_gitea_success(client):
                 "files_removed": 0,
                 "ingested": ["/admin/repo/config.md"],
                 "errors": [],
-                "workflow_result": None,
                 "new_commit_sha": "xyz789",
             }
         )
@@ -532,7 +525,6 @@ def test_incremental_sync_with_errors(client):
                 "files_removed": 0,
                 "ingested": ["/owner/repo/doc1.md"],
                 "errors": [{"uri": "/owner/repo/doc2.md", "error": "API error"}],
-                "workflow_result": None,
                 "new_commit_sha": "abc123",
             }
         )
@@ -587,7 +579,6 @@ def test_incremental_sync_with_all_options(client):
                 "files_removed": 0,
                 "ingested": ["/owner/repo/doc.md"],
                 "errors": [],
-                "workflow_result": {"status": "started"},
                 "new_commit_sha": "abc123",
             }
         )
@@ -623,7 +614,6 @@ def test_incremental_sync_falls_back_to_full_sync(client):
                 "to_process": [{"uri": "/owner/repo/doc.md"}],
                 "ingested": ["/owner/repo/doc.md"],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 

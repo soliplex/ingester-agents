@@ -16,6 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from soliplex.agents.config import configure_logging
 from soliplex.agents.config import settings
 
+from .haiku_queue import enqueue_load
+from .haiku_queue import start_worker
+from .haiku_queue import stop_worker
 from .locks import _scheduler_lock
 from .locks import get_manifest_lock
 from .locks import is_manifest_running
@@ -43,6 +46,8 @@ async def _run_manifest_at_startup(manifest_path: str) -> None:
                 m.id,
                 count,
             )
+        if settings.haiku_load_enabled:
+            await enqueue_load(m)
     except Exception:
         logger.exception("Error running startup manifest %s", manifest_path)
 
@@ -94,6 +99,8 @@ def setup_manifest_schedules(crons) -> None:
                             mpath,
                             len(result.get("results", [])),
                         )
+                    if settings.haiku_load_enabled:
+                        await enqueue_load(loaded)
 
                 return handler
 
@@ -127,10 +134,15 @@ async def lifespan(app: FastAPI):
     if settings.root_path:
         logger.info(f"Root path: {settings.root_path}")
 
+    if settings.haiku_load_enabled:
+        start_worker()
+
     if settings.scheduler_enabled:
         setup_manifest_schedules(_crons)
 
     yield
+    if settings.haiku_load_enabled:
+        await stop_worker()
     logger.info("soliplex-agents server stopped")
 
 

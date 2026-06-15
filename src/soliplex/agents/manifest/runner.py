@@ -385,11 +385,15 @@ async def run_manifest(manifest: Manifest) -> dict:
     }
 
 
-async def run_manifests(path: str) -> list[dict]:
+async def run_manifests(path: str, load: bool = False) -> list[dict]:
     """Load and run manifests from a file or directory.
+
+    When *load* is true, a haiku-rag batch load runs (awaited) after each
+    manifest. The sequential loop guarantees only one load runs at a time.
 
     Args:
         path: Path to a single YAML file or directory of YAML files.
+        load: Run a haiku-rag load after each manifest.
 
     Returns:
         List of per-manifest result dicts.
@@ -408,5 +412,9 @@ async def run_manifests(path: str) -> list[dict]:
     results = []
     for manifest in manifests:
         result = await run_manifest(manifest)
+        if load:
+            from soliplex.agents.manifest import haiku_loader
+
+            result["haiku_load"] = await haiku_loader.run_load(manifest)
         results.append(result)
     return results
