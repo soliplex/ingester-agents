@@ -113,13 +113,36 @@ def build_load_argv(haiku_cfg: str, db: str, source: str) -> list[str]:
     return [token.format(**substitutions) for token in shlex.split(settings.haiku_load_command)]
 
 
+async def _pump_stream(reader, log, source: str) -> str:
+    """Log each line from *reader* as it arrives; return the full text.
+
+    Args:
+        reader: An ``asyncio.StreamReader`` for the subprocess stdout/stderr.
+        log: A logger method (e.g. ``logger.info``) called per line.
+        source: Source identifier, included in each log line.
+
+    Returns:
+        The accumulated output, newline-joined, so callers can still
+        capture it in the result.
+    """
+    lines: list[str] = []
+    async for raw in reader:
+        line = raw.decode("utf-8", errors="replace").rstrip()
+        log("haiku[%s]: %s", source, line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
 async def run_load(manifest: Manifest) -> dict:
     """Run a single haiku-rag batch load for *manifest*.
 
     Spawns the configured load command with ``SOURCE`` set to the
     sanitized download-folder name and ``DOWNLOAD_DIR`` injected so the
-    haiku-rag config can locate the ingested documents. Failures and
-    timeouts are logged and reported in the result rather than raised.
+    haiku-rag config can locate the ingested documents. The subprocess's
+    stdout and stderr are streamed to the logger line by line as the load
+    progresses (``PYTHONUNBUFFERED`` is set so the child flushes promptly).
+    Failures and timeouts are logged and reported in the result rather than
+    raised.
 
     Args:
         manifest: The manifest whose source should be loaded.
@@ -136,6 +159,8 @@ async def run_load(manifest: Manifest) -> dict:
     env = os.environ.copy()
     env["SOURCE"] = sanitize_source(source)
     env["DOWNLOAD_DIR"] = settings.download_dir
+    # Force the (Python) child to flush stdout so we can stream it live.
+    env["PYTHONUNBUFFERED"] = "1"
 
     logger.info("Starting haiku load for source '%s' -> %s", source, db)
     proc = await asyncio.create_subprocess_exec(
@@ -146,10 +171,12 @@ async def run_load(manifest: Manifest) -> dict:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=settings.haiku_load_timeout,
-        )
+        async with asyncio.timeout(settings.haiku_load_timeout):
+            out, err = await asyncio.gather(
+                _pump_stream(proc.stdout, logger.info, source),
+                _pump_stream(proc.stderr, logger.warning, source),
+            )
+            await proc.wait()
     except TimeoutError:
         proc.kill()
         await proc.wait()
@@ -160,16 +187,13 @@ async def run_load(manifest: Manifest) -> dict:
         )
         return {"source": source, "db": db, "returncode": None, "timed_out": True}
 
-    out = stdout.decode("utf-8", errors="replace")
-    err = stderr.decode("utf-8", errors="replace")
     if proc.returncode == 0:
         logger.info("haiku load for source '%s' completed", source)
     else:
         logger.error(
-            "haiku load for source '%s' failed (rc=%s): %s",
+            "haiku load for source '%s' failed (rc=%s)",
             source,
             proc.returncode,
-            err.strip(),
         )
     return {
         "source": source,

@@ -1,5 +1,6 @@
 """Tests for the haiku-rag loader — 100% branch coverage required."""
 
+import logging
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -121,55 +122,89 @@ class TestBuildLoadArgv:
 # --- run_load ---
 
 
-def _fake_proc(returncode=0, stdout=b"ok", stderr=b""):
+class _FakeStream:
+    """Minimal async-iterable stand-in for asyncio.StreamReader."""
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._lines:
+            raise StopAsyncIteration
+        return self._lines.pop(0)
+
+
+def _fake_proc(returncode=0, stdout_lines=(b"ok\n",), stderr_lines=()):
     proc = MagicMock()
-    proc.communicate = AsyncMock(return_value=(stdout, stderr))
+    proc.stdout = _FakeStream(stdout_lines)
+    proc.stderr = _FakeStream(stderr_lines)
     proc.returncode = returncode
     proc.kill = MagicMock()
     proc.wait = AsyncMock()
     return proc
 
 
+class _RaisingTimeout:
+    """asyncio.timeout stand-in that trips immediately on entry."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        raise TimeoutError
+
+    async def __aexit__(self, *args):
+        return False
+
+
 class TestRunLoad:
     @pytest.mark.asyncio
-    async def test_success_sets_env_and_returns(self, haiku_env):
-        proc = _fake_proc(returncode=0, stdout=b"done", stderr=b"")
-        with patch(
-            "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
-            new_callable=AsyncMock,
-            return_value=proc,
-        ) as mock_exec:
-            result = await haiku_loader.run_load(_manifest("composite source"))
+    async def test_success_streams_and_returns(self, haiku_env, caplog):
+        proc = _fake_proc(returncode=0, stdout_lines=[b"step 1\n", b"done\n"])
+        with caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.haiku_loader"):
+            with patch(
+                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=proc,
+            ) as mock_exec:
+                result = await haiku_loader.run_load(_manifest("composite source"))
 
         assert result["returncode"] == 0
         assert result["timed_out"] is False
-        assert result["stdout"] == "done"
+        assert result["stdout"] == "step 1\ndone"
         assert result["db"].replace("\\", "/").endswith("composite-source.lancedb")
+        # Each stdout line was streamed to the log as it arrived.
+        assert "haiku[composite source]: step 1" in caplog.text
+        assert "haiku[composite source]: done" in caplog.text
 
         kwargs = mock_exec.call_args.kwargs
         # SOURCE matches the sanitized download-folder name (spaces preserved).
         assert kwargs["env"]["SOURCE"] == "composite source"
         assert kwargs["env"]["DOWNLOAD_DIR"] == "downloads"
+        assert kwargs["env"]["PYTHONUNBUFFERED"] == "1"
         assert kwargs["cwd"] is None
 
     @pytest.mark.asyncio
-    async def test_nonzero_returncode_logged(self, haiku_env, caplog):
-        proc = _fake_proc(returncode=2, stdout=b"", stderr=b"boom")
-        with patch(
-            "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
-            new_callable=AsyncMock,
-            return_value=proc,
-        ):
-            result = await haiku_loader.run_load(_manifest())
+    async def test_nonzero_returncode_streams_stderr_and_logs(self, haiku_env, caplog):
+        proc = _fake_proc(returncode=2, stdout_lines=[], stderr_lines=[b"boom\n"])
+        with caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.haiku_loader"):
+            with patch(
+                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=proc,
+            ):
+                result = await haiku_loader.run_load(_manifest())
         assert result["returncode"] == 2
+        assert result["stderr"] == "boom"
+        assert "haiku[src]: boom" in caplog.text  # stderr streamed
         assert "failed" in caplog.text
 
     @pytest.mark.asyncio
     async def test_timeout_kills_process(self, haiku_env):
-        proc = MagicMock()
-        proc.communicate = MagicMock()  # never awaited; wait_for is mocked
-        proc.kill = MagicMock()
-        proc.wait = AsyncMock()
+        proc = _fake_proc(returncode=0)
         with (
             patch(
                 "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
@@ -177,9 +212,8 @@ class TestRunLoad:
                 return_value=proc,
             ),
             patch(
-                "soliplex.agents.manifest.haiku_loader.asyncio.wait_for",
-                new_callable=AsyncMock,
-                side_effect=TimeoutError,
+                "soliplex.agents.manifest.haiku_loader.asyncio.timeout",
+                _RaisingTimeout,
             ),
         ):
             result = await haiku_loader.run_load(_manifest())
