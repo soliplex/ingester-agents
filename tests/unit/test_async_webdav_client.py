@@ -904,6 +904,15 @@ class TestHead:
         assert result.headers.get("etag") == '"xyz789"'
 
     @pytest.mark.asyncio
+    async def test_head_etag_lookup_is_case_insensitive(self):
+        # Real servers send "ETag" (capitalised); the lowercase lookup in
+        # build_config/do_ingest must still find it, else ETag caching breaks.
+        client, session = _make_client()
+        session.request = AsyncMock(return_value=_mock_response(200, headers={"ETag": '"cap123"'}))
+        result = await client.head("/file.txt")
+        assert result.headers.get("etag") == '"cap123"'
+
+    @pytest.mark.asyncio
     async def test_head_follows_redirects(self):
         client, session = _make_client()
         session.request = AsyncMock(return_value=_mock_response(200, headers={}))

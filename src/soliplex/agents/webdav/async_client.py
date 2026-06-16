@@ -522,9 +522,15 @@ class AsyncWebDAVClient:
         return info
 
     async def head(self, path: str) -> WebDAVResponse:
-        """Send an HTTP HEAD request. Returns status and headers."""
+        """Send an HTTP HEAD request. Returns status and headers.
+
+        Header names are lower-cased so lookups (e.g. ``headers.get("etag")``)
+        work regardless of the server's casing. ``dict(resp.headers)`` would
+        otherwise preserve the original case (servers send ``ETag``) and break
+        the case-insensitive lookups that ETag caching relies on.
+        """
         resp = await self._request("HEAD", path, allow_redirects=True)
-        headers = dict(resp.headers)
+        headers = {k.lower(): v for k, v in resp.headers.items()}
         status = resp.status
         resp.release()
         return WebDAVResponse(status=status, headers=headers)

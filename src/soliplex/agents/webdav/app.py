@@ -293,8 +293,18 @@ async def build_config(
     allowed_extensions = settings.extensions
     config = []
     cache_hits = 0
+    cache_misses = 0
+    etag_from_listing = 0
+    etag_from_head = 0
+    etag_missing = 0
 
     cached_state = local_state.load_file_state(source) if source else {}
+    logger.info(
+        "build_config: scanning %s (source=%r, %d cached state entries)",
+        webdav_path,
+        source,
+        len(cached_state),
+    )
 
     async with webdav_client:
         # Recursively list all files
@@ -309,12 +319,28 @@ async def build_config(
                 continue
 
             server_etag = file_info.get("etag")
+            etag_source = "listing"
             if not server_etag:
+                etag_source = "HEAD"
                 try:
                     resp = await webdav_client.head(full_path)
                     server_etag = resp.headers.get("etag")
                 except Exception:
-                    logger.debug(f"Could not HEAD {full_path}")
+                    logger.debug("Could not HEAD %s", full_path, exc_info=True)
+
+            if server_etag:
+                if etag_source == "listing":
+                    etag_from_listing += 1
+                else:
+                    etag_from_head += 1
+                logger.debug("etag for %s via %s: %s", full_path, etag_source, server_etag)
+            else:
+                etag_missing += 1
+                logger.debug(
+                    "no etag for %s (checked %s) -- will be re-downloaded every run",
+                    full_path,
+                    etag_source,
+                )
 
             # Make path relative to webdav_path
             normalized_base = webdav_path.strip("/")
@@ -333,11 +359,19 @@ async def build_config(
             if server_etag and cached_entry and cached_entry.get("etag") == server_etag:
                 sha256_hash = cached_entry["sha256"]
                 cache_hits += 1
-                logger.debug(f"ETag cache hit for {full_path}")
+                logger.debug("ETag cache HIT for %s (etag=%s)", relative_path, server_etag)
             else:
                 # ETag cache miss — defer download to write step
                 sha256_hash = None
                 etag_for_rec = server_etag
+                cache_misses += 1
+                if not server_etag:
+                    miss_reason = "no server etag"
+                elif not cached_entry:
+                    miss_reason = "not in local state (first sight)"
+                else:
+                    miss_reason = f"etag changed (cached={cached_entry.get('etag')!r}, server={server_etag!r})"
+                logger.debug("ETag cache MISS for %s: %s", relative_path, miss_reason)
 
             mime_type = detect_mime_type(full_path)
 
@@ -353,7 +387,15 @@ async def build_config(
                 rec["_etag"] = etag_for_rec
             config.append(rec)
 
-    logger.info(f"Built config: {len(config)} files, {cache_hits} cache hits")
+    logger.info(
+        "build_config: %d files; cache hits=%d misses=%d; etags received: %d from listing, %d from HEAD, %d missing",
+        len(config),
+        cache_hits,
+        cache_misses,
+        etag_from_listing,
+        etag_from_head,
+        etag_missing,
+    )
     return config
 
 
@@ -549,11 +591,16 @@ async def do_ingest(
                 async with wc:
                     resp = await wc.head(head_path)
                 etag = resp.headers.get("etag")
+                logger.debug("do_ingest HEAD etag for %s: %s", uri, etag)
             except Exception:
-                logger.debug(f"Could not get ETag via HEAD for {uri}")
+                logger.debug("Could not get ETag via HEAD for %s", uri, exc_info=True)
 
     sha256_hash = hashlib.sha256(doc_body, usedforsecurity=False).hexdigest()
     local_store.write_document(source, uri, doc_body, mime_type, meta)
+    if etag:
+        logger.debug("recording %s in local state (etag=%s)", uri, etag)
+    else:
+        logger.debug("recording %s WITHOUT etag -- it will re-download next run", uri)
     local_state.upsert_file(source, uri, sha256_hash, etag=etag, size=len(doc_body), mime_type=mime_type)
     return {"result": "success", "uri": uri, "_sha256": sha256_hash, "_size": len(doc_body)}
 
