@@ -161,6 +161,10 @@ async def build_config_from_urls(
                 try:
                     info = await webdav_client.info(full_path)
                     server_etag = info.get("etag")
+                    if not server_etag:  # pragma: no cover
+                        logger.info(f"Could not get ETag for {full_path} {info}")
+                    else:  # pragma: no cover
+                        logger.info(f"Got ETag {server_etag} for {full_path}")
                 except Exception:
                     logger.debug(f"Could not get info for {full_path}")
                 if not server_etag:
@@ -172,8 +176,6 @@ async def build_config_from_urls(
 
                 cached_entry = cached_state.get(full_path)
                 mime_type = detect_mime_type(full_path)
-                if not server_etag:
-                    logger.info(f"Could not get ETag for {full_path} {info}")
 
                 if server_etag and cached_entry and cached_entry.get("etag") == server_etag:
                     # ETag cache hit — reuse cached SHA256, no download

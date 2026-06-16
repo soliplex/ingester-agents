@@ -138,6 +138,10 @@ class TestSetupManifestSchedules:
         mock_task = MagicMock()
         with (
             patch("soliplex.agents.server.settings") as mock_settings,
+            # Force a plain MagicMock: patch() auto-uses AsyncMock for an async
+            # function, which would still create an un-awaited coroutine when
+            # called and handed to the mocked create_task.
+            patch("soliplex.agents.server._run_manifest_at_startup", new=MagicMock()),
             patch(
                 "soliplex.agents.server.asyncio.create_task",
                 return_value=mock_task,
@@ -160,6 +164,7 @@ class TestSetupManifestSchedules:
 
         with (
             patch("soliplex.agents.server.settings") as mock_settings,
+            patch("soliplex.agents.server._run_manifest_at_startup", new=MagicMock()),
             patch(
                 "soliplex.agents.server.asyncio.create_task",
             ) as mock_create,

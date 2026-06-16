@@ -2,6 +2,7 @@
 
 import hashlib
 from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import aiofiles
@@ -132,6 +133,11 @@ async def test_build_config_no_downloads_on_cache_miss(local_env):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.download.side_effect = AssertionError("Should not download")
+    # head() returns a response with a real (sync) headers mapping; a bare
+    # AsyncMock would make headers.get(...) an un-awaited coroutine.
+    head_resp = MagicMock()
+    head_resp.headers = {}
+    mock_client.head = AsyncMock(return_value=head_resp)
 
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),

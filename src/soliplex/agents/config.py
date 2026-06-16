@@ -38,8 +38,15 @@ class ComponentType(enum.StrEnum):
     WEB = "web"
 
 
+# Only point pydantic-settings at the secrets dir when it exists, so dev/test
+# runs (which lack /run/secrets) don't emit a spurious "directory does not
+# exist" UserWarning. In the container the dir is present and secrets load.
+_SECRETS_DIR = "/run/secrets"
+_secrets_kwargs: dict = {"secrets_dir": _SECRETS_DIR} if Path(_SECRETS_DIR).is_dir() else {}  # pragma: no branch
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(secrets_dir="/run/secrets")
+    model_config = SettingsConfigDict(**_secrets_kwargs)
     # SCM settings
     scm_auth_token: SecretStr | None = None
     scm_auth_username: str | None = None

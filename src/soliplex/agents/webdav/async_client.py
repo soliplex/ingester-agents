@@ -348,8 +348,11 @@ class AsyncWebDAVClient:
         max_concurrent: int = 3,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._auth = aiohttp.BasicAuth(auth[0], auth[1]) if auth else None
-        self._headers = headers or {}
+        self._headers = dict(headers or {})
+        if auth:
+            # aiohttp.BasicAuth is deprecated and removed in aiohttp 4.0;
+            # set the Authorization header directly instead.
+            self._headers["Authorization"] = aiohttp.encode_basic_auth(auth[0], auth[1])
         self._timeout = timeout or aiohttp.ClientTimeout(total=60, connect=20)
         self._ssl = ssl
         self._max_retries = max_retries
@@ -365,7 +368,6 @@ class AsyncWebDAVClient:
             self._connector = aiohttp.TCPConnector(limit=self._max_concurrent)
             trace_configs = [_build_debug_trace_config()] if logger.isEnabledFor(logging.DEBUG) else None
             self._session = aiohttp.ClientSession(
-                auth=self._auth,
                 headers=self._headers,
                 timeout=self._timeout,
                 connector=self._connector,
