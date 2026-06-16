@@ -114,8 +114,10 @@ class Settings(BaseSettings):
     haiku_load_command: str = "haiku-ingester --config={haiku_cfg} run-batch --db={db}"
     haiku_load_timeout: int = 1800  # Timeout for a single load subprocess (seconds)
     haiku_load_cwd: str | None = None  # Working dir for the load subprocess (default: inherit)
-    # Logfire token (from /run/secrets/logfire_token or LOGFIRE_TOKEN); passed to the haiku load
+    # Logfire token (from /run/secrets/logfire_token or LOGFIRE_TOKEN); enables
+    # observability for this process and is passed to the haiku load subprocess.
     logfire_token: SecretStr | None = None
+    logfire_service_name: str = "ingester-agents"
 
     # S3 settings
     s3_endpoint_url: str | None = None  # Custom S3 endpoint (for MinIO, etc.)

@@ -25,6 +25,7 @@ dependencies = [
     "fastapi>=0.115.0",
     "fastapi-crons>=2.1.1",
     "jinja2>=3.1.6",
+    "logfire[fastapi]",
     "pydantic-settings>=2.12.0",
     "python-multipart>=0.0.20",
     "tenacity>=9.0.0",
@@ -60,6 +61,7 @@ module-name = "soliplex.agents"
 [tool.uv]
 # 2-week cooldown: don't resolve packages newer than this date.
 exclude-newer = "1 weeks"
+exclude-newer-package = {haiku-rag = false, haiku-rag-slim = false, haiku-skills=false ,pydantic-ai-slim=false, pydantic-graph=false,  torch=false, torchvision=false, "soliplex-agents"=false }
 
 [project.scripts]
 si-agent = "soliplex.agents.cli:cli"

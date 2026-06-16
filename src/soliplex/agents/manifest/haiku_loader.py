@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import shlex
+import signal
 from pathlib import Path
 
 from soliplex.agents.config import Manifest
@@ -191,6 +192,19 @@ async def run_load(manifest: Manifest) -> dict:
 
     if proc.returncode == 0:
         logger.info("haiku load for source '%s' completed", source)
+    elif proc.returncode < 0:
+        try:
+            signame = signal.Signals(-proc.returncode).name
+        except ValueError:  # pragma: no cover - signal set is platform-specific
+            signame = f"signal {-proc.returncode}"
+        logger.error(
+            "haiku load for source '%s' was killed by %s (rc=%s); a SIGKILL "
+            "usually means the container exceeded its memory limit -- raise the "
+            "memory limit or lower the haiku worker_count",
+            source,
+            signame,
+            proc.returncode,
+        )
     else:
         logger.error(
             "haiku load for source '%s' failed (rc=%s)",

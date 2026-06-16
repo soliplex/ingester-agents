@@ -216,6 +216,23 @@ class TestRunLoad:
         assert "failed" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_signal_kill_reports_oom_hint(self, haiku_env, caplog):
+        # rc=-9 => killed by SIGKILL, typically the cgroup OOM killer.
+        proc = _fake_proc(returncode=-9)
+        with caplog.at_level(logging.ERROR, logger="soliplex.agents.manifest.haiku_loader"):
+            with patch(
+                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=proc,
+            ):
+                result = await haiku_loader.run_load(_manifest())
+        assert result["returncode"] == -9
+        assert result["timed_out"] is False
+        assert "was killed by" in caplog.text
+        assert "rc=-9" in caplog.text
+        assert "memory limit" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_timeout_kills_process(self, haiku_env):
         proc = _fake_proc(returncode=0)
         with (
