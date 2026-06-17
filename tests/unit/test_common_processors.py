@@ -238,6 +238,38 @@ def test_asciidoc_inline_image_macro_is_kept(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# AsciiDocTableProcessor — Fix 4: blank lines inside table blocks
+# ---------------------------------------------------------------------------
+
+
+def test_asciidoc_strips_blank_lines_inside_table(tmp_path):
+    """Blank lines inside |=== blocks are removed."""
+    content = "|===\n| Item | Status\n\n| Foo | Bar\n|===\n"
+    expected = "|===\n| Item | Status\n| Foo | Bar\n|===\n"
+    f = _write(tmp_path, content)
+    AsciiDocTableProcessor().process(f, "text/asciidoc")
+    assert f.read_text(encoding="utf-8") == expected
+
+
+def test_asciidoc_preserves_blank_lines_outside_table(tmp_path):
+    """Blank lines outside |=== blocks are left untouched."""
+    content = "Para one.\n\nPara two.\n"
+    f = _write(tmp_path, content)
+    mtime_before = f.stat().st_mtime_ns
+    AsciiDocTableProcessor().process(f, "text/asciidoc")
+    assert f.stat().st_mtime_ns == mtime_before
+
+
+def test_asciidoc_multiline_cell_format(tmp_path):
+    """Multi-line cell format (one cell per line, blank-line row separators) is collapsed."""
+    content = "|===\n| Item | Status\n\n| Foo\n| Bar\n\n| Baz\n| Qux\n|===\n"
+    expected = "|===\n| Item | Status\n| Foo\n| Bar\n| Baz\n| Qux\n|===\n"
+    f = _write(tmp_path, content)
+    AsciiDocTableProcessor().process(f, "text/asciidoc")
+    assert f.read_text(encoding="utf-8") == expected
+
+
+# ---------------------------------------------------------------------------
 # run_processors integration — asciidoc processor is invoked end-to-end
 # ---------------------------------------------------------------------------
 

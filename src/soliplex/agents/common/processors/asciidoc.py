@@ -14,6 +14,12 @@ handle:
   3. ``include::`` and ``image::`` block directives — unresolvable at ingest
      time and would produce parse errors or stray text in the output.
 
+  4. Blank lines inside ``|===`` blocks — docling treats any non-table line
+     (including blank) as end-of-table.  Multi-line cell format (one cell per
+     line, blank-line row separators) therefore causes a premature table-end
+     after the header row; the closing ``|===`` is then misread as a table
+     start, and the trailing blank triggers ``max() arg is an empty sequence``.
+
 This processor removes all of these constructs so docling receives clean input.
 """
 
@@ -67,6 +73,13 @@ class AsciiDocTableProcessor(FileProcessor):
             if stripped == "|===":
                 in_table = not in_table
                 out.append(raw)
+                i += 1
+                continue
+
+            # Fix 4: drop blank lines inside table blocks.  Docling's parser
+            # interprets any non-table-line as end-of-table, so a blank line
+            # between multi-line cell rows causes a premature table close.
+            if in_table and not stripped:
                 i += 1
                 continue
 
