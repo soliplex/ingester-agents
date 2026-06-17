@@ -1,14 +1,18 @@
 """Unit tests for soliplex.agents.common.processors."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
 from soliplex.agents.common.processors import _REGISTRY
 from soliplex.agents.common.processors import FileProcessor
+from soliplex.agents.common.processors import ProcessorRejected
 from soliplex.agents.common.processors import register
 from soliplex.agents.common.processors import run_processors
 from soliplex.agents.common.processors.asciidoc import AsciiDocTableProcessor
+from soliplex.agents.common.processors.pdf import PdfValidator
 
 # ---------------------------------------------------------------------------
 # Registry helpers
@@ -193,6 +197,47 @@ def test_asciidoc_idempotent(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# AsciiDocTableProcessor — Fix 3: include/image directives
+# ---------------------------------------------------------------------------
+
+
+def test_asciidoc_removes_include_directive(tmp_path):
+    """include:: lines are dropped."""
+    content = "Some text.\ninclude::other.adoc[]\nMore text.\n"
+    expected = "Some text.\nMore text.\n"
+    f = _write(tmp_path, content)
+    AsciiDocTableProcessor().process(f, "text/asciidoc")
+    assert f.read_text(encoding="utf-8") == expected
+
+
+def test_asciidoc_removes_image_directive(tmp_path):
+    """image:: lines are dropped."""
+    content = "Some text.\nimage::diagram.png[Alt text]\nMore text.\n"
+    expected = "Some text.\nMore text.\n"
+    f = _write(tmp_path, content)
+    AsciiDocTableProcessor().process(f, "text/asciidoc")
+    assert f.read_text(encoding="utf-8") == expected
+
+
+def test_asciidoc_removes_multiple_directives(tmp_path):
+    """Multiple include:: and image:: lines are all removed."""
+    content = "Title\ninclude::a.adoc[]\nimage::fig1.png[]\ninclude::b.adoc[leveloffset=+1]\nBody.\n"
+    expected = "Title\nBody.\n"
+    f = _write(tmp_path, content)
+    AsciiDocTableProcessor().process(f, "text/asciidoc")
+    assert f.read_text(encoding="utf-8") == expected
+
+
+def test_asciidoc_inline_image_macro_is_kept(tmp_path):
+    """Inline image: (single colon) is NOT removed — only block image:: is."""
+    content = "See image:icon.png[icon] for details.\n"
+    f = _write(tmp_path, content)
+    mtime_before = f.stat().st_mtime_ns
+    AsciiDocTableProcessor().process(f, "text/asciidoc")
+    assert f.stat().st_mtime_ns == mtime_before
+
+
+# ---------------------------------------------------------------------------
 # run_processors integration — asciidoc processor is invoked end-to-end
 # ---------------------------------------------------------------------------
 
@@ -202,3 +247,73 @@ def test_run_processors_invokes_asciidoc_for_asciidoc_mime(tmp_path):
     f = _write(tmp_path, _TABLE_TEST_INPUT)
     run_processors(f, "text/asciidoc")
     assert f.read_text(encoding="utf-8") == _TABLE_TEST_EXPECTED
+
+
+# ---------------------------------------------------------------------------
+# ProcessorRejected — propagation through run_processors
+# ---------------------------------------------------------------------------
+
+
+def test_run_processors_propagates_rejection(tmp_path, clean_registry):
+    """ProcessorRejected escapes run_processors rather than being swallowed."""
+
+    @register("text/reject-test")
+    class _Rejecter(FileProcessor):
+        def process(self, path: Path, mime_type: str) -> None:
+            raise ProcessorRejected("not acceptable")
+
+    f = tmp_path / "doc.txt"
+    f.write_text("x", encoding="utf-8")
+    with pytest.raises(ProcessorRejected, match="not acceptable"):
+        run_processors(f, "text/reject-test")
+
+
+# ---------------------------------------------------------------------------
+# PdfValidator
+# ---------------------------------------------------------------------------
+
+
+def _pdf_path(tmp_path: Path) -> Path:
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4 stub")
+    return f
+
+
+def test_pdf_valid_opens_cleanly(tmp_path):
+    """No exception when PdfDocument opens successfully."""
+    mock_doc = MagicMock()
+    with patch("soliplex.agents.common.processors.pdf.pdfium.PdfDocument", return_value=mock_doc):
+        PdfValidator().process(_pdf_path(tmp_path), "application/pdf")
+    mock_doc.close.assert_called_once()
+
+
+def test_pdf_password_protected_raises_rejected(tmp_path):
+    """PdfiumError (e.g. password required) is converted to ProcessorRejected."""
+    import pypdfium2 as pdfium
+
+    with patch(
+        "soliplex.agents.common.processors.pdf.pdfium.PdfDocument",
+        side_effect=pdfium.PdfiumError("FPDF_ERR_PASSWORD"),
+    ):
+        with pytest.raises(ProcessorRejected):
+            PdfValidator().process(_pdf_path(tmp_path), "application/pdf")
+
+
+def test_pdf_corrupt_raises_rejected(tmp_path):
+    """Any PdfiumError (not just password) results in ProcessorRejected."""
+    import pypdfium2 as pdfium
+
+    with patch(
+        "soliplex.agents.common.processors.pdf.pdfium.PdfDocument",
+        side_effect=pdfium.PdfiumError("FPDF_ERR_FILE"),
+    ):
+        with pytest.raises(ProcessorRejected):
+            PdfValidator().process(_pdf_path(tmp_path), "application/pdf")
+
+
+def test_run_processors_invokes_pdf_for_pdf_mime(tmp_path):
+    """run_processors dispatches to PdfValidator for application/pdf."""
+    mock_doc = MagicMock()
+    with patch("soliplex.agents.common.processors.pdf.pdfium.PdfDocument", return_value=mock_doc):
+        run_processors(_pdf_path(tmp_path), "application/pdf")
+    mock_doc.close.assert_called_once()

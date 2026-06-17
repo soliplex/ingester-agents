@@ -106,6 +106,10 @@ async def load_inventory(
             processors.run_processors(target, mime_type)
             local_state.upsert_file(source, uri, row.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
             ingested.append(uri)
+        except processors.ProcessorRejected as e:
+            logger.warning("Processor rejected %s: %s", uri, e)
+            local_store.delete_document(source, uri, mime_type=mime_type)
+            errors.append({"uri": uri, "error": str(e)})
         except Exception as e:
             logger.exception("Failed to write %s", uri)
             errors.append({"uri": uri, "error": str(e)})
@@ -410,6 +414,10 @@ async def incremental_sync(
             local_state.upsert_file(source, uri, file.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
             ingested.append(uri)
             logger.info(f"wrote {uri}")
+        except processors.ProcessorRejected as e:
+            logger.warning("Processor rejected %s: %s", uri, e)
+            local_store.delete_document(source, uri, mime_type=mime_type)
+            errors.append({"uri": uri, "error": str(e)})
         except Exception as e:
             logger.exception(f"Failed to write {file.get('uri', 'unknown')}")
             errors.append({"uri": uri, "error": str(e)})

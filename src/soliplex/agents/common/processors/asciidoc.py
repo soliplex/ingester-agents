@@ -11,7 +11,10 @@ handle:
      prefixed header rows trigger a premature table-end with empty data,
      causing ``max() arg is an empty sequence``.
 
-This processor removes both constructs so docling receives clean input.
+  3. ``include::`` and ``image::`` block directives — unresolvable at ingest
+     time and would produce parse errors or stray text in the output.
+
+This processor removes all of these constructs so docling receives clean input.
 """
 
 import re
@@ -29,6 +32,10 @@ _BLOCK_ATTR = re.compile(r"^\[.*\]$")
 # before a | cell delimiter (e.g. "^.^h|" → "|").  Only applied to lines
 # inside a |=== block that do not already start with |.
 _CELL_SPEC = re.compile(r"[^|\s]+(?=\|)")
+
+# Matches AsciiDoc block directives that are unresolvable at ingest time:
+# include:: and image:: (block macro form, always at the start of a line).
+_DIRECTIVE = re.compile(r"^(include|image)::")
 
 
 @register("text/asciidoc", "text/x-asciidoc")
@@ -67,6 +74,11 @@ class AsciiDocTableProcessor(FileProcessor):
             # a table block that don't already start with |.
             if in_table and "|" in stripped and not stripped.startswith("|"):
                 raw = _CELL_SPEC.sub("", raw)
+
+            # Fix 3: drop include:: and image:: block directives entirely.
+            if _DIRECTIVE.match(stripped):
+                i += 1
+                continue
 
             out.append(raw)
             i += 1
