@@ -7,6 +7,7 @@ from soliplex.agents.scm.base import BaseSCMProvider
 
 from .. import local_state
 from .. import local_store
+from ..common import processors
 from ..config import SCM
 from ..config import ContentFilter
 from ..config import settings
@@ -101,7 +102,8 @@ async def load_inventory(
             meta = _doc_meta(row, extra_metadata)
             doc_bytes = row["file_bytes"]
             logger.info(f"writing {uri}")
-            local_store.write_document(source, uri, doc_bytes, mime_type, meta)
+            target = local_store.write_document(source, uri, doc_bytes, mime_type, meta)
+            processors.run_processors(target, mime_type)
             local_state.upsert_file(source, uri, row.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
             ingested.append(uri)
         except Exception as e:
@@ -403,7 +405,8 @@ async def incremental_sync(
             mime_type = _resolve_mime(file)
             meta = _doc_meta(file, extra_metadata)
             doc_bytes = file["file_bytes"]
-            local_store.write_document(source, uri, doc_bytes, mime_type, meta)
+            target = local_store.write_document(source, uri, doc_bytes, mime_type, meta)
+            processors.run_processors(target, mime_type)
             local_state.upsert_file(source, uri, file.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
             ingested.append(uri)
             logger.info(f"wrote {uri}")

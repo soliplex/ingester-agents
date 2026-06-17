@@ -416,3 +416,44 @@ async def test_list_commits_since_max_pages_limit(mock_response):
             commits = await provider.list_commits_since("test", "admin", None, "main", limit=100)
 
             assert len(commits) == 1000
+
+
+# ---------------------------------------------------------------------------
+# Processor integration — run_processors called after each successful write
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_incremental_sync_calls_run_processors(local_env):
+    """run_processors is invoked once per successfully written file."""
+    source = "gitea:admin:test:all"
+    local_state.set_sync_meta(source, "abc123", branch="main")
+
+    with patch("soliplex.agents.scm.app.get_scm") as mock_get_scm:
+        mock_provider = MagicMock()
+        mock_provider.list_commits_since = AsyncMock(return_value=[{"sha": "def456", "message": "Update file1.md"}])
+        mock_provider.get_commit_details = AsyncMock(
+            return_value={"sha": "def456", "files": [{"filename": "file1.md", "status": "modified"}]}
+        )
+        mock_provider.get_single_file = AsyncMock(
+            return_value={
+                "uri": "file1.md",
+                "file_bytes": b"content",
+                "content-type": "text/markdown",
+                "sha256": "aabbcc",
+                "metadata": {},
+            }
+        )
+        mock_provider.list_issues = AsyncMock(return_value=[])
+        mock_get_scm.return_value = mock_provider
+
+        with patch("soliplex.agents.scm.app.processors.run_processors") as mock_run:
+            result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin")
+
+    assert result["status"] == "synced"
+    assert mock_run.call_count == 1
+    call_args = mock_run.call_args
+    # first positional arg is the written Path
+    assert call_args.args[0].name == "file1.md"
+    # second positional arg is the MIME type
+    assert call_args.args[1] == "text/markdown"

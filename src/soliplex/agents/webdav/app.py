@@ -31,6 +31,28 @@ def _doc_meta(row: dict, extra_metadata: dict[str, str] | None) -> dict:
     return meta
 
 
+def _version_token(etag, modified) -> tuple[str | None, str | None]:
+    """Return a cache validator for a remote file and where it came from.
+
+    Prefers the strong ETag. When the server omits ETags (some WebDAV
+    servers do) it falls back to the last-modified timestamp, which is
+    still good enough to detect changes. ``modified`` may be a ``datetime``
+    (from a PROPFIND listing) or an HTTP-date string (from a ``Last-Modified``
+    header); both normalise to a stable string.
+
+    Returns:
+        ``(token, source)`` where source is ``"etag"`` or ``"modified"``,
+        or ``(None, None)`` when neither is available.
+    """
+    if etag:
+        return etag, "etag"
+    if modified is not None:
+        iso = getattr(modified, "isoformat", None)
+        token = iso() if callable(iso) else str(modified)
+        return token, "modified"
+    return None, None
+
+
 async def validate_config(path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None):
     """
     Validate a configuration and print out validation results.
@@ -156,29 +178,37 @@ async def build_config_from_urls(
                 continue
 
             try:
-                # Try to get ETag via info() or HEAD for cache check
+                # Validator for the cache check: prefer ETag, fall back to
+                # last-modified (this server omits ETags but sends modified).
                 server_etag = None
+                modified = None
                 try:
                     info = await webdav_client.info(full_path)
                     server_etag = info.get("etag")
-                    if not server_etag:  # pragma: no cover
-                        logger.info(f"Could not get ETag for {full_path} {info}")
-                    else:  # pragma: no cover
-                        logger.info(f"Got ETag {server_etag} for {full_path}")
+                    modified = info.get("modified")
                 except Exception:
-                    logger.debug(f"Could not get info for {full_path}")
+                    logger.debug("Could not get info for %s", full_path, exc_info=True)
                 if not server_etag:
                     try:
                         resp = await webdav_client.head(full_path)
                         server_etag = resp.headers.get("etag")
+                        if not modified:
+                            modified = resp.headers.get("last-modified")
                     except Exception:
-                        logger.debug(f"Could not HEAD {full_path}")
+                        logger.debug("Could not HEAD %s", full_path, exc_info=True)
+
+                server_token, token_source = _version_token(server_etag, modified)
+                if server_token:
+                    logger.debug("validator for %s via %s: %s", full_path, token_source, server_token)
+                else:
+                    logger.debug("no etag or last-modified for %s -- will re-download every run", full_path)
 
                 cached_entry = cached_state.get(full_path)
                 mime_type = detect_mime_type(full_path)
 
-                if server_etag and cached_entry and cached_entry.get("etag") == server_etag:
-                    # ETag cache hit — reuse cached SHA256, no download
+                if server_token and cached_entry and cached_entry.get("etag") == server_token:
+                    # Cache hit — reuse cached SHA256, no download
+                    logger.debug("cache HIT for %s (validator=%s via %s)", full_path, server_token, token_source)
                     rec = {
                         "path": full_path,
                         "sha256": cached_entry["sha256"],
@@ -186,10 +216,10 @@ async def build_config_from_urls(
                             "size": cached_entry.get("size", 0),
                             "content-type": mime_type,
                         },
-                        "_etag": server_etag,
+                        "_etag": server_token,
                     }
                 else:
-                    # ETag cache miss — defer download to write step
+                    # Cache miss — defer download to write step
                     rec = {
                         "path": full_path,
                         "sha256": None,
@@ -198,8 +228,8 @@ async def build_config_from_urls(
                             "content-type": mime_type,
                         },
                     }
-                    if server_etag:
-                        rec["_etag"] = server_etag
+                    if server_token:
+                        rec["_etag"] = server_token
                 config.append(rec)
                 results.append({"url": full_path, "status": "success", "error_message": None})
             except Exception as e:
@@ -294,9 +324,9 @@ async def build_config(
     config = []
     cache_hits = 0
     cache_misses = 0
-    etag_from_listing = 0
-    etag_from_head = 0
-    etag_missing = 0
+    via_etag = 0
+    via_modified = 0
+    via_none = 0
 
     cached_state = local_state.load_file_state(source) if source else {}
     logger.info(
@@ -319,25 +349,38 @@ async def build_config(
                 continue
 
             server_etag = file_info.get("etag")
+            modified = file_info.get("modified")
             etag_source = "listing"
             if not server_etag:
                 etag_source = "HEAD"
                 try:
                     resp = await webdav_client.head(full_path)
                     server_etag = resp.headers.get("etag")
+                    if not modified:
+                        modified = resp.headers.get("last-modified")
                 except Exception:
                     logger.debug("Could not HEAD %s", full_path, exc_info=True)
 
-            if server_etag:
-                if etag_source == "listing":
-                    etag_from_listing += 1
-                else:
-                    etag_from_head += 1
-                logger.debug("etag for %s via %s: %s", full_path, etag_source, server_etag)
+            # Validator: strong ETag if present, else last-modified timestamp.
+            server_token, token_source = _version_token(server_etag, modified)
+            if token_source == "etag":
+                via_etag += 1
+            elif token_source == "modified":
+                via_modified += 1
             else:
-                etag_missing += 1
+                via_none += 1
+
+            if server_token:
                 logger.debug(
-                    "no etag for %s (checked %s) -- will be re-downloaded every run",
+                    "validator for %s via %s (%s lookup): %s",
+                    full_path,
+                    token_source,
+                    etag_source,
+                    server_token,
+                )
+            else:
+                logger.debug(
+                    "no etag or last-modified for %s (checked %s) -- will re-download every run",
                     full_path,
                     etag_source,
                 )
@@ -356,22 +399,22 @@ async def build_config(
             cached_entry = cached_state.get(relative_path)
             etag_for_rec = None
 
-            if server_etag and cached_entry and cached_entry.get("etag") == server_etag:
+            if server_token and cached_entry and cached_entry.get("etag") == server_token:
                 sha256_hash = cached_entry["sha256"]
                 cache_hits += 1
-                logger.debug("ETag cache HIT for %s (etag=%s)", relative_path, server_etag)
+                logger.debug("cache HIT for %s (validator=%s via %s)", relative_path, server_token, token_source)
             else:
-                # ETag cache miss — defer download to write step
+                # Cache miss — defer download to write step
                 sha256_hash = None
-                etag_for_rec = server_etag
+                etag_for_rec = server_token
                 cache_misses += 1
-                if not server_etag:
-                    miss_reason = "no server etag"
+                if not server_token:
+                    miss_reason = "no etag or last-modified from server"
                 elif not cached_entry:
                     miss_reason = "not in local state (first sight)"
                 else:
-                    miss_reason = f"etag changed (cached={cached_entry.get('etag')!r}, server={server_etag!r})"
-                logger.debug("ETag cache MISS for %s: %s", relative_path, miss_reason)
+                    miss_reason = f"validator changed (cached={cached_entry.get('etag')!r}, server={server_token!r})"
+                logger.debug("cache MISS for %s: %s", relative_path, miss_reason)
 
             mime_type = detect_mime_type(full_path)
 
@@ -388,13 +431,13 @@ async def build_config(
             config.append(rec)
 
     logger.info(
-        "build_config: %d files; cache hits=%d misses=%d; etags received: %d from listing, %d from HEAD, %d missing",
+        "build_config: %d files; cache hits=%d misses=%d; validators: %d via etag, %d via last-modified, %d none",
         len(config),
         cache_hits,
         cache_misses,
-        etag_from_listing,
-        etag_from_head,
-        etag_missing,
+        via_etag,
+        via_modified,
+        via_none,
     )
     return config
 
@@ -583,24 +626,28 @@ async def do_ingest(
             logger.exception(f"Error downloading {uri} from WebDAV")
             return {"error": str(e)}
 
-        # Capture ETag via HTTP HEAD if not already known
+        # Capture a validator (ETag, else Last-Modified) via HEAD if the
+        # caller didn't already supply one from the listing step.
         if not etag and webdav_url:
             try:
                 wc = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
                 head_path = full_path if base_path else uri
                 async with wc:
                     resp = await wc.head(head_path)
-                etag = resp.headers.get("etag")
-                logger.debug("do_ingest HEAD etag for %s: %s", uri, etag)
+                etag, token_source = _version_token(
+                    resp.headers.get("etag"),
+                    resp.headers.get("last-modified"),
+                )
+                logger.debug("do_ingest HEAD validator for %s via %s: %s", uri, token_source, etag)
             except Exception:
-                logger.debug("Could not get ETag via HEAD for %s", uri, exc_info=True)
+                logger.debug("Could not get validator via HEAD for %s", uri, exc_info=True)
 
     sha256_hash = hashlib.sha256(doc_body, usedforsecurity=False).hexdigest()
     local_store.write_document(source, uri, doc_body, mime_type, meta)
     if etag:
-        logger.debug("recording %s in local state (etag=%s)", uri, etag)
+        logger.debug("recording %s in local state (validator=%s)", uri, etag)
     else:
-        logger.debug("recording %s WITHOUT etag -- it will re-download next run", uri)
+        logger.debug("recording %s WITHOUT a validator -- it will re-download next run", uri)
     local_state.upsert_file(source, uri, sha256_hash, etag=etag, size=len(doc_body), mime_type=mime_type)
     return {"result": "success", "uri": uri, "_sha256": sha256_hash, "_size": len(doc_body)}
 
