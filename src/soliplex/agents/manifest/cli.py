@@ -6,7 +6,7 @@ import logging
 
 import typer
 
-from soliplex.agents import client
+from soliplex.agents.config import settings
 
 from . import runner
 
@@ -19,10 +19,17 @@ cli = typer.Typer(no_args_is_help=True)
 def run(
     path: str = typer.Argument(help="Path to a manifest YAML file or directory of manifests"),
     do_json: bool = typer.Option(False, "--json", help="Output results as JSON"),
+    load: bool = typer.Option(
+        None,
+        "--load/--no-load",
+        help="Run a haiku-rag load after each manifest (default: HAIKU_LOAD_ENABLED)",
+    ),
 ):
     """Run one or more manifests from a YAML file or directory."""
+    if load is None:
+        load = settings.haiku_load_enabled
     try:
-        results = asyncio.run(runner.run_manifests(path))
+        results = asyncio.run(runner.run_manifests(path, load=load))
     except FileNotFoundError as e:
         print(f"Error: {e}")
         raise SystemExit(1) from None
@@ -44,52 +51,3 @@ def run(
                     ingested = len(result.get("ingested", []))
                     errors = len(result.get("errors", []))
                     print(f"  {name}: {ingested} ingested, {errors} errors")
-
-
-@cli.command("preflight")
-def preflight(
-    path: str = typer.Argument(help="Path to a manifest YAML file"),
-):
-    """Check that workflow and parameter set referenced in a manifest exist."""
-    try:
-        manifest = runner.load_manifest(path)
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        raise SystemExit(1) from None
-    except (ValueError, TypeError) as e:
-        print(f"Validation error: {e}")
-        raise SystemExit(1) from None
-
-    cfg = manifest.config
-    if cfg is None or not cfg.start_workflows:
-        print("start_workflows is not enabled — no preflight checks required.")
-        return
-
-    workflow_id = cfg.workflow_definition_id
-    param_set_id = cfg.param_set_id
-    has_error = False
-
-    try:
-        workflow = asyncio.run(client.find_workflow(workflow_id))
-        if workflow is None:
-            print(f"MISSING  workflow_definition_id: {workflow_id!r}")
-            has_error = True
-        else:
-            print(f"OK       workflow_definition_id: {workflow_id!r}")
-    except Exception as e:
-        print(f"ERROR    workflow_definition_id: {workflow_id!r} — {e}")
-        has_error = True
-
-    try:
-        param_set = asyncio.run(client.find_param_set(param_set_id))
-        if param_set is None:
-            print(f"MISSING  param_set_id: {param_set_id!r}")
-            has_error = True
-        else:
-            print(f"OK       param_set_id: {param_set_id!r}")
-    except Exception as e:
-        print(f"ERROR    param_set_id: {param_set_id!r} — {e}")
-        has_error = True
-
-    if has_error:
-        raise SystemExit(1)

@@ -38,8 +38,15 @@ class ComponentType(enum.StrEnum):
     WEB = "web"
 
 
+# Only point pydantic-settings at the secrets dir when it exists, so dev/test
+# runs (which lack /run/secrets) don't emit a spurious "directory does not
+# exist" UserWarning. In the container the dir is present and secrets load.
+_SECRETS_DIR = "/run/secrets"
+_secrets_kwargs: dict = {"secrets_dir": _SECRETS_DIR} if Path(_SECRETS_DIR).is_dir() else {}  # pragma: no branch
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(secrets_dir="/run/secrets")
+    model_config = SettingsConfigDict(**_secrets_kwargs)
     # SCM settings
     scm_auth_token: SecretStr | None = None
     scm_auth_username: str | None = None
@@ -55,7 +62,6 @@ class Settings(BaseSettings):
     extensions: list[str] = ["md", "pdf", "doc", "docx"]
     log_level: str = "INFO"
     log_format: str = "{name}|{asctime}|{levelname}|{message}"
-    endpoint_url: str = "http://localhost:8000/api/v1"
 
     # SMTP email alert settings (handler only added when smtp_host is set)
     smtp_host: str | None = None
@@ -69,10 +75,7 @@ class Settings(BaseSettings):
     smtp_log_level: str = "ERROR"
     smtp_cooldown: int = 30  # minimum seconds between emails
 
-    # Ingester API authentication (for outgoing requests to the Ingester API)
-    ingester_api_key: SecretStr | None = None
-
-    # Authentication settings (matching soliplex_ingester - for this agent's own API server)
+    # Authentication settings (for this agent's own API server)
     api_key: SecretStr | None = None
     api_key_enabled: bool = False
     auth_trust_proxy_headers: bool = False
@@ -103,8 +106,25 @@ class Settings(BaseSettings):
     # State settings
     state_dir: str = "sync_state"
 
+    # Local download settings (where agents write fetched documents)
+    download_dir: str = "downloads"
+
     # Manifest settings
     manifest_dir: str | None = None  # Directory with manifest .yml files for scheduling
+
+    # haiku-rag load settings (run after each manifest run)
+    haiku_load_enabled: bool = False  # Queue a haiku-rag load after each manifest run
+    lancedb_dir: str | None = None  # Base dir for per-source .lancedb databases (LANCEDB_DIR)
+    haiku_path: str | None = None  # Base dir for haiku-rag config files (HAIKU_PATH)
+    haiku_default_config: str = "haiku.rag.default.yaml"  # Default config filename under haiku_path
+    # Full command template; placeholders: {haiku_cfg} {db} {source} {lancedb_dir} {haiku_path}
+    haiku_load_command: str = "haiku-ingester --config={haiku_cfg} run-batch --db={db}"
+    haiku_load_timeout: int = 1800  # Timeout for a single load subprocess (seconds)
+    haiku_load_cwd: str | None = None  # Working dir for the load subprocess (default: inherit)
+    # Logfire token (from /run/secrets/logfire_token or LOGFIRE_TOKEN); enables
+    # observability for this process and is passed to the haiku load subprocess.
+    logfire_token: SecretStr | None = None
+    logfire_service_name: str = "ingester-agents"
 
     # S3 settings
     s3_endpoint_url: str | None = None  # Custom S3 endpoint (for MinIO, etc.)
@@ -361,18 +381,8 @@ class ManifestConfig(BaseModel):
 
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
-    start_workflows: bool = False
-    workflow_definition_id: str | None = None
-    param_set_id: str | None = None
-    priority: int = 0
     delete_stale: bool = True
-
-    @model_validator(mode="after")
-    def validate_workflow_params(self):
-        if self.start_workflows:
-            if self.workflow_definition_id is None or self.param_set_id is None:
-                raise ValueError("start_workflows requires both workflow_definition_id and param_set_id")
-        return self
+    haiku_config: str | None = None  # Per-manifest haiku-rag config (abs path, or filename under HAIKU_PATH)
 
 
 class Schedule(BaseModel):

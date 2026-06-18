@@ -16,6 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from soliplex.agents.config import configure_logging
 from soliplex.agents.config import settings
 
+from .haiku_queue import enqueue_load
+from .haiku_queue import start_worker
+from .haiku_queue import stop_worker
 from .locks import _scheduler_lock
 from .locks import get_manifest_lock
 from .locks import is_manifest_running
@@ -43,6 +46,8 @@ async def _run_manifest_at_startup(manifest_path: str) -> None:
                 m.id,
                 count,
             )
+        if settings.haiku_load_enabled:
+            await enqueue_load(m)
     except Exception:
         logger.exception("Error running startup manifest %s", manifest_path)
 
@@ -94,6 +99,8 @@ def setup_manifest_schedules(crons) -> None:
                             mpath,
                             len(result.get("results", [])),
                         )
+                    if settings.haiku_load_enabled:
+                        await enqueue_load(loaded)
 
                 return handler
 
@@ -117,20 +124,57 @@ def setup_manifest_schedules(crons) -> None:
             )
 
 
+def configure_logfire(app: FastAPI) -> None:
+    """Configure Pydantic Logfire for the server process.
+
+    Only active when a token is available (read from
+    ``/run/secrets/logfire_token`` or the ``LOGFIRE_TOKEN`` env var). When
+    enabled it instruments the FastAPI app and routes stdlib logging to
+    Logfire. Any failure is logged and swallowed so observability never
+    blocks the server.
+    """
+    if settings.logfire_token is None:
+        logger.info("No Logfire token configured; skipping Logfire setup")
+        return
+    try:
+        import logfire
+
+        logfire.configure(
+            token=settings.logfire_token.get_secret_value(),
+            service_name=settings.logfire_service_name,
+            send_to_logfire=True,
+            console=False,
+        )
+        logfire.instrument_fastapi(app, capture_headers=True)
+        logging.getLogger().addHandler(logfire.LogfireLoggingHandler())
+        logger.info(
+            "Logfire configured (service=%s)",
+            settings.logfire_service_name,
+        )
+    except Exception:
+        logger.exception("Failed to configure Logfire; continuing without it")
+
+
 async def lifespan(app: FastAPI):
     """Manage app lifecycle."""
 
     configure_logging()
+    configure_logfire(app)
     logger.info("Starting soliplex-agents server")
     if settings.api_prefix:
         logger.info(f"API prefix: {settings.api_prefix}")
     if settings.root_path:
         logger.info(f"Root path: {settings.root_path}")
 
+    if settings.haiku_load_enabled:
+        start_worker()
+
     if settings.scheduler_enabled:
         setup_manifest_schedules(_crons)
 
     yield
+    if settings.haiku_load_enabled:
+        await stop_worker()
     logger.info("soliplex-agents server stopped")
 
 

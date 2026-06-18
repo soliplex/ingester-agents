@@ -98,7 +98,7 @@ def test_check_status_success(client):
     """Test successful status check."""
     with (
         patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app,
-        patch("soliplex.agents.client.check_status") as mock_check_status,
+        patch("soliplex.agents.local_state.compute_to_process") as mock_check_status,
     ):
         mock_app.build_config = AsyncMock(
             return_value=[
@@ -126,7 +126,7 @@ def test_check_status_with_detail(client):
     """Test status check with detail flag."""
     with (
         patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app,
-        patch("soliplex.agents.client.check_status") as mock_check_status,
+        patch("soliplex.agents.local_state.compute_to_process") as mock_check_status,
     ):
         to_process = [{"path": "doc1.md", "sha256": "abc123", "status": "new"}]
         mock_app.build_config = AsyncMock(return_value=[{"path": "doc1.md", "sha256": "abc123"}])
@@ -156,7 +156,6 @@ def test_run_inventory_success(client):
                 "batch_id": 123,
                 "ingested": [{"path": "doc1.md"}],
                 "errors": [],
-                "workflow_result": {"status": "started"},
             }
         )
 
@@ -172,7 +171,6 @@ def test_run_inventory_success(client):
         assert data["to_process_count"] == 1
         assert data["ingested_count"] == 1
         assert data["error_count"] == 0
-        assert data["batch_id"] == 123
 
 
 def test_run_inventory_with_webdav_path(client):
@@ -185,7 +183,6 @@ def test_run_inventory_with_webdav_path(client):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -212,7 +209,6 @@ def test_run_inventory_with_errors(client):
                 "batch_id": 123,
                 "ingested": [{"path": "doc1.md"}],
                 "errors": [{"path": "doc2.md", "error": "Failed to process"}],
-                "workflow_result": None,
             }
         )
 
@@ -250,7 +246,6 @@ def test_run_inventory_with_all_options(client):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -261,10 +256,6 @@ def test_run_inventory_with_all_options(client):
                 "source": "test-source",
                 "start": "10",
                 "end": "50",
-                "start_workflows": "true",
-                "workflow_definition_id": "my-workflow",
-                "param_set_id": "my-params",
-                "priority": "5",
                 "webdav_url": "https://webdav.example.com",
                 "webdav_username": "user",
                 "webdav_password": "pass",
@@ -294,7 +285,6 @@ def test_run_from_file_success(client):
                 "batch_id": 456,
                 "ingested": [{"path": "/documents/doc1.md"}],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -310,7 +300,6 @@ def test_run_from_file_success(client):
         assert data["status"] == "ok"
         assert data["inventory_count"] == 1
         assert data["ingested_count"] == 1
-        assert data["batch_id"] == 456
         mock_app.load_inventory_from_urls.assert_called_once()
 
 

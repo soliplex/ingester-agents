@@ -6,7 +6,8 @@ import logging
 import aiohttp
 from tenacity import AsyncRetrying
 
-from soliplex.agents import client
+from soliplex.agents import local_state
+from soliplex.agents import local_store
 from soliplex.agents.config import settings
 from soliplex.agents.retry import RETRYABLE_STATUS_CODES
 from soliplex.agents.retry import RetryableHTTPError
@@ -80,29 +81,22 @@ async def resolve_urls(
 async def load_inventory(
     urls: list[str],
     source: str,
-    start_workflows: bool = False,
-    workflow_definition_id: str | None = None,
-    param_set_id: str | None = None,
-    priority: int = 0,
     extra_metadata: dict[str, str] | None = None,
+    delete_stale: bool = False,
 ) -> dict:
-    """Fetch URLs and ingest their content.
+    """Fetch URLs and write their content to the download directory.
 
     Args:
-        urls: List of URLs to fetch and ingest.
-        source: Source identifier for the batch.
-        start_workflows: Whether to start workflows after ingestion.
-        workflow_definition_id: Optional workflow definition ID.
-        param_set_id: Optional parameter set ID.
-        priority: Workflow priority.
+        urls: List of URLs to fetch and write.
+        source: Source identifier (becomes the per-source download folder).
         extra_metadata: Extra metadata to attach to all documents.
+        delete_stale: Remove documents no longer present in *urls*.
 
     Returns:
-        Dictionary with inventory, to_process, batch_id, ingested, errors, workflow_result.
+        Dictionary with inventory, to_process, ingested, errors and
+        delete_stale_result.
     """
-    client.validate_parameters(start_workflows, workflow_definition_id, param_set_id)
-
-    # Build file info for status check
+    # Fetch each URL up front so change detection can use content hashes.
     file_info = []
     fetched = {}
     for url in urls:
@@ -127,62 +121,32 @@ async def load_inventory(
                 }
             )
 
-    to_process = await client.check_status(file_info, source)
-    ret = {"inventory": file_info, "to_process": to_process}
-
-    if len(to_process) == 0:
-        logger.info("nothing to process")
-        if start_workflows:
-            batch_id = await client.find_or_create_batch(source)
-            ret["workflow_result"] = await client.start_workflows_for_batch(
-                batch_id, workflow_definition_id, param_set_id, priority
-            )
-        return ret
-
-    found_batch_id = await client.find_batch_for_source(source)
-    if found_batch_id:
-        batch_id = found_batch_id
-    else:
-        batch_id = await client.create_batch(source, source)
-    ret["batch_id"] = batch_id
-
+    to_process = local_state.compute_to_process(file_info, source)
     ingested = []
     errors = []
+    ret = {"inventory": file_info, "to_process": to_process, "ingested": ingested, "errors": errors}
+
     for row in to_process:
         url = row["path"]
         if url not in fetched:
             errors.append({"uri": url, "error": "fetch failed"})
             continue
         content_bytes, content_type = fetched[url]
-        meta = row.get("metadata", {}).copy()
-        for k in ["path", "sha256", "size", "source", "batch_id", "source_uri"]:
+        meta = dict(row.get("metadata") or {})
+        for k in ("path", "sha256", "size", "source", "batch_id", "source_uri", "content-type"):
             meta.pop(k, None)
         if extra_metadata:
             meta.update(extra_metadata)
-        res = await client.do_ingest(
-            content_bytes,
-            url,
-            meta,
-            source,
-            batch_id,
-            content_type,
-        )
-        if "error" in res:
-            logger.error(f"Error ingesting {url}: {res['error']}")
-            errors.append({"uri": url, "error": res["error"]})
-        else:
-            ingested.append(res)
+        try:
+            local_store.write_document(source, url, content_bytes, content_type, meta)
+            local_state.upsert_file(source, url, row.get("sha256"), size=len(content_bytes), mime_type=content_type)
+            ingested.append(url)
+        except Exception as e:
+            logger.exception(f"Error writing {url}")
+            errors.append({"uri": url, "error": str(e)})
 
-    wf_res = None
-    if len(errors) == 0 and start_workflows:
-        wf_res = await client.start_workflows_for_batch(
-            batch_id,
-            workflow_definition_id,
-            param_set_id,
-            priority,
-        )
-
-    ret["ingested"] = ingested
-    ret["errors"] = errors
-    ret["workflow_result"] = wf_res
+    delete_stale_result = None
+    if delete_stale and len(errors) == 0:
+        delete_stale_result = local_state.prune_documents(source, {r["path"] for r in file_info})
+    ret["delete_stale_result"] = delete_stale_result
     return ret

@@ -348,8 +348,11 @@ class AsyncWebDAVClient:
         max_concurrent: int = 3,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._auth = aiohttp.BasicAuth(auth[0], auth[1]) if auth else None
-        self._headers = headers or {}
+        self._headers = dict(headers or {})
+        if auth:
+            # aiohttp.BasicAuth is deprecated and removed in aiohttp 4.0;
+            # set the Authorization header directly instead.
+            self._headers["Authorization"] = aiohttp.encode_basic_auth(auth[0], auth[1])
         self._timeout = timeout or aiohttp.ClientTimeout(total=60, connect=20)
         self._ssl = ssl
         self._max_retries = max_retries
@@ -365,7 +368,6 @@ class AsyncWebDAVClient:
             self._connector = aiohttp.TCPConnector(limit=self._max_concurrent)
             trace_configs = [_build_debug_trace_config()] if logger.isEnabledFor(logging.DEBUG) else None
             self._session = aiohttp.ClientSession(
-                auth=self._auth,
                 headers=self._headers,
                 timeout=self._timeout,
                 connector=self._connector,
@@ -520,9 +522,15 @@ class AsyncWebDAVClient:
         return info
 
     async def head(self, path: str) -> WebDAVResponse:
-        """Send an HTTP HEAD request. Returns status and headers."""
+        """Send an HTTP HEAD request. Returns status and headers.
+
+        Header names are lower-cased so lookups (e.g. ``headers.get("etag")``)
+        work regardless of the server's casing. ``dict(resp.headers)`` would
+        otherwise preserve the original case (servers send ``ETag``) and break
+        the case-insensitive lookups that ETag caching relies on.
+        """
         resp = await self._request("HEAD", path, allow_redirects=True)
-        headers = dict(resp.headers)
+        headers = {k.lower(): v for k, v in resp.headers.items()}
         status = resp.status
         resp.release()
         return WebDAVResponse(status=status, headers=headers)

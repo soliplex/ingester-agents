@@ -135,10 +135,6 @@ def run(
     source: Annotated[str, typer.Argument(help="source name")],
     start: Annotated[int, typer.Option(help="start index")] = 0,
     end: Annotated[int, typer.Option(help="end index")] = None,
-    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = False,
-    workflow_definition_id: Annotated[str, typer.Option(help="workflow definition id")] = None,
-    param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
-    priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
     webdav_url: Annotated[
         str,
@@ -157,14 +153,9 @@ def run(
     """
     Run an inventory ingestion.
 
-    Scans the specified WebDAV directory recursively and ingests discovered files.
+    Scans the specified WebDAV directory recursively and writes discovered files.
     """
     extra_metadata = json.loads(metadata) if metadata else None
-    if start_workflows:
-        if workflow_definition_id is None:
-            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
-        if param_set_id is None:
-            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
     print(f"loading {config_path} source={source}")
     try:
         res = asyncio.run(
@@ -173,10 +164,6 @@ def run(
                 source,
                 start,
                 end,
-                workflow_definition_id=workflow_definition_id,
-                param_set_id=param_set_id,
-                start_workflows=start_workflows,
-                priority=priority,
                 webdav_url=webdav_url,
                 webdav_username=webdav_username,
                 webdav_password=webdav_password,
@@ -204,9 +191,6 @@ def run(
                 print(f"{len(res['ingested'])} ingested")
             else:
                 print("no ingested files")
-            if start_workflows:
-                print("workflow result")
-                print(json.dumps(res["workflow_result"], indent=2))
 
 
 @cli.command("run-from-urls")
@@ -218,10 +202,6 @@ def run_from_urls(
     source: Annotated[str, typer.Argument(help="source name")],
     start: Annotated[int, typer.Option(help="start index")] = 0,
     end: Annotated[int, typer.Option(help="end index")] = None,
-    start_workflows: Annotated[bool, typer.Option(help="start workflows")] = False,
-    workflow_definition_id: Annotated[str, typer.Option(help="workflow definition id")] = None,
-    param_set_id: Annotated[str, typer.Option(help="param set id")] = None,
-    priority: Annotated[int, typer.Option(help="workflow priority")] = 0,
     do_json: Annotated[bool, typer.Option(help="output json")] = False,
     webdav_url: Annotated[
         str,
@@ -240,14 +220,9 @@ def run_from_urls(
     """
     Run ingestion from a URL list file.
 
-    Reads a file of WebDAV URLs (one per line) and ingests those specific files.
+    Reads a file of WebDAV URLs (one per line) and writes those specific files.
     """
     extra_metadata = json.loads(metadata) if metadata else None
-    if start_workflows:
-        if workflow_definition_id is None:
-            raise Exception("workflow_definition_id is required when start_workflows is true")  # noqa: TRY002
-        if param_set_id is None:
-            raise Exception("param_set_id is required when start_workflows is true")  # noqa: TRY002
     print(f"loading URLs from {urls_file} source={source}")
     try:
         res = asyncio.run(
@@ -256,10 +231,6 @@ def run_from_urls(
                 source,
                 start,
                 end,
-                workflow_definition_id=workflow_definition_id,
-                param_set_id=param_set_id,
-                start_workflows=start_workflows,
-                priority=priority,
                 webdav_url=webdav_url,
                 webdav_username=webdav_username,
                 webdav_password=webdav_password,
@@ -287,9 +258,6 @@ def run_from_urls(
                 print(f"{len(res['ingested'])} ingested")
             else:
                 print("no ingested files")
-            if start_workflows:
-                print("workflow result")
-                print(json.dumps(res["workflow_result"], indent=2))
 
 
 if __name__ == "__main__":

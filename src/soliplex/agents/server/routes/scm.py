@@ -96,17 +96,13 @@ async def run_inventory(
     scm: SCM = Form(..., description="SCM provider (github/gitea)"),
     repo_name: str = Form(..., description="Repository name"),
     owner: str = Form(..., description="Repository owner"),
-    start_workflows: bool = Form(True, description="Start workflows after ingestion"),
-    workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
-    param_set_id: str | None = Form(None, description="Parameter set ID"),
-    priority: int = Form(0, description="Workflow priority"),
     content_filter: ContentFilter = Form(ContentFilter.ALL, description="Content filter: all, files, issues"),
     metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
     Run ingestion from a SCM repository.
 
-    Ingests files, issues, or both from the repository based on content_filter.
+    Writes files, issues, or both from the repository based on content_filter.
     """
     try:
         import json
@@ -117,10 +113,6 @@ async def run_inventory(
             scm,
             repo_name,
             owner,
-            start_workflows=start_workflows,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            priority=priority,
             content_filter=content_filter,
             extra_metadata=extra_metadata,
         )
@@ -135,7 +127,6 @@ async def run_inventory(
             "ingested_count": len(result.get("ingested", [])),
             "error_count": len(result.get("errors", [])),
             "errors": result.get("errors", []),
-            "workflow_result": result.get("workflow_result"),
         }
     except Exception as e:
         logger.exception("Error running inventory for %s/%s", owner, repo_name)
@@ -148,17 +139,13 @@ async def run_incremental_sync(
     repo_name: str = Form(..., description="Repository name"),
     owner: str = Form(..., description="Repository owner"),
     branch: str = Form("main", description="Branch to sync"),
-    start_workflows: bool = Form(True, description="Start workflows after ingestion"),
-    workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
-    param_set_id: str | None = Form(None, description="Parameter set ID"),
-    priority: int = Form(0, description="Workflow priority"),
     content_filter: ContentFilter = Form(ContentFilter.ALL, description="Content filter: all, files, issues"),
     metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
     Run incremental sync from a SCM repository.
 
-    Only fetches and processes content that changed since last sync.
+    Only fetches and writes content that changed since last sync.
     Falls back to full sync if no sync state exists.
     """
     try:
@@ -171,10 +158,6 @@ async def run_incremental_sync(
             repo_name,
             owner,
             branch=branch,
-            start_workflows=start_workflows,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            priority=priority,
             content_filter=content_filter,
             extra_metadata=extra_metadata,
         )
@@ -198,7 +181,6 @@ async def run_incremental_sync(
             "ingested": result.get("ingested", []),
             "error_count": len(result.get("errors", [])),
             "errors": result.get("errors", []),
-            "workflow_result": result.get("workflow_result"),
             "new_commit_sha": result.get("new_commit_sha"),
         }
     except Exception as e:

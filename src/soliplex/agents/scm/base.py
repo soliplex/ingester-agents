@@ -219,7 +219,12 @@ class BaseSCMProvider(ABC):
         owner = owner or self.owner
         url_template = self.build_url("/repos/{owner}/{repo}/issues?page={page}&status=all")
         if since:
-            url_template += f"&since={since.isoformat()}Z"
+            # Gitea expects an RFC3339 timestamp. isoformat() on a tz-aware
+            # datetime emits a "+00:00" offset which, combined with a trailing
+            # "Z", is invalid; the unescaped "+" also decodes to a space
+            # server-side. Normalise to UTC and emit a single "Z".
+            since_utc = since if since.tzinfo is None else since.astimezone(datetime.UTC)
+            url_template += f"&since={since_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}"
         issues = await self.paginate(url_template, owner, repo)
 
         if add_comments:

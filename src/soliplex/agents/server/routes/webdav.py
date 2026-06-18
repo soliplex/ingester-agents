@@ -77,11 +77,11 @@ async def check_status(
     against the Ingester database to identify new or modified files.
     """
     try:
-        from soliplex.agents import client
+        from soliplex.agents import local_state
 
         pwd = webdav_password.get_secret_value() if webdav_password else None
-        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, pwd)
-        to_process = await client.check_status(config, source)
+        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, pwd, source=source)
+        to_process = local_state.compute_to_process(config, source)
 
         result = {
             "status": "ok",
@@ -109,10 +109,6 @@ async def run_inventory(
     source: str = Form(..., description="Source name"),
     start: int = Form(0, description="Start index"),
     end: int | None = Form(None, description="End index"),
-    start_workflows: bool = Form(True, description="Start workflows after ingestion"),
-    workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
-    param_set_id: str | None = Form(None, description="Parameter set ID"),
-    priority: int = Form(0, description="Workflow priority"),
     webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
     webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
     webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
@@ -121,7 +117,7 @@ async def run_inventory(
     """
     Run document ingestion from an inventory.
 
-    Scans the specified WebDAV directory recursively and ingests discovered files.
+    Scans the specified WebDAV directory recursively and writes discovered files.
     """
     try:
         pwd = webdav_password.get_secret_value() if webdav_password else None
@@ -131,10 +127,6 @@ async def run_inventory(
             source,
             start,
             end,
-            workflow_definition_id=workflow_definition_id,
-            param_set_id=param_set_id,
-            start_workflows=start_workflows,
-            priority=priority,
             webdav_url=webdav_url,
             webdav_username=webdav_username,
             webdav_password=pwd,
@@ -147,9 +139,7 @@ async def run_inventory(
             "to_process_count": len(result.get("to_process", [])),
             "ingested_count": len(result.get("ingested", [])),
             "error_count": len(result.get("errors", [])),
-            "batch_id": result.get("batch_id"),
             "errors": result.get("errors", []),
-            "workflow_result": result.get("workflow_result"),
         }
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
@@ -163,10 +153,6 @@ async def run_from_file(
     source: str = Form(..., description="Source name"),
     start: int = Form(0, description="Start index"),
     end: int | None = Form(None, description="End index"),
-    start_workflows: bool = Form(True, description="Start workflows after ingestion"),
-    workflow_definition_id: str | None = Form(None, description="Workflow definition ID"),
-    param_set_id: str | None = Form(None, description="Parameter set ID"),
-    priority: int = Form(0, description="Workflow priority"),
     webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
     webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
     webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
@@ -175,7 +161,7 @@ async def run_from_file(
     """
     Run document ingestion from an uploaded URL list file.
 
-    Accepts a file upload containing WebDAV URLs (one per line) and ingests those specific files.
+    Accepts a file upload containing WebDAV URLs (one per line) and writes those specific files.
     """
     try:
         pwd = webdav_password.get_secret_value() if webdav_password else None
@@ -191,10 +177,6 @@ async def run_from_file(
                 source,
                 start,
                 end,
-                workflow_definition_id=workflow_definition_id,
-                param_set_id=param_set_id,
-                start_workflows=start_workflows,
-                priority=priority,
                 webdav_url=webdav_url,
                 webdav_username=webdav_username,
                 webdav_password=pwd,
@@ -209,9 +191,7 @@ async def run_from_file(
             "to_process_count": len(result.get("to_process", [])),
             "ingested_count": len(result.get("ingested", [])),
             "error_count": len(result.get("errors", [])),
-            "batch_id": result.get("batch_id"),
             "errors": result.get("errors", []),
-            "workflow_result": result.get("workflow_result"),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error running from file: {str(e)}") from e

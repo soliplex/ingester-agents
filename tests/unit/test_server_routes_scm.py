@@ -242,7 +242,6 @@ def test_run_inventory_github_success(client):
                 "to_process": [{"uri": "/owner/repo/doc.md"}],
                 "ingested": ["/owner/repo/doc.md"],
                 "errors": [],
-                "workflow_result": {"status": "started", "run_group_id": 123},
             }
         )
 
@@ -276,7 +275,6 @@ def test_run_inventory_gitea_success(client):
                 "to_process": [],
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -303,7 +301,6 @@ def test_run_inventory_with_errors(client):
                 "to_process": [{"uri": "/owner/repo/doc1.md"}, {"uri": "/owner/repo/doc2.md"}],
                 "ingested": ["/owner/repo/doc1.md"],
                 "errors": [{"uri": "/owner/repo/doc2.md", "error": "API rate limit exceeded"}],
-                "workflow_result": None,
             }
         )
 
@@ -332,7 +329,6 @@ def test_run_inventory_with_all_options(client):
                 "to_process": [],
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -342,20 +338,16 @@ def test_run_inventory_with_all_options(client):
                 "scm": "github",
                 "repo_name": "test-repo",
                 "owner": "test-owner",
-                "start_workflows": "false",
-                "workflow_definition_id": "wf-custom",
-                "param_set_id": "params-custom",
-                "priority": "10",
+                "content_filter": "files",
+                "metadata": '{"team": "docs"}',
             },
         )
 
         assert response.status_code == 200
         mock_scm_app.load_inventory.assert_called_once()
         call_kwargs = mock_scm_app.load_inventory.call_args[1]
-        assert call_kwargs["start_workflows"] is False
-        assert call_kwargs["workflow_definition_id"] == "wf-custom"
-        assert call_kwargs["param_set_id"] == "params-custom"
-        assert call_kwargs["priority"] == 10
+        assert call_kwargs["content_filter"] == "files"
+        assert call_kwargs["extra_metadata"] == {"team": "docs"}
 
 
 def test_run_inventory_nothing_to_process(client):
@@ -367,7 +359,6 @@ def test_run_inventory_nothing_to_process(client):
                 "to_process": [],
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -435,7 +426,6 @@ def test_incremental_sync_github_success(client):
                 "files_removed": 1,
                 "ingested": ["/owner/repo/doc.md", "/owner/repo/guide.md"],
                 "errors": [],
-                "workflow_result": {"status": "started", "run_group_id": 456},
                 "new_commit_sha": "abc123def456",
             }
         )
@@ -475,7 +465,6 @@ def test_incremental_sync_gitea_success(client):
                 "files_removed": 0,
                 "ingested": ["/admin/repo/config.md"],
                 "errors": [],
-                "workflow_result": None,
                 "new_commit_sha": "xyz789",
             }
         )
@@ -536,7 +525,6 @@ def test_incremental_sync_with_errors(client):
                 "files_removed": 0,
                 "ingested": ["/owner/repo/doc1.md"],
                 "errors": [{"uri": "/owner/repo/doc2.md", "error": "API error"}],
-                "workflow_result": None,
                 "new_commit_sha": "abc123",
             }
         )
@@ -591,7 +579,6 @@ def test_incremental_sync_with_all_options(client):
                 "files_removed": 0,
                 "ingested": ["/owner/repo/doc.md"],
                 "errors": [],
-                "workflow_result": {"status": "started"},
                 "new_commit_sha": "abc123",
             }
         )
@@ -603,10 +590,8 @@ def test_incremental_sync_with_all_options(client):
                 "repo_name": "test-repo",
                 "owner": "test-owner",
                 "branch": "feature-branch",
-                "start_workflows": "false",
-                "workflow_definition_id": "wf-custom",
-                "param_set_id": "params-custom",
-                "priority": "5",
+                "content_filter": "files",
+                "metadata": '{"team": "docs"}',
             },
         )
 
@@ -614,10 +599,8 @@ def test_incremental_sync_with_all_options(client):
         mock_scm_app.incremental_sync.assert_called_once()
         call_kwargs = mock_scm_app.incremental_sync.call_args[1]
         assert call_kwargs["branch"] == "feature-branch"
-        assert call_kwargs["start_workflows"] is False
-        assert call_kwargs["workflow_definition_id"] == "wf-custom"
-        assert call_kwargs["param_set_id"] == "params-custom"
-        assert call_kwargs["priority"] == 5
+        assert call_kwargs["content_filter"] == "files"
+        assert call_kwargs["extra_metadata"] == {"team": "docs"}
 
 
 def test_incremental_sync_falls_back_to_full_sync(client):
@@ -631,7 +614,6 @@ def test_incremental_sync_falls_back_to_full_sync(client):
                 "to_process": [{"uri": "/owner/repo/doc.md"}],
                 "ingested": ["/owner/repo/doc.md"],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 

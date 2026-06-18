@@ -25,12 +25,15 @@ dependencies = [
     "fastapi>=0.115.0",
     "fastapi-crons>=2.1.1",
     "jinja2>=3.1.6",
+    "logfire[fastapi]",
     "pydantic-settings>=2.12.0",
     "python-multipart>=0.0.20",
     "tenacity>=9.0.0",
     "typer>=0.21.1",
     "uvicorn[standard]>=0.34.0",
     "pyyaml>=6.0",
+    "haiku-rag[ingester]>=0.55.1",
+    "pypdfium2>=4.0",
 ]
 
 
@@ -58,8 +61,8 @@ module-name = "soliplex.agents"
 
 [tool.uv]
 # 2-week cooldown: don't resolve packages newer than this date.
-exclude-newer = "2 weeks"
-exclude-newer-package = { starlette = "1 hour"  }
+exclude-newer = "1 weeks"
+exclude-newer-package = {haiku-rag = false, haiku-rag-slim = false, haiku-skills=false ,pydantic-ai-slim=false, pydantic-graph=false,  torch=false, torchvision=false, "soliplex-agents"=false }
 
 [project.scripts]
 si-agent = "soliplex.agents.cli:cli"
@@ -70,7 +73,6 @@ scm_auth_username="gitea_admin"
 scm_auth_password="test_password"
 scm_base_url="http://localhost:3000/api/v1"
 LOG_LEVEL="INFO"
-INGESTER_URL="http://localhost:8000/ingest_document"
 
 
 

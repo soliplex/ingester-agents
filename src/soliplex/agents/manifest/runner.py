@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from soliplex.agents import client
+from soliplex.agents import local_state
 from soliplex.agents.config import FSComponent
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import SCMComponent
@@ -117,24 +117,7 @@ def override_settings(**kwargs):
             object.__setattr__(settings, key, value)
 
 
-def _resolve_workflow_params(manifest: Manifest) -> dict:
-    """Extract workflow params from manifest config."""
-    if manifest.config is None:
-        return {
-            "start_workflows": False,
-            "workflow_definition_id": None,
-            "param_set_id": None,
-            "priority": 0,
-        }
-    return {
-        "start_workflows": manifest.config.start_workflows,
-        "workflow_definition_id": manifest.config.workflow_definition_id,
-        "param_set_id": manifest.config.param_set_id,
-        "priority": manifest.config.priority,
-    }
-
-
-async def _run_fs_component(component: FSComponent, manifest: Manifest, wf_params: dict, metadata: dict) -> dict:
+async def _run_fs_component(component: FSComponent, manifest: Manifest, metadata: dict) -> dict:
     """Dispatch an FSComponent to the filesystem agent."""
     from soliplex.agents.fs import app as fs_app
 
@@ -147,11 +130,10 @@ async def _run_fs_component(component: FSComponent, manifest: Manifest, wf_param
             component.path,
             manifest.source,
             extra_metadata=metadata or None,
-            **wf_params,
         )
 
 
-async def _run_scm_component(component: SCMComponent, manifest: Manifest, wf_params: dict, metadata: dict) -> dict:
+async def _run_scm_component(component: SCMComponent, manifest: Manifest, metadata: dict) -> dict:
     """Dispatch an SCMComponent to the SCM agent."""
     from soliplex.agents.scm import app as scm_app
 
@@ -176,7 +158,6 @@ async def _run_scm_component(component: SCMComponent, manifest: Manifest, wf_par
                 content_filter=component.content_filter,
                 extra_metadata=metadata or None,
                 source=manifest.source,
-                **wf_params,
             )
         else:
             return await scm_app.load_inventory(
@@ -186,11 +167,10 @@ async def _run_scm_component(component: SCMComponent, manifest: Manifest, wf_par
                 content_filter=component.content_filter,
                 extra_metadata=metadata or None,
                 source=manifest.source,
-                **wf_params,
             )
 
 
-async def _run_webdav_component(component: WebDAVComponent, manifest: Manifest, wf_params: dict, metadata: dict) -> dict:
+async def _run_webdav_component(component: WebDAVComponent, manifest: Manifest, metadata: dict) -> dict:
     """Dispatch a WebDAVComponent to the WebDAV agent."""
     from soliplex.agents.webdav import app as webdav_app
 
@@ -217,7 +197,6 @@ async def _run_webdav_component(component: WebDAVComponent, manifest: Manifest, 
                 webdav_password=password,
                 extra_metadata=metadata or None,
                 base_dir=manifest.manifest_dir,
-                **wf_params,
             )
         elif component.urls:
             # Write URLs to a temp file and use load_inventory_from_urls
@@ -232,7 +211,6 @@ async def _run_webdav_component(component: WebDAVComponent, manifest: Manifest, 
                     webdav_username=username,
                     webdav_password=password,
                     extra_metadata=metadata or None,
-                    **wf_params,
                 )
             finally:
                 Path(tmp_path).unlink(missing_ok=True)
@@ -244,11 +222,10 @@ async def _run_webdav_component(component: WebDAVComponent, manifest: Manifest, 
                 webdav_username=username,
                 webdav_password=password,
                 extra_metadata=metadata or None,
-                **wf_params,
             )
 
 
-async def _run_web_component(component: WebComponent, manifest: Manifest, wf_params: dict, metadata: dict) -> dict:
+async def _run_web_component(component: WebComponent, manifest: Manifest, metadata: dict) -> dict:
     """Dispatch a WebComponent to the web agent."""
     from soliplex.agents.web import app as web_app
 
@@ -262,7 +239,6 @@ async def _run_web_component(component: WebComponent, manifest: Manifest, wf_par
         resolved,
         manifest.source,
         extra_metadata=metadata or None,
-        **wf_params,
     )
 
 
@@ -312,7 +288,7 @@ def collect_inventory_uris(result: dict[str, Any]) -> list[dict[str, str]]:
     Each agent returns an ``inventory`` list whose items use either
     ``uri`` (SCM) or ``path`` (fs, webdav, web) as the identifier key.
     This helper normalises both into ``{"uri": ..., "sha256": ...}``
-    dicts suitable for ``client.check_status()``.
+    dicts suitable for stale-document pruning.
 
     Args:
         result: The dict returned by a component handler.
@@ -334,9 +310,10 @@ async def run_manifest(manifest: Manifest) -> dict:
 
     After every component has executed, if ``delete_stale`` is enabled
     in the manifest config **and** no component produced an error, a
-    consolidated ``check_status`` call with ``delete_stale=True`` is
-    made so the Ingester can remove documents whose URI no longer
-    appears in any component.
+    consolidated prune removes documents whose URI no longer appears in
+    any component. Because every component in a manifest shares one
+    ``source`` (and thus one download folder and state DB), pruning must
+    happen once over the union of all component URIs, never per component.
 
     Args:
         manifest: Validated Manifest instance.
@@ -346,7 +323,6 @@ async def run_manifest(manifest: Manifest) -> dict:
         and optional delete_stale result.
     """
     logger.info("Starting manifest '%s' (%s) with %d components", manifest.id, manifest.name, len(manifest.components))
-    wf_params = _resolve_workflow_params(manifest)
     results: list[dict[str, Any]] = []
     all_uri_hashes: list[dict[str, str]] = []
     has_errors = False
@@ -362,7 +338,7 @@ async def run_manifest(manifest: Manifest) -> dict:
             has_errors = True
             continue
         try:
-            result = await handler(component, manifest, wf_params, metadata)
+            result = await handler(component, manifest, metadata)
             # Skip URI collection for incremental SCM — handled below
             if isinstance(component, SCMComponent) and component.incremental:
                 incremental_scm_components.append(component)
@@ -390,11 +366,8 @@ async def run_manifest(manifest: Manifest) -> dict:
                 manifest.source,
             )
         else:
-            delete_stale_result = await client.check_status(
-                all_uri_hashes,
-                manifest.source,
-                delete_stale=True,
-            )
+            current_uris = {item["uri"] for item in all_uri_hashes}
+            delete_stale_result = local_state.prune_documents(manifest.source, current_uris)
 
     error_count = sum(1 for r in results if "error" in r)
     logger.info(
@@ -412,11 +385,15 @@ async def run_manifest(manifest: Manifest) -> dict:
     }
 
 
-async def run_manifests(path: str) -> list[dict]:
+async def run_manifests(path: str, load: bool = False) -> list[dict]:
     """Load and run manifests from a file or directory.
+
+    When *load* is true, a haiku-rag batch load runs (awaited) after each
+    manifest. The sequential loop guarantees only one load runs at a time.
 
     Args:
         path: Path to a single YAML file or directory of YAML files.
+        load: Run a haiku-rag load after each manifest.
 
     Returns:
         List of per-manifest result dicts.
@@ -435,5 +412,9 @@ async def run_manifests(path: str) -> list[dict]:
     results = []
     for manifest in manifests:
         result = await run_manifest(manifest)
+        if load:
+            from soliplex.agents.manifest import haiku_loader
+
+            result["haiku_load"] = await haiku_loader.run_load(manifest)
         results.append(result)
     return results

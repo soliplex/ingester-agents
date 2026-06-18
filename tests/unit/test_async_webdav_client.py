@@ -311,16 +311,15 @@ class TestClientLifecycle:
             max_concurrent=2,
         )
         assert client._base_url == "https://example.com/dav"
-        assert client._auth is not None
-        assert client._auth.login == "user"
-        assert client._headers == {"X-Custom": "val"}
+        assert client._headers["Authorization"] == aiohttp.encode_basic_auth("user", "pass")
+        assert client._headers["X-Custom"] == "val"
         assert client._ssl is False
         assert client._max_retries == 5
         assert client._max_concurrent == 2
 
     def test_init_defaults(self):
         client = AsyncWebDAVClient(base_url="https://example.com")
-        assert client._auth is None
+        assert "Authorization" not in client._headers
         assert client._headers == {}
         assert client._ssl is None
         assert client._max_retries == 3
@@ -905,6 +904,15 @@ class TestHead:
         assert result.headers.get("etag") == '"xyz789"'
 
     @pytest.mark.asyncio
+    async def test_head_etag_lookup_is_case_insensitive(self):
+        # Real servers send "ETag" (capitalised); the lowercase lookup in
+        # build_config/do_ingest must still find it, else ETag caching breaks.
+        client, session = _make_client()
+        session.request = AsyncMock(return_value=_mock_response(200, headers={"ETag": '"cap123"'}))
+        result = await client.head("/file.txt")
+        assert result.headers.get("etag") == '"cap123"'
+
+    @pytest.mark.asyncio
     async def test_head_follows_redirects(self):
         client, session = _make_client()
         session.request = AsyncMock(return_value=_mock_response(200, headers={}))
@@ -958,8 +966,7 @@ class TestFactory:
             password="pass",
         )
         assert client._base_url == "https://dav.example.com"
-        assert client._auth is not None
-        assert client._auth.login == "user"
+        assert client._headers["Authorization"] == aiohttp.encode_basic_auth("user", "pass")
         assert client._max_concurrent == 5
 
     @patch("soliplex.agents.webdav.async_client.settings")
@@ -972,7 +979,7 @@ class TestFactory:
         mock_settings.webdav_max_concurrent_requests = 3
         client = create_async_webdav_client()
         assert client._base_url == "https://dav.example.com"
-        assert client._auth is not None
+        assert "Authorization" in client._headers
 
     @patch("soliplex.agents.webdav.async_client.settings")
     def test_factory_no_url_raises_value_error(self, mock_settings):
@@ -988,7 +995,7 @@ class TestFactory:
         mock_settings.ssl_verify = True
         mock_settings.webdav_max_concurrent_requests = 3
         client = create_async_webdav_client()
-        assert client._auth is None  # need both username and password
+        assert "Authorization" not in client._headers  # need both username and password
 
     @patch("soliplex.agents.webdav.async_client.settings")
     def test_factory_ssl_verify_false(self, mock_settings):

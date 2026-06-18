@@ -229,39 +229,6 @@ def _raise_inside_override():
         raise RuntimeError("boom")
 
 
-# --- _resolve_workflow_params ---
-
-
-class TestResolveWorkflowParams:
-    def test_no_config(self):
-        m = Manifest(id="t", name="t", source="s", components=[{"type": "fs", "name": "c", "path": "/p"}])
-        params = runner._resolve_workflow_params(m)
-        assert params["start_workflows"] is False
-        assert params["workflow_definition_id"] is None
-        assert params["param_set_id"] is None
-        assert params["priority"] == 0
-
-    def test_with_config(self):
-        m = Manifest(
-            id="t",
-            name="t",
-            source="s",
-            config={
-                "start_workflows": True,
-                "workflow_definition_id": "wf1",
-                "param_set_id": "ps1",
-                "priority": 5,
-                "delete_stale": False,
-            },
-            components=[{"type": "fs", "name": "c", "path": "/p"}],
-        )
-        params = runner._resolve_workflow_params(m)
-        assert params["start_workflows"] is True
-        assert params["workflow_definition_id"] == "wf1"
-        assert params["param_set_id"] == "ps1"
-        assert params["priority"] == 5
-
-
 # --- run_manifest ---
 
 
@@ -423,7 +390,7 @@ class TestRunFSComponent:
         component = manifest.components[0]
         with patch("soliplex.agents.fs.app.load_inventory", new_callable=AsyncMock) as mock:
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_fs_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            await runner._run_fs_component(component, manifest, {})
             mock.assert_called_once()
             call_kwargs = mock.call_args
             assert call_kwargs[0][0] == "/p"
@@ -441,7 +408,7 @@ class TestRunFSComponent:
         original_ext = settings.extensions[:]
         with patch("soliplex.agents.fs.app.load_inventory", new_callable=AsyncMock) as mock:
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_fs_component(component, manifest, runner._resolve_workflow_params(manifest), {"k": "v"})
+            await runner._run_fs_component(component, manifest, {"k": "v"})
             mock.assert_called_once()
         assert settings.extensions == original_ext
 
@@ -456,7 +423,7 @@ class TestRunFSComponent:
         component = manifest.components[0]
         with patch("soliplex.agents.fs.app.load_inventory", new_callable=AsyncMock) as mock:
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_fs_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            await runner._run_fs_component(component, manifest, {})
             assert mock.call_args.kwargs["extra_metadata"] is None
 
 
@@ -474,7 +441,7 @@ class TestRunSCMComponent:
         component = manifest.components[0]
         with patch("soliplex.agents.scm.app.load_inventory", new_callable=AsyncMock) as mock:
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_scm_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            await runner._run_scm_component(component, manifest, {})
             mock.assert_called_once()
 
     @pytest.mark.asyncio
@@ -502,7 +469,7 @@ class TestRunSCMComponent:
             patch("soliplex.agents.manifest.runner.resolve_credential", return_value="secret123"),
         ):
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_scm_component(component, manifest, runner._resolve_workflow_params(manifest), {"k": "v"})
+            await runner._run_scm_component(component, manifest, {"k": "v"})
             mock.assert_called_once()
 
     @pytest.mark.asyncio
@@ -520,7 +487,7 @@ class TestRunSCMComponent:
         original_ext = settings.extensions[:]
         with patch("soliplex.agents.scm.app.load_inventory", new_callable=AsyncMock) as mock:
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_scm_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            await runner._run_scm_component(component, manifest, {})
         assert settings.extensions == original_ext
 
 
@@ -536,7 +503,7 @@ class TestRunWebDAVComponent:
         component = manifest.components[0]
         with patch("soliplex.agents.webdav.app.load_inventory", new_callable=AsyncMock) as mock:
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_webdav_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            await runner._run_webdav_component(component, manifest, {})
             mock.assert_called_once()
             assert mock.call_args.kwargs["webdav_url"] == "http://dav"
 
@@ -551,7 +518,7 @@ class TestRunWebDAVComponent:
         component = manifest.components[0]
         with patch("soliplex.agents.webdav.app.load_inventory_from_urls", new_callable=AsyncMock) as mock:
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_webdav_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            await runner._run_webdav_component(component, manifest, {})
             mock.assert_called_once()
 
     @pytest.mark.asyncio
@@ -566,7 +533,7 @@ class TestRunWebDAVComponent:
         component = manifest.components[0]
         with patch("soliplex.agents.webdav.app.load_inventory_from_urls", new_callable=AsyncMock) as mock:
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_webdav_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            await runner._run_webdav_component(component, manifest, {})
             assert mock.call_args.kwargs["base_dir"] == "/manifests"
 
     @pytest.mark.asyncio
@@ -582,7 +549,7 @@ class TestRunWebDAVComponent:
         component = manifest.components[0]
         with patch("soliplex.agents.webdav.app.load_inventory_from_urls", new_callable=AsyncMock) as mock:
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_webdav_component(component, manifest, runner._resolve_workflow_params(manifest), {"k": "v"})
+            await runner._run_webdav_component(component, manifest, {"k": "v"})
             mock.assert_called_once()
 
     @pytest.mark.asyncio
@@ -608,7 +575,7 @@ class TestRunWebDAVComponent:
             patch("soliplex.agents.manifest.runner.resolve_credential", side_effect=["user1", "pass1"]),
         ):
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_webdav_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            await runner._run_webdav_component(component, manifest, {})
             assert mock.call_args.kwargs["webdav_username"] == "user1"
             assert mock.call_args.kwargs["webdav_password"] == "pass1"
 
@@ -625,7 +592,7 @@ class TestRunWebDAVComponent:
         original_ext = settings.extensions[:]
         with patch("soliplex.agents.webdav.app.load_inventory", new_callable=AsyncMock) as mock:
             mock.return_value = {"ingested": [], "errors": []}
-            await runner._run_webdav_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            await runner._run_webdav_component(component, manifest, {})
         assert settings.extensions == original_ext
 
 
@@ -645,7 +612,7 @@ class TestRunWebComponent:
         ):
             mock_resolve.return_value = ["http://example.com"]
             mock_load.return_value = {"ingested": [], "errors": []}
-            await runner._run_web_component(component, manifest, runner._resolve_workflow_params(manifest), {"k": "v"})
+            await runner._run_web_component(component, manifest, {"k": "v"})
             mock_resolve.assert_called_once()
             mock_load.assert_called_once()
 
@@ -665,7 +632,7 @@ class TestRunWebComponent:
         ):
             mock_resolve.return_value = ["http://example.com"]
             mock_load.return_value = {"ingested": [], "errors": []}
-            await runner._run_web_component(component, manifest, runner._resolve_workflow_params(manifest), {})
+            await runner._run_web_component(component, manifest, {})
             assert mock_resolve.call_args.kwargs["base_dir"] == "/manifests"
 
 
@@ -710,6 +677,33 @@ class TestRunManifests:
             mock.return_value = {"manifest_id": "x", "results": []}
             results = await runner.run_manifests(str(tmp_path))
         assert len(results) == 2
+
+    @pytest.mark.asyncio
+    async def test_load_triggers_haiku_load(self, tmp_path):
+        f = tmp_path / "test.yml"
+        f.write_text(
+            textwrap.dedent("""\
+            id: test
+            name: Test
+            source: src
+            components:
+              - type: fs
+                name: c
+                path: /data
+        """)
+        )
+        with (
+            patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run,
+            patch(
+                "soliplex.agents.manifest.haiku_loader.run_load",
+                new_callable=AsyncMock,
+            ) as mock_load,
+        ):
+            mock_run.return_value = {"manifest_id": "test", "results": []}
+            mock_load.return_value = {"source": "src", "returncode": 0}
+            results = await runner.run_manifests(str(f), load=True)
+        mock_load.assert_awaited_once()
+        assert results[0]["haiku_load"] == {"source": "src", "returncode": 0}
 
     @pytest.mark.asyncio
     async def test_nonexistent_path(self):
@@ -798,20 +792,16 @@ class TestRunManifestDeleteStale:
 
         with (
             patch.dict(runner._DISPATCH, {FSComponent: mock_fs, WebComponent: mock_web}),
-            patch("soliplex.agents.manifest.runner.client.check_status", new_callable=AsyncMock) as mock_check,
+            patch("soliplex.agents.manifest.runner.local_state.prune_documents") as mock_check,
         ):
             mock_check.return_value = []
             result = await runner.run_manifest(delete_stale_manifest)
 
-        # check_status called with consolidated URIs and delete_stale=True
+        # prune_documents called once with the source and consolidated URI set
         mock_check.assert_called_once()
         call_args = mock_check.call_args
-        uri_hashes = call_args[0][0]
-        assert len(uri_hashes) == 2
-        uris = {item["uri"] for item in uri_hashes}
-        assert uris == {"a.md", "http://example.com"}
-        assert call_args[0][1] == "ds-src"
-        assert call_args[1]["delete_stale"] is True
+        assert call_args[0][0] == "ds-src"
+        assert call_args[0][1] == {"a.md", "http://example.com"}
         assert result["delete_stale_result"] == []
 
     @pytest.mark.asyncio
@@ -821,7 +811,7 @@ class TestRunManifestDeleteStale:
 
         with (
             patch.dict(runner._DISPATCH, {FSComponent: mock_fs, WebComponent: mock_web}),
-            patch("soliplex.agents.manifest.runner.client.check_status", new_callable=AsyncMock) as mock_check,
+            patch("soliplex.agents.manifest.runner.local_state.prune_documents") as mock_check,
             caplog.at_level(logging.WARNING),
         ):
             result = await runner.run_manifest(delete_stale_manifest)
@@ -842,7 +832,7 @@ class TestRunManifestDeleteStale:
         m.components[0] = MagicMock(name="fake")
         m.components[0].name = "unknown"
 
-        with patch("soliplex.agents.manifest.runner.client.check_status", new_callable=AsyncMock) as mock_check:
+        with patch("soliplex.agents.manifest.runner.local_state.prune_documents") as mock_check:
             result = await runner.run_manifest(m)
 
         mock_check.assert_not_called()
@@ -860,7 +850,7 @@ class TestRunManifestDeleteStale:
 
         with (
             patch.dict(runner._DISPATCH, {FSComponent: mock_handler}),
-            patch("soliplex.agents.manifest.runner.client.check_status", new_callable=AsyncMock) as mock_check,
+            patch("soliplex.agents.manifest.runner.local_state.prune_documents") as mock_check,
         ):
             result = await runner.run_manifest(m)
 
@@ -880,7 +870,7 @@ class TestRunManifestDeleteStale:
 
         with (
             patch.dict(runner._DISPATCH, {FSComponent: mock_handler}),
-            patch("soliplex.agents.manifest.runner.client.check_status", new_callable=AsyncMock) as mock_check,
+            patch("soliplex.agents.manifest.runner.local_state.prune_documents") as mock_check,
         ):
             result = await runner.run_manifest(m)
 
@@ -922,7 +912,6 @@ class TestSCMSourcePassthrough:
             await runner._run_scm_component(
                 component,
                 manifest,
-                runner._resolve_workflow_params(manifest),
                 {},
             )
             assert mock.call_args.kwargs["source"] == "my-manifest-source"
@@ -954,7 +943,6 @@ class TestSCMSourcePassthrough:
             await runner._run_scm_component(
                 component,
                 manifest,
-                runner._resolve_workflow_params(manifest),
                 {},
             )
             assert mock.call_args.kwargs["source"] == "my-manifest-source"
@@ -1003,19 +991,16 @@ class TestIncrementalSCMDeleteStale:
                 return_value=full_uris,
             ) as mock_list,
             patch(
-                "soliplex.agents.manifest.runner.client.check_status",
-                new_callable=AsyncMock,
+                "soliplex.agents.manifest.runner.local_state.prune_documents",
                 return_value=[],
             ) as mock_check,
         ):
             await runner.run_manifest(m)
 
         mock_list.assert_called_once_with(m.components[0], m)
-        # check_status uses full URIs from list_all_uris, not the partial inventory
-        uri_hashes = mock_check.call_args[0][0]
-        uris = {item["uri"] for item in uri_hashes}
-        assert uris == {"file1.md", "file2.md"}
-        assert mock_check.call_args[1]["delete_stale"] is True
+        # prune uses full URIs from list_all_uris, not the partial inventory
+        assert mock_check.call_args[0][0] == "s"
+        assert mock_check.call_args[0][1] == {"file1.md", "file2.md"}
 
     @pytest.mark.asyncio
     async def test_incremental_scm_no_delete_stale_skips_list(self):
@@ -1075,8 +1060,7 @@ class TestIncrementalSCMDeleteStale:
                 new_callable=AsyncMock,
             ) as mock_list,
             patch(
-                "soliplex.agents.manifest.runner.client.check_status",
-                new_callable=AsyncMock,
+                "soliplex.agents.manifest.runner.local_state.prune_documents",
             ) as mock_check,
         ):
             await runner.run_manifest(m)
@@ -1119,17 +1103,14 @@ class TestIncrementalSCMDeleteStale:
                 return_value=full_scm_uris,
             ),
             patch(
-                "soliplex.agents.manifest.runner.client.check_status",
-                new_callable=AsyncMock,
+                "soliplex.agents.manifest.runner.local_state.prune_documents",
                 return_value=[],
             ) as mock_check,
         ):
             await runner.run_manifest(m)
 
-        uri_hashes = mock_check.call_args[0][0]
-        uris = {item["uri"] for item in uri_hashes}
         # FS inventory + full SCM listing (not partial incremental)
-        assert uris == {"local.md", "all1.md", "all2.md"}
+        assert mock_check.call_args[0][1] == {"local.md", "all1.md", "all2.md"}
 
 
 # --- _list_scm_all_uris ---

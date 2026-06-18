@@ -38,7 +38,6 @@ def test_run_inventory_success(client):
                 "batch_id": 42,
                 "ingested": [{"result": "success"}],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -57,7 +56,6 @@ def test_run_inventory_success(client):
         assert data["to_process_count"] == 1
         assert data["ingested_count"] == 1
         assert data["error_count"] == 0
-        assert data["batch_id"] == 42
 
 
 def test_run_inventory_with_errors(client):
@@ -70,7 +68,6 @@ def test_run_inventory_with_errors(client):
                 "batch_id": 42,
                 "ingested": [{"result": "success"}],
                 "errors": [{"uri": "http://b.com", "error": "fetch failed"}],
-                "workflow_result": None,
             }
         )
 
@@ -98,7 +95,6 @@ def test_run_inventory_with_all_options(client):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -107,10 +103,6 @@ def test_run_inventory_with_all_options(client):
             data={
                 "urls": json.dumps(["http://example.com"]),
                 "source": "web-test",
-                "start_workflows": "true",
-                "workflow_definition_id": "wf-1",
-                "param_set_id": "ps-1",
-                "priority": "5",
                 "metadata": json.dumps({"project": "test"}),
             },
         )
@@ -118,8 +110,6 @@ def test_run_inventory_with_all_options(client):
         assert response.status_code == 200
         mock_web_app.load_inventory.assert_called_once()
         call_kwargs = mock_web_app.load_inventory.call_args
-        assert call_kwargs.kwargs["start_workflows"] is True
-        assert call_kwargs.kwargs["workflow_definition_id"] == "wf-1"
         assert call_kwargs.kwargs["extra_metadata"] == {"project": "test"}
 
 
@@ -154,9 +144,7 @@ def test_run_inventory_urls_not_array(client):
 def test_run_inventory_value_error(client):
     """Test web inventory with validation error."""
     with patch("soliplex.agents.server.routes.web.web_app") as mock_web_app:
-        mock_web_app.load_inventory = AsyncMock(
-            side_effect=ValueError("start_workflows requires both workflow_definition_id and param_set_id")
-        )
+        mock_web_app.load_inventory = AsyncMock(side_effect=ValueError("invalid url list"))
 
         response = client.post(
             "/api/v1/web/run-inventory",
@@ -198,7 +186,6 @@ def test_run_from_file_success(client):
                 "batch_id": 42,
                 "ingested": [{"result": "success"}],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -244,7 +231,6 @@ def test_run_from_file_with_metadata(client):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 
@@ -273,7 +259,6 @@ def test_run_from_file_empty(client):
                 "batch_id": None,
                 "ingested": [],
                 "errors": [],
-                "workflow_result": None,
             }
         )
 

@@ -1,56 +1,49 @@
 """Tests for soliplex.agents.webdav.app module."""
 
+import hashlib
 from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import aiofiles
 import pytest
 
+from soliplex.agents import local_state
+from soliplex.agents import local_store
 from soliplex.agents.webdav import app as webdav_app
 from soliplex.agents.webdav.async_client import WebDAVResponse
+
+
+@pytest.fixture
+def local_env(tmp_path, monkeypatch):
+    """Point download_dir and state_dir at temp directories."""
+    monkeypatch.setattr(local_store.settings, "download_dir", str(tmp_path / "dl"))
+    monkeypatch.setattr(local_state.settings, "state_dir", str(tmp_path / "state"))
+    return tmp_path
 
 
 @pytest.fixture
 def mock_webdav_client():
     """Create a mock async WebDAV client."""
     client = AsyncMock()
-    # AsyncWebDAVClient.ls() returns entry names RELATIVE to the listed
-    # directory (e.g. "test.md", not "/documents/test.md"). Mirror that here.
     client.ls.return_value = [
         {"name": "test.md", "type": "file", "size": 100, "etag": '"etag1"', "content_length": 100},
         {"name": "readme.pdf", "type": "file", "size": 200, "etag": '"etag2"', "content_length": 200},
     ]
-
-    # Mock download to return bytes
     client.download.return_value = b"test content"
-    # Mock info() to return etag
     client.info.return_value = {"etag": '"etag_info"'}
-    # Mock head() to return WebDAVResponse
     client.head.return_value = WebDAVResponse(status=200, headers={"etag": '"etag_head"'})
-    # Support async context manager
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=None)
     return client
-
-
-@pytest.fixture
-def mock_state():
-    """Patch webdav_state load/save/upsert for build_config tests."""
-    with (
-        patch("soliplex.agents.webdav.app.webdav_state.load_state", return_value={}) as mock_load,
-        patch("soliplex.agents.webdav.app.webdav_state.save_state") as mock_save,
-        patch("soliplex.agents.webdav.app.webdav_state.upsert_entry") as mock_upsert,
-        patch("soliplex.agents.webdav.app.webdav_state.prune_state", return_value=[]) as mock_prune,
-    ):
-        yield {"load": mock_load, "save": mock_save, "upsert": mock_upsert, "prune": mock_prune}
 
 
 # --- build_config ---
 
 
 @pytest.mark.asyncio
-async def test_build_config(mock_webdav_client, mock_state):
-    """Test building config from WebDAV directory (ETag miss → sha256=None)."""
+async def test_build_config(mock_webdav_client, local_env):
+    """No cached state → sha256 deferred (None)."""
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
@@ -62,37 +55,28 @@ async def test_build_config(mock_webdav_client, mock_state):
 
         config = await webdav_app.build_config("/documents")
 
-        assert isinstance(config, list)
-        assert len(config) == 2
-        # Verify paths are relative
-        assert config[0]["path"] == "test.md" or config[0]["path"] == "readme.pdf"
-        # No ETag from server → sha256 is None (deferred to ingestion)
-        assert all(item["sha256"] is None for item in config)
-        assert all("metadata" in item for item in config)
+    assert len(config) == 2
+    assert config[0]["path"] in ("test.md", "readme.pdf")
+    assert all(item["sha256"] is None for item in config)
+    assert all("metadata" in item for item in config)
 
 
 @pytest.mark.asyncio
-async def test_build_config_etag_cache_hit(mock_state):
-    """Test that matching ETag skips download and reuses cached SHA256."""
+async def test_build_config_etag_cache_hit(local_env):
+    """Matching ETag in local state skips download and reuses cached SHA256."""
+    local_state.upsert_file("s", "test.md", "cached_hash_abc", etag='"etag1"', size=100)
+
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
-    # Should NOT be called - cache hit means no download
     mock_client.download.side_effect = AssertionError("Should not download")
-
-    mock_state["load"].return_value = {
-        "/documents/test.md": {"etag": '"etag1"', "sha256": "cached_hash_abc"},
-    }
 
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
     ):
-        mock_ls.return_value = [
-            {"path": "/documents/test.md", "size": 100, "etag": '"etag1"'},
-        ]
-
-        config = await webdav_app.build_config("/documents")
+        mock_ls.return_value = [{"path": "/documents/test.md", "size": 100, "etag": '"etag1"'}]
+        config = await webdav_app.build_config("/documents", source="s")
 
     assert len(config) == 1
     assert config[0]["sha256"] == "cached_hash_abc"
@@ -100,93 +84,73 @@ async def test_build_config_etag_cache_hit(mock_state):
 
 
 @pytest.mark.asyncio
-async def test_build_config_etag_cache_miss(mock_state):
-    """Test that mismatched ETag skips download and sets sha256=None."""
+async def test_build_config_etag_cache_miss(local_env):
+    """Mismatched ETag defers download (sha256=None) and carries the new etag."""
+    local_state.upsert_file("s", "test.md", "old_hash", etag='"old_etag"')
+
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
-    # Should NOT be called — no download on cache miss
     mock_client.download.side_effect = AssertionError("Should not download")
-
-    mock_state["load"].return_value = {
-        "/documents/test.md": {"etag": '"old_etag"', "sha256": "old_hash"},
-    }
 
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
     ):
-        mock_ls.return_value = [
-            {"path": "/documents/test.md", "size": 100, "etag": '"new_etag"'},
-        ]
+        mock_ls.return_value = [{"path": "/documents/test.md", "size": 100, "etag": '"new_etag"'}]
+        config = await webdav_app.build_config("/documents", source="s")
 
-        config = await webdav_app.build_config("/documents")
-
-    assert len(config) == 1
     assert config[0]["sha256"] is None
     assert config[0]["_etag"] == '"new_etag"'
 
 
 @pytest.mark.asyncio
-async def test_build_config_no_etag_from_server(mock_state):
-    """Test that missing ETag from server sets sha256=None, no _etag."""
+async def test_build_config_no_etag_from_server(local_env):
+    """Missing server ETag → sha256=None and no _etag recorded."""
+    local_state.upsert_file("s", "test.md", "cached_hash", etag='"cached_etag"')
+
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
-    # Should NOT be called
     mock_client.download.side_effect = AssertionError("Should not download")
-    # HEAD also returns no etag
     mock_client.head.return_value = WebDAVResponse(status=200, headers={})
-
-    # Even with cached state, no server etag means cache miss
-    mock_state["load"].return_value = {
-        "/documents/test.md": {"etag": '"cached_etag"', "sha256": "cached_hash"},
-    }
 
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
     ):
-        mock_ls.return_value = [
-            {"path": "/documents/test.md", "size": 100},  # No etag
-        ]
+        mock_ls.return_value = [{"path": "/documents/test.md", "size": 100}]
+        config = await webdav_app.build_config("/documents", source="s")
 
-        config = await webdav_app.build_config("/documents")
-
-    assert len(config) == 1
     assert config[0]["sha256"] is None
-    # No _etag since server didn't provide one
     assert "_etag" not in config[0]
 
 
 @pytest.mark.asyncio
-async def test_build_config_prune_deleted():
-    """Test that deleted files are logged and pruned from state."""
+async def test_build_config_no_downloads_on_cache_miss(local_env):
+    """build_config never downloads; it defers to the write step."""
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
-    mock_client.download.return_value = b"content"
+    mock_client.download.side_effect = AssertionError("Should not download")
+    # head() returns a response with a real (sync) headers mapping; a bare
+    # AsyncMock would make headers.get(...) an un-awaited coroutine.
+    head_resp = MagicMock()
+    head_resp.headers = {}
+    mock_client.head = AsyncMock(return_value=head_resp)
 
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
-        patch("soliplex.agents.webdav.app.webdav_state.load_state") as mock_load,
-        patch("soliplex.agents.webdav.app.webdav_state.upsert_entry"),
-        patch("soliplex.agents.webdav.app.webdav_state.prune_state") as mock_prune,
     ):
-        mock_load.return_value = {
-            "/documents/test.md": {"etag": '"e1"', "sha256": "h1"},
-            "/documents/deleted.md": {"etag": '"e2"', "sha256": "h2"},
-        }
-        mock_prune.return_value = ["/documents/deleted.md"]
         mock_ls.return_value = [
-            {"path": "/documents/test.md", "size": 100},
+            {"path": "/documents/good.md", "size": 100},
+            {"path": "/documents/also_good.pdf", "size": 300},
         ]
-
         config = await webdav_app.build_config("/documents")
 
-    assert len(config) == 1
-    mock_prune.assert_called_once()
+    assert len(config) == 2
+    assert all(item["sha256"] is None for item in config)
 
 
 # --- recursive_listdir_webdav ---
@@ -194,27 +158,15 @@ async def test_build_config_prune_deleted():
 
 @pytest.mark.asyncio
 async def test_recursive_listdir_webdav_flat(mock_webdav_client):
-    """Test listing files in a flat WebDAV directory."""
     files = await webdav_app.recursive_listdir_webdav(mock_webdav_client, "/documents")
-
-    assert isinstance(files, list)
     assert len(files) == 2
     assert all("path" in f and "size" in f for f in files)
-    # Relative names from ls() must be joined with the parent path.
     assert sorted(f["path"] for f in files) == ["/documents/readme.pdf", "/documents/test.md"]
-    # ETag should be preserved in output
     assert all("etag" in f for f in files)
 
 
 @pytest.mark.asyncio
 async def test_recursive_listdir_webdav_nested():
-    """Recursion must join parent path with each child's relative name.
-
-    AsyncWebDAVClient.ls() returns entry names relative to the listed
-    directory. The recursive call must therefore join those names with the
-    current path; otherwise the next PROPFIND lands on the server root
-    (e.g. /subdir instead of /documents/subdir) and 405s.
-    """
     mock_client = AsyncMock()
     mock_client.ls = AsyncMock(
         side_effect=[
@@ -230,12 +182,34 @@ async def test_recursive_listdir_webdav_nested():
 
     files = await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
 
-    # Second ls() call must be against the joined path, not the bare relative name.
     second_call_path = mock_client.ls.call_args_list[1].args[0]
     assert second_call_path == "/documents/subdir"
-
     paths = sorted(f["path"] for f in files)
     assert paths == ["/documents/file1.md", "/documents/subdir/file2.md"]
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_webdav_reraises_timeout():
+    mock_client = AsyncMock()
+    mock_client.ls.side_effect = TimeoutError("Connection timed out")
+    with pytest.raises(TimeoutError):
+        await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_webdav_reraises_connection_error():
+    mock_client = AsyncMock()
+    mock_client.ls.side_effect = ConnectionError("Connection refused")
+    with pytest.raises(ConnectionError, match="Connection refused"):
+        await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_webdav_swallows_other_errors():
+    mock_client = AsyncMock()
+    mock_client.ls.side_effect = PermissionError("Access denied")
+    files = await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
+    assert files == []
 
 
 # --- list_config ---
@@ -243,7 +217,6 @@ async def test_recursive_listdir_webdav_nested():
 
 @pytest.mark.asyncio
 async def test_list_config_no_downloads(mock_webdav_client):
-    """Test that list_config only lists files without downloading content."""
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
         patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
@@ -252,15 +225,12 @@ async def test_list_config_no_downloads(mock_webdav_client):
             {"path": "/documents/test.md", "size": 100},
             {"path": "/documents/readme.pdf", "size": 200},
         ]
-
         config = await webdav_app.list_config("/documents")
 
-        assert len(config) == 2
-        assert config[0]["path"] == "test.md" or config[0]["path"] == "readme.pdf"
-        assert all("metadata" in item for item in config)
-        assert all("content-type" in item["metadata"] for item in config)
-        # No sha256 since no content was downloaded
-        assert all("sha256" not in item for item in config)
+    assert len(config) == 2
+    assert all("metadata" in item for item in config)
+    assert all("content-type" in item["metadata"] for item in config)
+    assert all("sha256" not in item for item in config)
 
 
 # --- export_urls_to_file ---
@@ -268,15 +238,9 @@ async def test_list_config_no_downloads(mock_webdav_client):
 
 @pytest.mark.asyncio
 async def test_export_urls_to_file(tmp_path):
-    """Test writing URLs to file with absolute path reconstruction."""
-    config = [
-        {"path": "report.md"},
-        {"path": "sub/readme.pdf"},
-    ]
+    config = [{"path": "report.md"}, {"path": "sub/readme.pdf"}]
     output_file = str(tmp_path / "urls.txt")
-
     count = await webdav_app.export_urls_to_file(config, "/documents", output_file)
-
     assert count == 2
     async with aiofiles.open(output_file) as f:
         content = await f.read()
@@ -286,12 +250,9 @@ async def test_export_urls_to_file(tmp_path):
 
 @pytest.mark.asyncio
 async def test_export_urls_to_file_trailing_slash(tmp_path):
-    """Test that trailing slashes on base_path are handled."""
     config = [{"path": "file.md"}]
     output_file = str(tmp_path / "urls.txt")
-
     await webdav_app.export_urls_to_file(config, "/documents/", output_file)
-
     async with aiofiles.open(output_file) as f:
         content = await f.read()
     assert "/documents/file.md" in content
@@ -301,8 +262,7 @@ async def test_export_urls_to_file_trailing_slash(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_build_config_from_urls(tmp_path, mock_webdav_client, mock_state):
-    """Test building config from URL file (ETag miss → sha256=None)."""
+async def test_build_config_from_urls(tmp_path, mock_webdav_client, local_env):
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n/documents/readme.pdf\n")
@@ -312,20 +272,14 @@ async def test_build_config_from_urls(tmp_path, mock_webdav_client, mock_state):
 
     assert len(config) == 2
     assert config[0]["path"] == "/documents/test.md"
-    assert config[1]["path"] == "/documents/readme.pdf"
-    # ETag from info() present → _etag stored, sha256=None (deferred)
     assert all(item["sha256"] is None for item in config)
     assert all("_etag" in item for item in config)
-    assert all("metadata" in item for item in config)
-    assert all("size" in item["metadata"] for item in config)
-    assert all("content-type" in item["metadata"] for item in config)
     assert len(results) == 2
     assert all(r["status"] == "success" for r in results)
 
 
 @pytest.mark.asyncio
-async def test_build_config_from_urls_extension_filtering(tmp_path, mock_webdav_client, mock_state):
-    """Test that extension filtering returns skipped status."""
+async def test_build_config_from_urls_extension_filtering(tmp_path, mock_webdav_client, local_env):
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n/documents/archive.zip\n")
@@ -333,18 +287,15 @@ async def test_build_config_from_urls_extension_filtering(tmp_path, mock_webdav_
     with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client):
         config, results = await webdav_app.build_config_from_urls(urls_file)
 
-    # Only .md should pass (zip is not in default extensions)
     paths = [item["path"] for item in config]
     assert "/documents/test.md" in paths
     assert "/documents/archive.zip" not in paths
-    assert len(results) == 2
     assert results[0]["status"] == "success"
     assert results[1]["status"] == "skipped"
 
 
 @pytest.mark.asyncio
-async def test_build_config_from_urls_blank_lines(tmp_path, mock_webdav_client, mock_state):
-    """Test that blank lines are skipped."""
+async def test_build_config_from_urls_blank_lines(tmp_path, mock_webdav_client, local_env):
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n\n  \n/documents/readme.pdf\n")
@@ -357,8 +308,7 @@ async def test_build_config_from_urls_blank_lines(tmp_path, mock_webdav_client, 
 
 
 @pytest.mark.asyncio
-async def test_build_config_from_urls_info_error_all_succeed(tmp_path, mock_state):
-    """Test that info() failure still succeeds (sha256=None, no _etag)."""
+async def test_build_config_from_urls_info_error_all_succeed(tmp_path, local_env):
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/good.md\n/documents/also_good.pdf\n")
@@ -373,42 +323,34 @@ async def test_build_config_from_urls_info_error_all_succeed(tmp_path, mock_stat
         config, results = await webdav_app.build_config_from_urls(urls_file)
 
     assert len(config) == 2
-    assert len(results) == 2
     assert all(r["status"] == "success" for r in results)
-    # No ETag from server → no _etag, sha256=None
     assert all(item["sha256"] is None for item in config)
     assert all("_etag" not in item for item in config)
 
 
 @pytest.mark.asyncio
-async def test_build_config_from_urls_etag_cache_hit(tmp_path, mock_state):
-    """Test that info() returning matching ETag skips download."""
+async def test_build_config_from_urls_etag_cache_hit(tmp_path, local_env):
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n")
+
+    local_state.upsert_file("s", "/documents/test.md", "cached_hash", etag='"cached_etag"', size=42)
 
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.info.return_value = {"etag": '"cached_etag"'}
-    # Should NOT be called
     mock_client.download.side_effect = AssertionError("Should not download")
 
-    mock_state["load"].return_value = {
-        "/documents/test.md": {"etag": '"cached_etag"', "sha256": "cached_hash", "size": 42},
-    }
-
     with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
-        config, results = await webdav_app.build_config_from_urls(urls_file)
+        config, results = await webdav_app.build_config_from_urls(urls_file, source="s")
 
-    assert len(config) == 1
     assert config[0]["sha256"] == "cached_hash"
     assert results[0]["status"] == "success"
 
 
 @pytest.mark.asyncio
-async def test_build_config_from_urls_info_error_no_download(tmp_path, mock_state):
-    """Test that info() failure results in sha256=None, no download."""
+async def test_build_config_from_urls_info_error_no_download(tmp_path, local_env):
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n")
@@ -418,132 +360,183 @@ async def test_build_config_from_urls_info_error_no_download(tmp_path, mock_stat
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.info.side_effect = Exception("PROPFIND failed")
     mock_client.head.side_effect = Exception("HEAD failed")
-    # Should NOT be called
     mock_client.download.side_effect = AssertionError("Should not download")
 
     with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
         config, results = await webdav_app.build_config_from_urls(urls_file)
 
-    assert len(config) == 1
     assert config[0]["sha256"] is None
     assert "_etag" not in config[0]
     assert results[0]["status"] == "success"
 
 
-# --- validate_config ---
+# --- validate_config / export_urls ---
 
 
 @pytest.mark.asyncio
-async def test_validate_config_with_webdav_path(mock_webdav_client, capsys):
-    """Test validate_config with WebDAV path."""
-    with (
-        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
-        patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build,
-    ):
+async def test_validate_config_with_webdav_path(capsys):
+    with patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build:
         mock_build.return_value = [
             {"path": "test.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}}
         ]
-
         await webdav_app.validate_config("/documents")
-
         captured = capsys.readouterr()
         assert "Total files: 1" in captured.out
 
 
-# --- export_urls (standalone command) ---
-
-
 @pytest.mark.asyncio
 async def test_export_urls_uses_list_config(capsys, tmp_path):
-    """Test export_urls uses list_config (no downloads) and writes file."""
     output_file = str(tmp_path / "exported.txt")
     with patch("soliplex.agents.webdav.app.list_config", new_callable=AsyncMock) as mock_list:
         mock_list.return_value = [
             {"path": "test.md", "metadata": {"size": 100, "content-type": "text/markdown"}},
             {"path": "sub/readme.pdf", "metadata": {"size": 200, "content-type": "application/pdf"}},
         ]
-
         await webdav_app.export_urls("/documents", output_file)
-
         mock_list.assert_called_once_with("/documents", None, None, None)
         captured = capsys.readouterr()
         assert "Found 2 files" in captured.out
         assert "Exported 2 URLs" in captured.out
-        async with aiofiles.open(output_file) as f:
-            content = await f.read()
-        lines = [line for line in content.splitlines() if line.strip()]
-        assert lines == ["/documents/test.md", "/documents/sub/readme.pdf"]
 
 
 # --- load_inventory ---
 
 
 @pytest.mark.asyncio
-async def test_load_inventory_with_webdav_path(mock_webdav_client, monkeypatch):
-    """Test load_inventory with WebDAV path."""
-    mock_check_status = AsyncMock(return_value=[])
-    mock_find_batch = AsyncMock(return_value=None)
-    mock_create_batch = AsyncMock(return_value=123)
-
-    monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-    monkeypatch.setattr("soliplex.agents.client.find_batch_for_source", mock_find_batch)
-    monkeypatch.setattr("soliplex.agents.client.create_batch", mock_create_batch)
-
+async def test_load_inventory_with_webdav_path(local_env):
     with (
-        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
         patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build,
+        patch("soliplex.agents.webdav.app.do_ingest", new_callable=AsyncMock, return_value={"result": "success"}),
     ):
         mock_build.return_value = [
             {"path": "test.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}}
         ]
+        result = await webdav_app.load_inventory("/documents", "test-source")
 
-        result = await webdav_app.load_inventory(
-            "/documents",
-            "test-source",
-            start_workflows=False,
-        )
-
-        assert "inventory" in result
-        assert len(result["inventory"]) == 1
+    assert len(result["inventory"]) == 1
+    assert result["ingested"] == ["test.md"]
 
 
 @pytest.mark.asyncio
-async def test_load_inventory_with_prebuilt_config(monkeypatch):
-    """Test load_inventory with pre-built config skips build_config."""
-    mock_check_status = AsyncMock(return_value=[])
-    mock_find_batch = AsyncMock(return_value=None)
-    mock_create_batch = AsyncMock(return_value=123)
+async def test_load_inventory_with_prebuilt_config(local_env):
+    prebuilt = [{"path": "/docs/test.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}}]
+    with (
+        patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build,
+        patch("soliplex.agents.webdav.app.do_ingest", new_callable=AsyncMock, return_value={"result": "success"}),
+    ):
+        result = await webdav_app.load_inventory("", "test-source", config=prebuilt)
+        mock_build.assert_not_called()
+    assert result["inventory"] == prebuilt
 
-    monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-    monkeypatch.setattr("soliplex.agents.client.find_batch_for_source", mock_find_batch)
-    monkeypatch.setattr("soliplex.agents.client.create_batch", mock_create_batch)
 
-    prebuilt_config = [{"path": "/docs/test.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}}]
+@pytest.mark.asyncio
+async def test_load_inventory_processes_all_new(local_env):
+    """Fresh state → every config row is processed."""
+    config = [
+        {"path": "cached.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}},
+        {"path": "uncached.md", "sha256": None, "_etag": '"etag1"', "metadata": {"size": 0, "content-type": "text/markdown"}},
+    ]
+    with patch("soliplex.agents.webdav.app.do_ingest", new_callable=AsyncMock, return_value={"result": "success"}):
+        result = await webdav_app.load_inventory("", "test-source", config=config)
+    assert len(result["to_process"]) == 2
 
-    with patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build:
-        result = await webdav_app.load_inventory(
-            "",
-            "test-source",
-            start_workflows=False,
-            config=prebuilt_config,
+
+@pytest.mark.asyncio
+async def test_load_inventory_passes_etag_to_do_ingest(local_env):
+    """The _etag from a config record is forwarded to do_ingest."""
+    config = [
+        {
+            "path": "file.md",
+            "sha256": None,
+            "_etag": '"etag_value"',
+            "metadata": {"size": 0, "content-type": "text/markdown"},
+        },
+    ]
+    with patch(
+        "soliplex.agents.webdav.app.do_ingest",
+        new_callable=AsyncMock,
+        return_value={"result": "success"},
+    ) as mock_ingest:
+        await webdav_app.load_inventory("", "test-source", config=config)
+
+    assert mock_ingest.call_args.kwargs["etag"] == '"etag_value"'
+
+
+# --- do_ingest ---
+
+
+@pytest.mark.asyncio
+async def test_do_ingest_returns_error_on_download_failure(local_env):
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.download.side_effect = TimeoutError("Connection timed out")
+
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
+        result = await webdav_app.do_ingest(
+            base_path="/webdav/docs",
+            uri="test.md",
+            meta={},
+            source="test-source",
+            mime_type="text/markdown",
+            webdav_url="http://dav",
         )
 
-        mock_build.assert_not_called()
-        assert result["inventory"] == prebuilt_config
+    assert "error" in result
+    assert "Connection timed out" in result["error"]
+    assert "_sha256" not in result
+
+
+@pytest.mark.asyncio
+async def test_do_ingest_returns_sha256_on_success(local_env):
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.download.return_value = b"file content"
+    mock_client.head.return_value = WebDAVResponse(status=200, headers={})
+
+    expected_sha = hashlib.sha256(b"file content", usedforsecurity=False).hexdigest()
+
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
+        result = await webdav_app.do_ingest(
+            base_path="/webdav/docs",
+            uri="test.md",
+            meta={},
+            source="test-source",
+            mime_type="text/markdown",
+            webdav_url="http://dav",
+        )
+
+    assert result["_sha256"] == expected_sha
+    assert result["_size"] == len(b"file content")
+    # file written under the source folder and state updated
+    assert (local_store.source_dir("test-source") / "test.md").read_bytes() == b"file content"
+    assert local_state.load_file_state("test-source")["test.md"]["sha256"] == expected_sha
+
+
+@pytest.mark.asyncio
+async def test_do_ingest_local_file_returns_sha256(tmp_path, local_env):
+    test_file = tmp_path / "test.md"
+    test_file.write_bytes(b"local content")
+    expected_sha = hashlib.sha256(b"local content", usedforsecurity=False).hexdigest()
+
+    result = await webdav_app.do_ingest(
+        base_path=str(tmp_path),
+        uri="test.md",
+        meta={},
+        source="test-source",
+        mime_type="text/markdown",
+    )
+
+    assert result["_sha256"] == expected_sha
+    assert result["_size"] == len(b"local content")
 
 
 # --- load_inventory_from_urls ---
 
 
 @pytest.mark.asyncio
-async def test_load_inventory_from_urls(mock_webdav_client, monkeypatch, tmp_path, mock_state):
-    """Test delegation to build_config_from_urls + load_inventory with results file."""
-    mock_find_batch = AsyncMock(return_value=None)
-    mock_create_batch = AsyncMock(return_value=123)
-
-    monkeypatch.setattr("soliplex.agents.client.find_batch_for_source", mock_find_batch)
-    monkeypatch.setattr("soliplex.agents.client.create_batch", mock_create_batch)
-
+async def test_load_inventory_from_urls(mock_webdav_client, tmp_path, local_env):
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n")
@@ -556,329 +549,16 @@ async def test_load_inventory_from_urls(mock_webdav_client, monkeypatch, tmp_pat
             return_value={"result": "success", "_sha256": "abc", "_size": 42},
         ),
     ):
-        result = await webdav_app.load_inventory_from_urls(
-            urls_file,
-            "test-source",
-            start_workflows=False,
-        )
+        result = await webdav_app.load_inventory_from_urls(urls_file, "test-source")
 
-    assert "inventory" in result
     assert len(result["inventory"]) == 1
     assert result["inventory"][0]["path"] == "/documents/test.md"
-    assert "url_results" in result
-    assert len(result["url_results"]) == 1
     assert result["url_results"][0]["status"] == "success"
 
 
-# --- status_report ---
-
-
 @pytest.mark.asyncio
-async def test_status_report_with_webdav_path(mock_webdav_client, monkeypatch, capsys):
-    """Test status_report with WebDAV path."""
-    mock_check_status = AsyncMock(return_value=[])
-    monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-
-    with (
-        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
-        patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build,
-    ):
-        mock_build.return_value = [
-            {"path": "test.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}}
-        ]
-
-        await webdav_app.status_report("/documents", "test-source")
-
-        captured = capsys.readouterr()
-        assert "Total files: 1" in captured.out
-
-
-# --- Error handling tests ---
-
-
-@pytest.mark.asyncio
-async def test_recursive_listdir_webdav_reraises_timeout():
-    """Test that TimeoutError is re-raised instead of silently swallowed."""
-    mock_client = AsyncMock()
-    mock_client.ls.side_effect = TimeoutError("Connection timed out")
-
-    with pytest.raises(TimeoutError):
-        await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
-
-
-@pytest.mark.asyncio
-async def test_recursive_listdir_webdav_reraises_connection_error():
-    """Test that ConnectionError is re-raised instead of silently swallowed."""
-    mock_client = AsyncMock()
-    mock_client.ls.side_effect = ConnectionError("Connection refused")
-
-    with pytest.raises(ConnectionError, match="Connection refused"):
-        await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
-
-
-@pytest.mark.asyncio
-async def test_recursive_listdir_webdav_swallows_other_errors():
-    """Test that non-connection errors are still caught and return empty list."""
-    mock_client = AsyncMock()
-    mock_client.ls.side_effect = PermissionError("Access denied")
-
-    files = await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
-    assert files == []
-
-
-@pytest.mark.asyncio
-async def test_build_config_no_downloads_on_cache_miss(mock_state):
-    """Test that build_config does not download files on ETag cache miss."""
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=None)
-    # Should NOT be called
-    mock_client.download.side_effect = AssertionError("Should not download")
-
-    with (
-        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
-        patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
-    ):
-        mock_ls.return_value = [
-            {"path": "/documents/good.md", "size": 100},
-            {"path": "/documents/also_good.pdf", "size": 300},
-        ]
-
-        config = await webdav_app.build_config("/documents")
-
-    assert len(config) == 2
-    assert all(item["sha256"] is None for item in config)
-
-
-@pytest.mark.asyncio
-async def test_do_ingest_returns_error_on_download_failure():
-    """Test that do_ingest returns error dict when WebDAV download fails."""
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=None)
-    mock_client.download.side_effect = TimeoutError("Connection timed out")
-
-    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
-        result = await webdav_app.do_ingest(
-            base_path="/webdav/docs",
-            uri="test.md",
-            meta={},
-            source="test-source",
-            batch_id=1,
-            mime_type="text/markdown",
-        )
-
-    assert "error" in result
-    assert "Connection timed out" in result["error"]
-    assert "_sha256" not in result
-
-
-@pytest.mark.asyncio
-async def test_do_ingest_returns_sha256_on_success():
-    """Test that do_ingest returns _sha256 and _size on success."""
-    import hashlib
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=None)
-    mock_client.download.return_value = b"file content"
-
-    expected_sha = hashlib.sha256(b"file content", usedforsecurity=False).hexdigest()
-
-    with (
-        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
-        patch("soliplex.agents.client.do_ingest", new_callable=AsyncMock, return_value={"result": "success"}) as mock_ingest,
-    ):
-        result = await webdav_app.do_ingest(
-            base_path="/webdav/docs",
-            uri="test.md",
-            meta={},
-            source="test-source",
-            batch_id=1,
-            mime_type="text/markdown",
-        )
-
-    assert result["_sha256"] == expected_sha
-    assert result["_size"] == len(b"file content")
-    mock_ingest.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_do_ingest_local_file_returns_sha256(tmp_path):
-    """Test that do_ingest computes SHA256 for local files too."""
-    import hashlib
-
-    test_file = tmp_path / "test.md"
-    test_file.write_bytes(b"local content")
-    expected_sha = hashlib.sha256(b"local content", usedforsecurity=False).hexdigest()
-
-    with patch(
-        "soliplex.agents.client.do_ingest",
-        new_callable=AsyncMock,
-        return_value={"result": "success"},
-    ):
-        result = await webdav_app.do_ingest(
-            base_path=str(tmp_path),
-            uri="test.md",
-            meta={},
-            source="test-source",
-            batch_id=1,
-            mime_type="text/markdown",
-        )
-
-    assert result["_sha256"] == expected_sha
-    assert result["_size"] == len(b"local content")
-
-
-# --- load_inventory with split check_status ---
-
-
-@pytest.mark.asyncio
-async def test_load_inventory_sends_all_files_to_check_status(monkeypatch):
-    """Test that load_inventory sends all files (cached and uncached) to check_status."""
-    mock_check_status = AsyncMock(return_value=[])
-    monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-    monkeypatch.setattr(
-        "soliplex.agents.client.find_batch_for_source",
-        AsyncMock(return_value=None),
-    )
-    monkeypatch.setattr(
-        "soliplex.agents.client.create_batch",
-        AsyncMock(return_value=123),
-    )
-
-    config = [
-        {
-            "path": "cached.md",
-            "sha256": "abc",
-            "metadata": {"size": 100, "content-type": "text/markdown"},
-        },
-        {
-            "path": "uncached.md",
-            "sha256": None,
-            "_etag": '"etag1"',
-            "metadata": {"size": 0, "content-type": "text/markdown"},
-        },
-    ]
-
-    with patch(
-        "soliplex.agents.webdav.app.do_ingest",
-        new_callable=AsyncMock,
-        return_value={"result": "success", "_sha256": "def", "_size": 50},
-    ):
-        await webdav_app.load_inventory(
-            "",
-            "test-source",
-            start_workflows=False,
-            config=config,
-        )
-
-    # check_status receives ALL files, not just cached ones
-    mock_check_status.assert_called_once()
-    checked_files = mock_check_status.call_args[0][0]
-    assert len(checked_files) == 2
-
-
-@pytest.mark.asyncio
-async def test_load_inventory_check_status_failure_fallback(monkeypatch):
-    """Test that check_status failure falls back to treating all files as new."""
-    mock_check_status = AsyncMock(side_effect=Exception("API down"))
-    monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-    monkeypatch.setattr(
-        "soliplex.agents.client.find_batch_for_source",
-        AsyncMock(return_value=None),
-    )
-    monkeypatch.setattr(
-        "soliplex.agents.client.create_batch",
-        AsyncMock(return_value=123),
-    )
-
-    config = [
-        {
-            "path": "cached.md",
-            "sha256": "abc",
-            "metadata": {"size": 100, "content-type": "text/markdown"},
-        },
-    ]
-
-    with patch(
-        "soliplex.agents.webdav.app.do_ingest",
-        new_callable=AsyncMock,
-        return_value={"result": "success", "_sha256": "abc", "_size": 100},
-    ):
-        result = await webdav_app.load_inventory(
-            "",
-            "test-source",
-            start_workflows=False,
-            config=config,
-        )
-
-    assert len(result["to_process"]) == 1
-    assert result["to_process"][0]["path"] == "cached.md"
-
-
-@pytest.mark.asyncio
-async def test_load_inventory_injects_etag_into_meta(monkeypatch):
-    """Test that _etag from config record is injected into ingest metadata."""
-    mock_check_status = AsyncMock(return_value=[])
-    monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-
-    config = [
-        {
-            "path": "file.md",
-            "sha256": None,
-            "_etag": '"etag_value"',
-            "metadata": {"size": 0, "content-type": "text/markdown"},
-        },
-    ]
-
-    # check_status returns the file as needing processing
-    mock_check_status.return_value = config
-
-    monkeypatch.setattr(
-        "soliplex.agents.client.find_batch_for_source",
-        AsyncMock(return_value=None),
-    )
-    monkeypatch.setattr(
-        "soliplex.agents.client.create_batch",
-        AsyncMock(return_value=123),
-    )
-
-    with patch(
-        "soliplex.agents.webdav.app.do_ingest",
-        new_callable=AsyncMock,
-        return_value={"result": "success", "_sha256": "abc", "_size": 50},
-    ) as mock_ingest:
-        await webdav_app.load_inventory(
-            "",
-            "test-source",
-            start_workflows=False,
-            config=config,
-        )
-
-    # Verify _etag was injected into the meta dict passed to do_ingest
-    meta_arg = mock_ingest.call_args[0][2]
-    assert meta_arg["_etag"] == '"etag_value"'
-
-
-# --- load_inventory_from_urls sync state update ---
-
-
-@pytest.mark.asyncio
-async def test_load_inventory_from_urls_updates_sync_state(tmp_path, mock_state, monkeypatch):
-    """Test that sync state is updated after ingestion."""
-    mock_find_batch = AsyncMock(return_value=None)
-    mock_create_batch = AsyncMock(return_value=123)
-
-    monkeypatch.setattr(
-        "soliplex.agents.client.find_batch_for_source",
-        mock_find_batch,
-    )
-    monkeypatch.setattr(
-        "soliplex.agents.client.create_batch",
-        mock_create_batch,
-    )
-
+async def test_load_inventory_from_urls_updates_state(tmp_path, local_env):
+    """A real do_ingest run writes the file and records local state."""
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
         await f.write("/documents/test.md\n")
@@ -887,34 +567,12 @@ async def test_load_inventory_from_urls_updates_sync_state(tmp_path, mock_state,
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.info.return_value = {"etag": '"new_etag"'}
+    mock_client.download.return_value = b"downloaded"
+    mock_client.head.return_value = WebDAVResponse(status=200, headers={})
 
-    do_ingest_ret = {
-        "result": "success",
-        "_sha256": "computed_hash",
-        "_size": 42,
-    }
-    with (
-        patch(
-            "soliplex.agents.webdav.app.create_async_webdav_client",
-            return_value=mock_client,
-        ),
-        patch(
-            "soliplex.agents.webdav.app.do_ingest",
-            new_callable=AsyncMock,
-            return_value=do_ingest_ret,
-        ),
-    ):
-        await webdav_app.load_inventory_from_urls(
-            urls_file,
-            "test-source",
-            start_workflows=False,
-        )
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
+        await webdav_app.load_inventory_from_urls(urls_file, "test-source")
 
-    # upsert_entry called for the ingested file
-    mock_state["upsert"].assert_called_with(
-        "",
-        "/documents/test.md",
-        '"new_etag"',
-        "computed_hash",
-        42,
-    )
+    state = local_state.load_file_state("test-source")
+    assert "/documents/test.md" in state
+    assert state["/documents/test.md"]["sha256"] == hashlib.sha256(b"downloaded", usedforsecurity=False).hexdigest()

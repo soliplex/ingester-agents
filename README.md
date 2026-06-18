@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/soliplex/ingester-agents/actions/workflows/soliplex.yaml/badge.svg)](https://github.com/soliplex/ingester-agents/actions/workflows/soliplex.yaml)
 
-Agents for loading documents into the [Soliplex Ingester](https://github.com/soliplex/ingester) system. This package provides tools to collect, validate, and ingest documents from multiple sources including local filesystems, WebDAV servers, and source code management platforms (GitHub, Gitea).
+Agents for collecting documents from multiple sources — local filesystems, WebDAV servers, web pages, and source code management platforms (GitHub, Gitea) — and writing them to a local download directory for downstream processing. Each document is written with a `.meta.json` sidecar capturing its MIME type and other metadata, and synchronization state is tracked locally so subsequent runs only fetch what changed.
 
 ## Features
 
@@ -25,23 +25,26 @@ Agents for loading documents into the [Soliplex Ingester](https://github.com/sol
 - **Web Agent (`web`)**: Ingest web pages via HTTP
   - Fetch and ingest HTML content from URLs
   - URL list support (inline, file, or single URL)
-  - Batch processing with workflow support
 
 - **SCM Agent (`scm`)**: Ingest files and issues from Git repositories
   - Support for GitHub and Gitea platforms
   - Automatic file type filtering
   - Issue ingestion with comments (rendered as Markdown)
-  - Batch processing with workflow support
   - Status checking to avoid re-ingesting unchanged files
 
 - **Manifest Runner (`manifest`)**: Declarative multi-source ingestion
   - YAML-based manifest files defining ingestion components
   - Supports all agent types (fs, scm, webdav, web) in a single manifest
-  - Shared configuration (metadata, extensions, workflow settings)
+  - Shared configuration (metadata, extensions, haiku-rag load config)
   - Stale document removal (`delete_stale`) across all components in a manifest
   - Cron-based scheduling via the REST API server
   - Per-component credential and extension overrides
   - Directory-level execution for running multiple manifests at once
+
+- **haiku-rag Loading**: Index downloaded documents into LanceDB
+  - Runs `haiku-ingester run-batch` after each manifest run
+  - One per-source `.lancedb` database, configurable command and config file
+  - Globally serialized — only one load runs at a time
 
 - **REST API Server**: Run agents as a web service
   - FastAPI-based HTTP endpoints for all operations
@@ -54,9 +57,11 @@ Agents for loading documents into the [Soliplex Ingester](https://github.com/sol
 
 **Requirements:**
 - Python 3.13 or higher
-- Soliplex Ingester running and accessible
 
-Before using these tools, a working version of [Soliplex Ingester](https://github.com/soliplex/ingester) must be available. The URL will need to be configured in the environment variables to function.
+Documents are written to the local filesystem (`DOWNLOAD_DIR`). Indexing
+into a vector store is handled by an optional haiku-rag load step (see
+[haiku-rag Loading](#haiku-rag-loading)), which runs `haiku-ingester`
+against the downloaded files.
 
 ### Using uv (Recommended)
 
@@ -84,12 +89,18 @@ The agents use environment variables for configuration. Create a `.env` file or 
 
 ### Required Configuration
 
-```bash
-# Soliplex Ingester API endpoint
-ENDPOINT_URL=http://localhost:8000/api/v1
+Agents write fetched documents to the local filesystem.
 
-# Ingester API authentication (for connecting to protected Ingester instances)
-INGESTER_API_KEY=your-api-key
+```bash
+# Directory where downloaded documents are written. Each run stores files
+# under <DOWNLOAD_DIR>/<source>/, preserving the source directory structure.
+# Every document is accompanied by a <filename>.meta.json sidecar containing
+# its MIME type and any other available metadata.
+DOWNLOAD_DIR=downloads
+
+# Directory for local synchronization state (content hashes + SCM commit
+# markers), one SQLite file per source.
+STATE_DIR=sync_state
 ```
 
 ### SCM Configuration
@@ -159,9 +170,20 @@ AUTH_TRUST_PROXY_HEADERS=false
 # Manifest scheduling (requires SCHEDULER_ENABLED=true)
 MANIFEST_DIR=/path/to/manifests
 
+# haiku-rag loading (runs `haiku-ingester run-batch` after each manifest run)
+HAIKU_LOAD_ENABLED=false
+LANCEDB_DIR=/var/lib/lancedb          # holds <source>.lancedb per source
+HAIKU_PATH=/etc/haiku                  # base dir for haiku-rag config files
+# HAIKU_DEFAULT_CONFIG=haiku.rag.default.yaml   # config filename under HAIKU_PATH
+# HAIKU_LOAD_COMMAND=haiku-ingester --config={haiku_cfg} run-batch --db={db}
+# HAIKU_LOAD_TIMEOUT=1800
+# HAIKU_LOAD_CWD=/var/lib/ingester     # subprocess working dir (default: inherit)
+
 # S3-compatible storage (for urls_file references using s3:// URLs)
 S3_ENDPOINT_URL=https://minio.example.com:9000
 ```
+
+See [haiku-rag Loading](#haiku-rag-loading) for what these settings do.
 
 ### Git CLI Mode
 
@@ -264,10 +286,10 @@ Add `--detail` flag to see the full list of files:
 si-agent fs check-status /path/to/documents my-source-name --detail
 ```
 
-The status check compares file hashes against the Ingester database:
-- **new**: File doesn't exist in the database
+The status check compares file hashes against the local sync state:
+- **new**: File doesn't exist in local state
 - **mismatch**: File exists but content has changed
-- **match**: File is unchanged (will be skipped during ingestion)
+- **match**: File is unchanged (will be skipped during the run)
 
 **4. Load Inventory**
 
@@ -286,13 +308,6 @@ si-agent fs run-inventory /path/to/documents my-source-name
 ```bash
 # Process a subset of files (e.g., files 10-50)
 si-agent fs run-inventory inventory.json my-source --start 10 --end 50
-
-# Start workflows after ingestion
-si-agent fs run-inventory /path/to/documents my-source \
-  --start-workflows \
-  --workflow-definition-id my-workflow \
-  --param-set-id my-params \
-  --priority 10
 ```
 
 ### SCM Agent
@@ -333,7 +348,8 @@ si-agent scm run-inventory github myorg/my-repo
 si-agent scm run-inventory gitea admin/my-repo
 ```
 
-**Note on Workflows:** By default, `start_workflows=True`. To skip workflow triggering, explicitly set `--no-start-workflows`.
+Files and issues are written under `<DOWNLOAD_DIR>/<source>/`. Issues are
+saved as Markdown (`.md`) documents.
 
 #### 4. Incremental Sync
 
@@ -345,16 +361,6 @@ si-agent scm run-incremental gitea admin/my-repo
 
 # Subsequent runs only process changes since last sync
 si-agent scm run-incremental gitea admin/my-repo --branch main
-```
-
-**With workflow triggering:**
-
-```bash
-si-agent scm run-incremental gitea admin/my-repo \
-  --start-workflows \
-  --workflow-definition-id my-workflow \
-  --param-set-id my-params \
-  --priority 5
 ```
 
 **Output JSON format:**
@@ -460,10 +466,6 @@ si-agent webdav run-inventory /documents my-source-name
 
 ```bash
 si-agent webdav run-inventory /documents my-source \
-  --start-workflows \
-  --workflow-definition-id my-workflow \
-  --param-set-id my-params \
-  --priority 10 \
   --webdav-url https://webdav.example.com \
   --webdav-username user \
   --webdav-password pass
@@ -533,10 +535,6 @@ config:
     - md
     - pdf
   delete_stale: true
-  start_workflows: true
-  workflow_definition_id: my-workflow
-  param_set_id: my-params
-  priority: 5
 components:
   - name: local-docs
     type: fs
@@ -567,17 +565,14 @@ Top-level fields:
 
 - **id** (required): Unique identifier for the manifest. Must be unique across all manifests when running from a directory.
 - **name** (required): Human-readable name for display and logging.
-- **source** (required): Source name used for batch management in the Ingester.
+- **source** (required): Source name; also the per-source folder name under `DOWNLOAD_DIR` (sanitized for filesystem safety).
 - **schedule**: Optional cron schedule for automated execution via the REST API server.
   - **cron**: Cron expression (e.g., `"0 0 * * *"` for daily at midnight).
 - **config**: Optional shared configuration applied to all components.
   - **metadata**: Key-value pairs attached to all ingested documents.
   - **extensions**: File extensions to include (overrides the global `EXTENSIONS` setting).
-  - **delete_stale**: Remove documents from the Ingester that no longer appear in any component (default: false). See [Stale Document Removal](#stale-document-removal) below.
-  - **start_workflows**: Whether to start workflows after ingestion (default: false).
-  - **workflow_definition_id**: Workflow definition ID (required when start_workflows is true).
-  - **param_set_id**: Parameter set ID (required when start_workflows is true).
-  - **priority**: Workflow priority (default: 0).
+  - **delete_stale**: Remove locally-stored documents that no longer appear in any component (default: false). See [Stale Document Removal](#stale-document-removal) below.
+  - **haiku_config**: Override the haiku-rag config file used when loading this manifest's source. Absolute paths are used as-is; relative values resolve under `HAIKU_PATH`. Defaults to `${HAIKU_PATH}/haiku.rag.default.yaml`. See [haiku-rag Loading](#haiku-rag-loading).
 - **components** (required): List of ingestion components (see below).
 
 #### Component Types
@@ -638,13 +633,13 @@ For metadata, config-level and component-level values are merged, with component
 
 #### Stale Document Removal
 
-When `delete_stale: true` is set in a manifest's `config` block, the runner will remove documents from the Ingester that no longer appear in any of the manifest's components. This keeps the Ingester in sync with the actual source data.
+When `delete_stale: true` is set in a manifest's `config` block, the runner removes locally-stored documents that no longer appear in any of the manifest's components. This keeps the download directory in sync with the actual source data.
 
 **How it works:**
 
 1. All components execute sequentially, collecting every discovered URI and its hash
-2. After **all** components complete successfully, a single `check_status` call is made to the Ingester with the consolidated URI set and `delete_stale=true`
-3. The Ingester compares the submitted URIs against what it has stored for the source. Any documents belonging to the source whose URI is **not** in the submitted set are deleted.
+2. After **all** components complete successfully, the consolidated URI set is compared against the local sync state for the source (all components in a manifest share one source, hence one download folder and state DB)
+3. Any document in local state whose URI is **not** in the consolidated set has its file, `.meta.json` sidecar, and state entry deleted.
 
 **Safety:**
 
@@ -669,7 +664,7 @@ components:
     path: /shared/docs
 ```
 
-If a file is removed from `/data/docs` or from the WebDAV server, the next manifest run will detect that its URI is no longer present and delete it from the Ingester.
+If a file is removed from `/data/docs` or from the WebDAV server, the next manifest run will detect that its URI is no longer present and delete it from the download directory.
 
 **Note:** SCM components using `incremental: true` only return files changed since the last sync, not the full file listing. When `delete_stale` is enabled with incremental SCM components, the stale detection may not have complete URI coverage for those components. Consider using full inventory mode (`incremental: false`) when `delete_stale` is needed with SCM sources.
 
@@ -685,6 +680,56 @@ si-agent serve
 
 The server loads all manifests from the directory at startup, validates that all manifest IDs are unique, and registers cron jobs for manifests that have a `schedule` defined.
 
+#### haiku-rag Loading
+
+When `HAIKU_LOAD_ENABLED=true`, a haiku-rag load is queued after **each**
+manifest run (scheduled, startup, or CLI). The load indexes the documents
+that the manifest just wrote to `${DOWNLOAD_DIR}/<source>/` into a
+per-source LanceDB database. The default command is:
+
+```bash
+haiku-ingester --config=${HAIKU_CFG} run-batch --db=${LANCEDB_DIR}/<source>.lancedb
+```
+
+- **One load at a time.** Inside the server, loads are drained from a
+  single global FIFO queue by one worker, so only one `haiku-ingester`
+  process runs at any moment (a capacity constraint). The CLI achieves the
+  same by running loads sequentially after each manifest.
+- **Command** is fully configurable via `HAIKU_LOAD_COMMAND`. Supported
+  placeholders: `{haiku_cfg}`, `{db}`, `{source}`, `{lancedb_dir}`,
+  `{haiku_path}`. The template is tokenized before substitution, so values
+  containing spaces cannot inject extra arguments.
+- **Config file** resolves from the manifest's `config.haiku_config`
+  (absolute path used as-is; relative resolved under `HAIKU_PATH`),
+  falling back to `${HAIKU_PATH}/${HAIKU_DEFAULT_CONFIG}`
+  (`haiku.rag.default.yaml`).
+- **Database** path is `${LANCEDB_DIR}/<slug>.lancedb`, where `<slug>` is
+  the source with whitespace replaced by hyphens
+  (`composite source` → `composite-source.lancedb`).
+- **Environment.** The subprocess inherits the server's environment plus
+  two injected variables:
+  - `SOURCE` — the sanitized download-folder name, so a haiku-rag config
+    using `root: ${DOWNLOAD_DIR}/${SOURCE}` resolves to the ingested
+    documents.
+  - `DOWNLOAD_DIR` — `settings.download_dir`, so the path above resolves
+    even when it was left at its default.
+
+  Any other `${VAR}` interpolated by the haiku-rag config (e.g.
+  `OLLAMA_BASE_URL`, `DOCLING1_BASE_URL`, `DOCLING2_BASE_URL`,
+  `EMBEDDINGS_BASE_URL`) must be present in the server's environment.
+
+```bash
+export HAIKU_LOAD_ENABLED=true
+export LANCEDB_DIR=/var/lib/lancedb
+export HAIKU_PATH=/etc/haiku
+export SCHEDULER_ENABLED=true
+export MANIFEST_DIR=/path/to/manifests
+si-agent serve
+```
+
+The CLI honors the same `HAIKU_LOAD_ENABLED` default; override per
+invocation with `si-agent manifest run <path> --load` / `--no-load`.
+
 **Note:** All commands support WebDAV credentials via environment variables (`WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD`) or command-line options (`--webdav-url`, `--webdav-username`, `--webdav-password`).
 
 **Git Bash on Windows:** If using Git Bash on Windows, use double slashes for WebDAV paths to prevent path conversion (e.g., `//documents` instead of `/documents`).
@@ -697,25 +742,22 @@ The server loads all manifests from the directory at startup, validates that all
 2. **Hashing**: Each file's hash is calculated
    - Filesystem/WebDAV/Web sources: SHA256 hash
    - SCM sources: SHA3-256 hash for files, SHA256 for issues
-3. **Status Check**: The system checks which files have changed or are new against the ingester database
-4. **Batch Management**:
-   - The system searches for an existing batch matching the source name
-   - If found, new documents are added to the existing batch (incremental ingestion)
-   - If not found, a new batch is created
-   - This enables efficient re-ingestion: only new or changed files are processed
-5. **Ingestion**: Files are uploaded to the Soliplex Ingester API
-6. **Workflow Trigger** (optional): Workflows can be started to process the ingested documents. See Ingester documentation for details.
+3. **Status Check**: The system checks which files are new or changed against the local sync state, so only new or changed files are processed
+4. **Write**: Each file is written to `<DOWNLOAD_DIR>/<source>/<source-relative-path>`, with a `<filename>.meta.json` sidecar containing its MIME type and other metadata
+5. **State Update**: Content hashes (and, for SCM, the latest commit SHA) are recorded in local state
+6. **Stale Removal** (optional): When `delete_stale` is enabled, documents no longer present in the source are deleted from the download directory
+7. **haiku-rag Load** (optional): When `HAIKU_LOAD_ENABLED` is set, the downloaded documents are indexed into a per-source LanceDB database via `haiku-ingester` (see [haiku-rag Loading](#haiku-rag-loading))
 
 ### Incremental Sync (SCM Agent)
 
 The `run-incremental` command uses commit-based tracking for efficient synchronization:
 
-1. **Sync State Check**: Retrieves last processed commit SHA from the ingester
+1. **Sync State Check**: Retrieves last processed commit SHA from local state
 2. **Commit Enumeration**: Fetches only commits since the last sync
 3. **Change Detection**: Extracts changed and removed file paths from commits
 4. **Selective Fetch**: Downloads only files that were modified
-5. **Ingestion**: Uploads changed files to the ingester
-6. **State Update**: Stores the latest commit SHA for subsequent syncs
+5. **Write**: Writes changed files to `DOWNLOAD_DIR` and deletes removed ones
+6. **State Update**: Stores the latest commit SHA locally for subsequent syncs
 
 This approach reduces API calls and bandwidth by 80-95% compared to full repository scans. On first run (or after reset), a full sync is performed to establish the baseline.
 
@@ -755,15 +797,13 @@ As an example, the soliplex [documentation](https://github.com/soliplex/soliplex
 git clone https://github.com/soliplex/soliplex.git
 
 # Set up environment
-export ENDPOINT_URL=http://localhost:8000/api/v1
+export DOWNLOAD_DIR=./downloads
 
-# Ingest directly from directory!
+# Write directly from directory!
 uv run si-agent fs run-inventory <path-to-checkout>/soliplex/docs soliplex-docs
 
-# Check that documents are in the ingester (your batch id may be different)
-curl -X 'GET' \
-  'http://127.0.0.1:8000/api/v1/document/?batch_id=1' \
-  -H 'accept: application/json'
+# Files land under ./downloads/soliplex-docs/, each with a .meta.json sidecar
+ls ./downloads/soliplex-docs
 ```
 
 **Traditional version (with inventory.json):**
@@ -772,7 +812,7 @@ curl -X 'GET' \
 git clone https://github.com/soliplex/soliplex.git
 
 # Set up environment
-export ENDPOINT_URL=http://localhost:8000/api/v1
+export DOWNLOAD_DIR=./downloads
 
 # Create inventory (optional - only if you want to review/modify it)
 uv run si-agent fs build-config <path-to-checkout>/soliplex/docs
@@ -784,58 +824,53 @@ uv run si-agent fs build-config <path-to-checkout>/soliplex/docs
 uv run si-agent fs validate-config <path-to-checkout>/soliplex/docs/inventory.json
 # If there are errors, fix them now
 
-# Ingest
+# Write
 uv run si-agent fs run-inventory <path-to-checkout>/soliplex/docs/inventory.json soliplex-docs
 
-# Check that documents are in the ingester (your batch id may be different)
-curl -X 'GET' \
-  'http://127.0.0.1:8000/api/v1/document/?batch_id=1' \
-  -H 'accept: application/json'
+ls ./downloads/soliplex-docs
 ```
 
 ### Example 2: Ingest GitHub Repository
 
 ```bash
 # Set up environment
-export ENDPOINT_URL=http://localhost:8000/api/v1
+export DOWNLOAD_DIR=./downloads
 export scm_auth_token=ghp_your_token_here
 
-# Ingest repository
+# Write repository contents
 si-agent scm run-inventory github mycompany/soliplex
 
-#check that documents are in the ingester: (your batch id may be different)
-curl -X 'GET' \
-  'http://127.0.0.1:8000/api/v1/document/?batch_id=2' \
-  -H 'accept: application/json'
-
+# Files land under ./downloads/github_mycompany_soliplex_all/
+ls ./downloads
 ```
 
 ### Example 3: Ingest from WebDAV Server
 
 ```bash
 # Set up environment
-export ENDPOINT_URL=http://localhost:8000/api/v1
+export DOWNLOAD_DIR=./downloads
 export WEBDAV_URL=https://nextcloud.example.com/remote.php/dav/files/username
 export WEBDAV_USERNAME=your-username
 export WEBDAV_PASSWORD=your-password
 
-# Ingest directly from WebDAV directory
+# Write directly from WebDAV directory
 si-agent webdav run-inventory /Documents/project-docs webdav-docs
 
-# Check that documents are in the ingester (your batch id may be different)
-curl -X 'GET' \
-  'http://127.0.0.1:8000/api/v1/document/?batch_id=3' \
-  -H 'accept: application/json'
+# Files land under ./downloads/webdav-docs/
+ls ./downloads/webdav-docs
 ```
 
-### Example 4: Batch Processing with Workflows
+### Example 4: Index Ingested Documents with haiku-rag
 
 ```bash
-# Ingest and trigger processing workflows
-si-agent fs run-inventory ./documents my-docs \
-  --start-workflows \
-  --workflow-definition-id document-analysis \
-  --priority 5
+# Set up environment
+export DOWNLOAD_DIR=./downloads
+export LANCEDB_DIR=./lancedb
+export HAIKU_PATH=./haiku-config
+export HAIKU_LOAD_ENABLED=true
+
+# Run a manifest and load the result into ./lancedb/<source>.lancedb
+si-agent manifest run /path/to/manifest.yml --load
 ```
 
 ## Server API
@@ -999,13 +1034,10 @@ curl -X POST http://localhost:8001/api/v1/web/run-inventory \
   -F "urls=[\"https://example.com/page1\", \"https://example.com/page2\"]" \
   -F "source=my-source"
 
-# Ingest web pages with workflow and metadata
+# Ingest web pages with extra metadata
 curl -X POST http://localhost:8001/api/v1/web/run-inventory \
   -F "urls=[\"https://example.com/page1\"]" \
   -F "source=my-source" \
-  -F "start_workflows=true" \
-  -F "workflow_definition_id=my-workflow" \
-  -F "param_set_id=my-params" \
   -F "metadata={\"project\": \"test\"}"
 
 # Ingest web pages from uploaded file
@@ -1060,22 +1092,62 @@ Interactive API documentation is available at:
 
 ### Docker Deployment
 
-The server is designed to run in containers:
+The server is designed to run in containers. The `Dockerfile` is a
+multi-stage build exposing two selectable targets:
+
+| Target | Purpose | Dependencies | Default command |
+|--------|---------|--------------|-----------------|
+| `production` | Minimal runtime image (**default target**) | Runtime only (`uv sync --no-dev`) | `si-agent serve --host=0.0.0.0` |
+| `development` | Local dev with live reload | Runtime **and** dev deps (`uv sync`) | `si-agent serve --host=0.0.0.0 --reload` |
+
+Both stages run as a non-root `appuser` (uid/gid `1000` by default,
+overridable via the `APP_UID`/`APP_GID` build args), include `git` for SCM
+CLI mode, expose port `8001`, and define a `/health` healthcheck.
+
+#### Production
+
+`production` is the last stage, so it is built when no `--target` is given:
 
 ```bash
-# Build image
+# Build the production image (default target)
 docker build -t ingester-agents:latest .
 
 # Run with environment variables
 docker run -d \
-  -p 8001:8000 \
-  -e ENDPOINT_URL=http://ingester:8000/api/v1 \
+  -p 8001:8001 \
+  -e DOWNLOAD_DIR=/data/downloads \
   -e API_KEY_ENABLED=true \
   -e API_KEY=your-secret-key \
+  -v "$(pwd)/downloads:/data/downloads" \
   ingester-agents:latest
 
 # Check health
 curl http://localhost:8001/health
+```
+
+#### Development
+
+The `development` target includes the full toolchain and starts uvicorn
+with `--reload`. Bind-mount the source so code changes reload live:
+
+```bash
+# Build the development image
+docker build --target development -t ingester-agents:dev .
+
+# Run with the source bind-mounted for live reload
+docker run --rm -it \
+  -p 8001:8001 \
+  -v "$(pwd):/app" \
+  ingester-agents:dev
+```
+
+To match file ownership on bind mounts to your host user, pass build args:
+
+```bash
+docker build --target development \
+  --build-arg APP_UID="$(id -u)" \
+  --build-arg APP_GID="$(id -g)" \
+  -t ingester-agents:dev .
 ```
 
 The Docker image includes:
@@ -1094,11 +1166,9 @@ Ensure your tokens have the required permissions:
 
 ### Connection Errors
 
-Verify the `ENDPOINT_URL` is correct and the Ingester API is running:
-
-```bash
-curl http://localhost:8000/api/v1/batch/
-```
+For SCM and WebDAV sources, verify the source server is reachable and any
+required credentials (`scm_auth_token`, `WEBDAV_URL`/`WEBDAV_USERNAME`/
+`WEBDAV_PASSWORD`) are set. Downloaded files are written under `DOWNLOAD_DIR`.
 
 ### File Not Found Errors
 
@@ -1159,7 +1229,8 @@ uv run ruff format
 soliplex.agents/
 ├── src/soliplex/agents/
 │   ├── cli.py              # Main CLI entry point (includes 'serve' command)
-│   ├── client.py           # Soliplex Ingester API client
+│   ├── local_store.py      # Writes downloaded documents + .meta.json sidecars
+│   ├── local_state.py      # Per-source SQLite sync state (hashes + commit SHA)
 │   ├── config.py           # Configuration, settings, and manifest models
 │   ├── server/             # FastAPI server
 │   │   ├── __init__.py     # FastAPI app initialization, scheduler
@@ -1222,7 +1293,8 @@ soliplex.agents/
 - `webdav/app.py` - WebDAV operations (shared by CLI and API)
 - `scm/app.py` - SCM operations (shared by CLI and API)
 - `manifest/runner.py` - Manifest loading, validation, and dispatch to agents
-- `client.py` - HTTP client for Soliplex Ingester API
+- `local_store.py` - Writes fetched documents and metadata sidecars to `DOWNLOAD_DIR`
+- `local_state.py` - Local synchronization state (content hashes + SCM commit markers)
 
 **Configuration:**
 - `config.py` - Pydantic settings and manifest component models

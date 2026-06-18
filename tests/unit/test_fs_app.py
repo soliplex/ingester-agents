@@ -6,7 +6,17 @@ from pathlib import Path
 
 import pytest
 
+from soliplex.agents import local_state
+from soliplex.agents import local_store
 from soliplex.agents.fs import app as fs_app
+
+
+@pytest.fixture
+def local_env(tmp_path, monkeypatch):
+    """Point download_dir and state_dir at temp directories."""
+    monkeypatch.setattr(local_store.settings, "download_dir", str(tmp_path / "dl"))
+    monkeypatch.setattr(local_state.settings, "state_dir", str(tmp_path / "state"))
+    return tmp_path
 
 
 @pytest.fixture
@@ -116,88 +126,57 @@ class TestLoadInventory:
     """Tests for load_inventory function."""
 
     @pytest.mark.asyncio
-    async def test_load_inventory_with_file(self, temp_inventory_file, monkeypatch):
-        """Test load_inventory with inventory file."""
-        from unittest.mock import AsyncMock
+    async def test_load_inventory_writes_files(self, temp_document_dir, local_env):
+        """Files from a source directory are written under download_dir with sidecars."""
+        result = await fs_app.load_inventory(temp_document_dir, "fs-src")
 
-        # Mock client functions
-        mock_check_status = AsyncMock(return_value=[])
-        mock_find_batch = AsyncMock(return_value=None)
-        mock_create_batch = AsyncMock(return_value=123)
-
-        monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-        monkeypatch.setattr("soliplex.agents.client.find_batch_for_source", mock_find_batch)
-        monkeypatch.setattr("soliplex.agents.client.create_batch", mock_create_batch)
-
-        result = await fs_app.load_inventory(
-            temp_inventory_file,
-            "test-source",
-            start_workflows=False,
-        )
-
-        assert "inventory" in result
         assert len(result["inventory"]) == 2
-        assert result["to_process"] == []
-        # Verify delete_stale=True is passed
-        mock_check_status.assert_called_once()
-        call_kwargs = mock_check_status.call_args
-        assert call_kwargs.kwargs.get("delete_stale") is True
+        assert set(result["ingested"]) == {"test.md", "readme.md"}
+        assert result["errors"] == []
+
+        sd = local_store.source_dir("fs-src")
+        assert (sd / "test.md").read_text() == "# Test Document\n\nThis is a test."
+        assert (sd / "test.md.meta.json").exists()
+        assert (sd / "readme.md").exists()
 
     @pytest.mark.asyncio
-    async def test_load_inventory_with_directory(self, temp_document_dir, monkeypatch):
-        """Test load_inventory with directory path."""
-        from unittest.mock import AsyncMock
+    async def test_load_inventory_skips_unchanged(self, temp_document_dir, local_env):
+        """A second run with unchanged content writes nothing new."""
+        await fs_app.load_inventory(temp_document_dir, "fs-src")
+        result = await fs_app.load_inventory(temp_document_dir, "fs-src")
 
-        # Mock client functions
-        mock_check_status = AsyncMock(return_value=[])
-        mock_find_batch = AsyncMock(return_value=None)
-        mock_create_batch = AsyncMock(return_value=123)
+        assert result["to_process"] == []
+        assert result["ingested"] == []
 
-        monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-        monkeypatch.setattr("soliplex.agents.client.find_batch_for_source", mock_find_batch)
-        monkeypatch.setattr("soliplex.agents.client.create_batch", mock_create_batch)
+    @pytest.mark.asyncio
+    async def test_load_inventory_delete_stale(self, temp_document_dir, local_env):
+        """delete_stale removes documents no longer present in the source."""
+        await fs_app.load_inventory(temp_document_dir, "fs-src")
+        # Remove a source file, then re-run with delete_stale.
+        (Path(temp_document_dir) / "readme.md").unlink()
+        result = await fs_app.load_inventory(temp_document_dir, "fs-src", delete_stale=True)
 
-        result = await fs_app.load_inventory(
-            temp_document_dir,
-            "test-source",
-            start_workflows=False,
-        )
-
-        assert "inventory" in result
-        assert len(result["inventory"]) == 2
-        # Config should be built from directory
-        paths = [item["path"] for item in result["inventory"]]
-        assert "test.md" in paths
-        assert "readme.md" in paths
+        assert result["delete_stale_result"] == ["readme.md"]
+        assert not (local_store.source_dir("fs-src") / "readme.md").exists()
 
 
 class TestStatusReport:
     """Tests for status_report function."""
 
     @pytest.mark.asyncio
-    async def test_status_report_with_file(self, temp_inventory_file, monkeypatch, capsys):
-        """Test status_report with inventory file."""
-        from unittest.mock import AsyncMock
-
-        mock_check_status = AsyncMock(return_value=[])
-        monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-
-        await fs_app.status_report(temp_inventory_file, "test-source")
+    async def test_status_report_with_file(self, temp_inventory_file, local_env, capsys):
+        """Test status_report with inventory file (all files new -> to process)."""
+        await fs_app.status_report(temp_inventory_file, "fs-src")
 
         captured = capsys.readouterr()
         assert "Total files: 2" in captured.out
-        assert "Files to process: 0" in captured.out
+        assert "Files to process: 2" in captured.out
 
     @pytest.mark.asyncio
-    async def test_status_report_with_directory(self, temp_document_dir, monkeypatch, capsys):
+    async def test_status_report_with_directory(self, temp_document_dir, local_env, capsys):
         """Test status_report with directory path."""
-        from unittest.mock import AsyncMock
-
-        mock_check_status = AsyncMock(return_value=[])
-        monkeypatch.setattr("soliplex.agents.client.check_status", mock_check_status)
-
-        await fs_app.status_report(temp_document_dir, "test-source")
+        await fs_app.status_report(temp_document_dir, "fs-src")
 
         captured = capsys.readouterr()
         assert "Total files: 2" in captured.out
-        assert "Files to process: 0" in captured.out
+        assert "Files to process: 2" in captured.out

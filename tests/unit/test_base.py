@@ -1581,6 +1581,29 @@ async def test_list_issues_with_since_parameter(provider, mock_response, sample_
         assert "&since=2024-06-15T10:30:00Z" in url_template
 
 
+@pytest.mark.asyncio
+async def test_list_issues_with_tz_aware_since_emits_single_z(provider, mock_response, sample_issue):
+    """A tz-aware UTC ``since`` must produce a valid RFC3339 'Z' timestamp.
+
+    Regression: ``isoformat()`` on a tz-aware datetime yields a '+00:00'
+    offset; appending 'Z' produced an invalid '...+00:00Z' (and the
+    unescaped '+' decoded to a space server-side), which Gitea rejected.
+    """
+    import datetime
+
+    since_date = datetime.datetime(2026, 6, 15, 23, 12, 51, 874010, tzinfo=datetime.UTC)
+
+    with patch.object(provider, "paginate") as mock_paginate:
+        mock_paginate.return_value = [sample_issue]
+
+        await provider.list_issues("test_repo", add_comments=False, since=since_date)
+
+        url_template = mock_paginate.call_args[0][0]
+        assert "&since=2026-06-15T23:12:51Z" in url_template
+        assert "+00:00" not in url_template
+        assert "+" not in url_template
+
+
 # ==================== Tests for _fetch_json ====================
 
 

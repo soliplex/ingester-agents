@@ -4,7 +4,7 @@ Instructions for AI coding agents working with Soliplex Agents.
 
 ## Project Overview
 
-Document ingestion agents that load files from multiple sources (filesystem, WebDAV, GitHub, Gitea) into Soliplex Ingester for processing and indexing.
+Document ingestion agents that collect files from multiple sources (filesystem, WebDAV, web, GitHub, Gitea) and write them to a local download directory, with an optional haiku-rag load step that indexes them into per-source LanceDB databases.
 
 **Stack:** Python 3.13+, FastAPI, aiohttp, Typer CLI, Pydantic v2
 
@@ -35,28 +35,34 @@ si-agent scm run-incremental gitea myowner/myrepo
 ```text
 src/soliplex/agents/
 ├── cli.py              # Main Typer CLI entry point
-├── client.py           # Ingester API client (HTTP operations)
-├── config.py           # Pydantic settings
+├── config.py           # Pydantic settings + manifest models
+├── local_state.py      # Local sync state (content hashes, commit SHAs)
+├── local_store.py      # Writing documents + .meta.json sidecars to DOWNLOAD_DIR
+├── retry.py            # Retry helpers
 ├── common/
 │   └── config.py       # File validation utilities
-├── fs/                 # Filesystem agent
-│   ├── cli.py          # CLI commands
-│   └── app.py          # Business logic
+├── fs/                 # Filesystem agent (cli.py + app.py)
 ├── scm/                # Source control agent
 │   ├── cli.py          # CLI commands
 │   ├── app.py          # SCM orchestration
 │   ├── base.py         # BaseSCMProvider abstract class
+│   ├── git_cli.py      # Git CLI decorator (local clone mode)
 │   ├── github/         # GitHub provider implementation
 │   ├── gitea/          # Gitea provider implementation
 │   └── lib/
 │       ├── utils.py    # Hashing utilities
 │       └── templates/  # Jinja2 templates
-├── webdav/             # WebDAV agent
-│   ├── cli.py
-│   └── app.py
+├── webdav/             # WebDAV agent (cli.py + app.py + async_client.py)
+├── web/                # Web agent (app.py)
+├── manifest/           # Declarative multi-source runner
+│   ├── cli.py          # `manifest run` command
+│   ├── runner.py       # load_manifest / run_manifest dispatch
+│   └── haiku_loader.py # haiku-rag batch load subprocess
 └── server/             # FastAPI REST API
-    ├── __init__.py     # App setup, CORS, scheduler
+    ├── __init__.py     # App setup, CORS, scheduler, lifespan
     ├── auth.py         # Authentication
+    ├── locks.py        # Per-manifest execution locks
+    ├── haiku_queue.py  # Global FIFO queue serializing haiku-rag loads
     └── routes/         # API endpoints
 ```
 
@@ -85,11 +91,11 @@ Use `soliplex.agents` (dot notation):
 
 ```python
 # Correct
-from soliplex.agents.client import IngesterClient
-from soliplex.agents.config import get_settings
+from soliplex.agents.config import settings
+from soliplex.agents.manifest import runner
 
 # Incorrect
-from soliplex_agents.client import IngesterClient
+from soliplex_agents.config import settings
 ```
 
 ### Hashing Algorithms
@@ -118,14 +124,14 @@ uv run pytest
 uv run pytest --cov-report=html
 
 # Run specific test
-uv run pytest tests/unit/test_client.py
+uv run pytest tests/unit/test_manifest_runner.py
 ```
 
 **Requirements:**
 - 100% branch coverage for non-excluded code
 - Unit tests in `tests/unit/`
 - Functional tests in `tests/functional/` (skipped by default)
-- Mock external services (Ingester API, GitHub, Gitea)
+- Mock external services and subprocesses (GitHub, Gitea, `haiku-ingester`)
 
 **Coverage Exclusions:**
 - `*/cli.py` - CLI modules
@@ -138,7 +144,17 @@ uv run pytest tests/unit/test_client.py
 ### Required
 
 ```bash
-ENDPOINT_URL=http://localhost:8000/api/v1   # Ingester API
+DOWNLOAD_DIR=downloads                       # Where fetched documents are written
+STATE_DIR=sync_state                         # Local sync state (one SQLite file per source)
+```
+
+### haiku-rag Loading
+
+```bash
+HAIKU_LOAD_ENABLED=true                       # Queue a haiku-rag load after each manifest run
+LANCEDB_DIR=/var/lib/lancedb                  # Base dir for per-source <source>.lancedb
+HAIKU_PATH=/etc/haiku                         # Base dir for haiku-rag config files
+# HAIKU_LOAD_COMMAND, HAIKU_DEFAULT_CONFIG, HAIKU_LOAD_TIMEOUT, HAIKU_LOAD_CWD also available
 ```
 
 ### SCM Authentication
@@ -187,6 +203,8 @@ si-agent
 │   ├── validate-config <path>
 │   ├── check-status <path> <source>
 │   └── run-inventory <path> <source>
+├── manifest
+│   └── run <path> [--json] [--load/--no-load]   # Run manifest(s); optionally haiku-rag load
 └── serve [--host] [--port] [--reload]
 ```
 
@@ -231,21 +249,30 @@ def get_provider(platform: str) -> BaseSCMProvider:
 
 **Git CLI Decorator:** When `scm_use_git_cli=true`, the decorator intercepts file operations to use local git clone instead of API calls. API-only operations (issues, repo management) are delegated to the wrapped provider.
 
-### Batch Management
+### Per-Source Storage
 
-Files are grouped into batches by source:
-- System reuses existing batch if source matches
-- Creates new batch only if none exists
-- Enables incremental ingestion (only new/changed files)
+Each manifest maps to one `source`. All of a source's documents live under
+`<DOWNLOAD_DIR>/<sanitized-source>/`, with one SQLite sync-state file per
+source under `STATE_DIR`. Content hashes recorded in sync state enable
+incremental ingestion (only new/changed files are written).
+
+### haiku-rag Load Serialization
+
+After each manifest run (scheduler, startup, or CLI), a `haiku-ingester`
+load is queued for the source. Inside the server a single worker drains a
+global FIFO queue (`server/haiku_queue.py`), so only one load runs at a
+time; the CLI runs loads sequentially for the same effect. The subprocess
+inherits the parent environment plus injected `SOURCE` (sanitized
+download-folder name) and `DOWNLOAD_DIR`. See `manifest/haiku_loader.py`.
 
 ### Incremental Sync (SCM)
 
 Commit-based tracking for efficient syncing:
-1. Get last processed commit SHA from Ingester
+1. Get last processed commit SHA from local sync state
 2. Fetch commits since that SHA
 3. Extract changed file paths
 4. Download only modified files
-5. Store new commit SHA
+5. Store new commit SHA in local sync state
 
 ## File Organization
 
@@ -259,7 +286,8 @@ When adding features:
 
 - Do not mix hashing algorithms (SHA256 vs SHA3-256)
 - Always use async/await for I/O operations
-- Batch names must be unique per source
+- Manifest IDs must be unique when running a directory of manifests
+- Only one haiku-rag load runs at a time (capacity constraint)
 - WebDAV requires SSL verification by default
 - SCM providers must implement `BaseSCMProvider` interface
 
