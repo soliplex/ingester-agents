@@ -236,10 +236,16 @@ class TestMimeOverrides:
         assert "application/vnd.openxmlformats-officedocument.presentationml.presentation" in MIME_OVERRIDES
 
     def test_mime_overrides_values(self):
-        """Test MIME_OVERRIDES maps to correct extensions."""
-        assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.wordprocessingml.document"] == ".docx"
-        assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] == ".xlsx"
-        assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.presentationml.presentation"] == ".pptx"
+        """Test MIME_OVERRIDES maps to correct extensions.
+
+        Extensions are stored without a leading dot, matching the other
+        entries in the table and how ``detect_mime_type`` compares them
+        with ``str.endswith``.
+        """
+        assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.wordprocessingml.document"] == "docx"
+        assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] == "xlsx"
+        assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.presentationml.presentation"] == "pptx"
+        assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.presentationml.slideshow"] == "ppsx"
 
 
 class TestReadConfig:

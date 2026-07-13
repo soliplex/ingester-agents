@@ -1,5 +1,6 @@
 """Tests for manifest scheduling in server startup."""
 
+import asyncio
 import logging
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -246,3 +247,46 @@ class TestCronHandlerSkipsWhenBusy:
 
         assert "completed" in caplog.text
         assert "previous run still in progress" not in caplog.text
+
+
+class TestGlobalManifestLock:
+    """A cron fire must skip (not queue) while any manifest is running."""
+
+    @pytest.mark.asyncio
+    async def test_second_manifest_skips_while_first_runs(self, tmp_path, caplog):
+        _write_manifest(tmp_path, "a.yml", "glob-a", schedule="* * * * *")
+        _write_manifest(tmp_path, "b.yml", "glob-b", schedule="* * * * *")
+        crons = MagicMock()
+        handlers = []
+        crons.cron.return_value = lambda fn: (handlers.append(fn), fn)[1]
+
+        started = []
+        release = asyncio.Event()
+
+        async def fake_run(manifest):
+            started.append(manifest.id)
+            await release.wait()
+            return {"results": []}
+
+        with (
+            patch("soliplex.agents.server.settings") as mock_settings,
+            patch(
+                "soliplex.agents.manifest.runner.run_manifest",
+                side_effect=fake_run,
+            ),
+            caplog.at_level(logging.INFO),
+        ):
+            mock_settings.manifest_dir = str(tmp_path)
+            mock_settings.haiku_load_enabled = False
+            setup_manifest_schedules(crons)
+            first = asyncio.create_task(handlers[0]())
+            # Let the first handler acquire the global lock and start running.
+            await asyncio.sleep(0)
+            # Second fire while the first is still running must be dropped,
+            # not queued behind it.
+            await handlers[1]()
+            release.set()
+            await first
+
+        assert started == ["glob-a"]
+        assert "another manifest is running" in caplog.text

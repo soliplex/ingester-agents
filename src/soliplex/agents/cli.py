@@ -43,19 +43,20 @@ def serve(
         "--reload",
         help="Reload on file changes",
     ),
-    workers: int = typer.Option(
-        None,
-        "--workers",
-        envvar="WEB_CONCURRENCY",
-        help="Number of worker processes",
-    ),
     access_log: bool = typer.Option(
         None,
         "--access-log",
         help="Enable/Disable access log",
     ),
 ):
-    """Run the Soliplex Agents API server."""
+    """Run the Soliplex Agents API server.
+
+    The server always runs as a single worker process. The manifest
+    scheduler keeps its cron state and execution locks in memory, so
+    multiple workers would each register every cron and run every manifest
+    concurrently. Uvicorn defaults to one worker and multi-worker mode is
+    intentionally not exposed (``WEB_CONCURRENCY`` is ignored).
+    """
     import uvicorn
 
     import soliplex.agents.server as server
@@ -65,17 +66,14 @@ def serve(
         "port": port,
     }
 
-    if workers is not None:
-        uvicorn_kw["workers"] = workers
-
     if access_log is not None:
         uvicorn_kw["access_log"] = access_log
 
-    if reload or workers:
+    if reload:
         uvicorn.run(
             "soliplex.agents.server:app",
             factory=False,
-            reload=reload,
+            reload=True,
             **uvicorn_kw,
         )
     else:

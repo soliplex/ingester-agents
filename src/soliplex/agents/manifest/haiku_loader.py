@@ -190,6 +190,11 @@ async def run_load(manifest: Manifest) -> dict:
         )
         return {"source": source, "db": db, "returncode": None, "timed_out": True}
 
+    logger.info(
+        "haiku load subprocess for source '%s' exited with code %s",
+        source,
+        proc.returncode,
+    )
     if proc.returncode == 0:
         logger.info("haiku load for source '%s' completed", source)
     elif proc.returncode < 0:
