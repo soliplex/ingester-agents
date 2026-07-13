@@ -11,9 +11,10 @@ from soliplex.agents import ValidationError
 
 # MIME type overrides for Office documents
 MIME_OVERRIDES = {
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",  # noqa: E501
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",  # noqa: E501
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",  # noqa: E501
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",  # noqa: E501
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",  # noqa: E501
+    "application/vnd.openxmlformats-officedocument.presentationml.slideshow": "ppsx",  # noqa: E501
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",  # noqa: E501
     "text/plantuml": "puml",  # noqa: E501
     "text/asciidoc": "adoc",
     "text/svg+xml": "svg",  # noqa: E501

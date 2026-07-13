@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from soliplex.agents.manifest import runner as manifest_runner
 from soliplex.agents.server.auth import get_current_user
+from soliplex.agents.server.locks import get_global_manifest_semaphore
 from soliplex.agents.server.locks import get_manifest_lock
 from soliplex.agents.server.locks import is_manifest_running
 
@@ -59,10 +60,11 @@ async def run_manifests(
     try:
         results = []
         for manifest in manifests:
-            lock = get_manifest_lock(manifest.id)
-            async with lock:
-                result = await manifest_runner.run_manifest(manifest)
-                results.append(result)
+            async with get_global_manifest_semaphore():
+                lock = get_manifest_lock(manifest.id)
+                async with lock:
+                    result = await manifest_runner.run_manifest(manifest)
+                    results.append(result)
 
         total_components = sum(len(r.get("results", [])) for r in results)
         total_errors = sum(1 for r in results for c in r.get("results", []) if "error" in c)
@@ -103,9 +105,10 @@ async def run_single_manifest(
         )
 
     try:
-        lock = get_manifest_lock(manifest.id)
-        async with lock:
-            result = await manifest_runner.run_manifest(manifest)
+        async with get_global_manifest_semaphore():
+            lock = get_manifest_lock(manifest.id)
+            async with lock:
+                result = await manifest_runner.run_manifest(manifest)
 
         component_errors = [c for c in result.get("results", []) if "error" in c]
 

@@ -100,8 +100,15 @@ def test_cors_middleware_configured():
 
 
 def test_routers_included():
-    """Test all routers are included."""
-    routes = [r.path for r in app.routes]
+    """Test all routers are included.
+
+    Reads the served path contract from the OpenAPI schema rather than
+    walking ``app.routes`` directly: since FastAPI 0.139 ``include_router``
+    represents an included router as an internal ``_IncludedRouter`` node
+    (which has no ``.path``) instead of flattening its routes into
+    ``app.routes``.
+    """
+    routes = set(app.openapi()["paths"])
     # FS routes
     assert "/api/v1/fs/validate-config" in routes
     assert "/api/v1/fs/build-config" in routes

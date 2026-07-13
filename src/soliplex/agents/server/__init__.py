@@ -5,7 +5,6 @@ Provides REST API endpoints for filesystem, SCM, and WebDAV ingestion agents.
 """
 
 import asyncio
-import importlib
 import logging
 from pathlib import Path
 
@@ -19,8 +18,9 @@ from soliplex.agents.config import settings
 from .haiku_queue import enqueue_load
 from .haiku_queue import start_worker
 from .haiku_queue import stop_worker
-from .locks import _scheduler_lock
+from .locks import get_global_manifest_semaphore
 from .locks import get_manifest_lock
+from .locks import is_any_manifest_running
 from .locks import is_manifest_running
 from .routes.fs import fs_router
 from .routes.manifest import manifest_router
@@ -37,15 +37,16 @@ async def _run_manifest_at_startup(manifest_path: str) -> None:
 
     try:
         m = manifest_runner.load_manifest(manifest_path)
-        lock = get_manifest_lock(m.id)
-        async with lock:
-            result = await manifest_runner.run_manifest(m)
-            count = len(result.get("results", []))
-            logger.info(
-                "Startup manifest '%s' completed: %d components",
-                m.id,
-                count,
-            )
+        async with get_global_manifest_semaphore():
+            lock = get_manifest_lock(m.id)
+            async with lock:
+                result = await manifest_runner.run_manifest(m)
+                count = len(result.get("results", []))
+                logger.info(
+                    "Startup manifest '%s' completed: %d components",
+                    m.id,
+                    count,
+                )
         if settings.haiku_load_enabled:
             await enqueue_load(m)
     except Exception:
@@ -90,15 +91,22 @@ def setup_manifest_schedules(crons) -> None:
                             mid,
                         )
                         return
-                    lock = get_manifest_lock(mid)
-                    async with lock:
-                        loaded = manifest_runner.load_manifest(mpath)
-                        result = await manifest_runner.run_manifest(loaded)
+                    if is_any_manifest_running():
                         logger.info(
-                            "Manifest %s completed: %d components",
-                            mpath,
-                            len(result.get("results", [])),
+                            "Skipping manifest '%s': another manifest is running",
+                            mid,
                         )
+                        return
+                    async with get_global_manifest_semaphore():
+                        lock = get_manifest_lock(mid)
+                        async with lock:
+                            loaded = manifest_runner.load_manifest(mpath)
+                            result = await manifest_runner.run_manifest(loaded)
+                            logger.info(
+                                "Manifest %s completed: %d components",
+                                mpath,
+                                len(result.get("results", [])),
+                            )
                     if settings.haiku_load_enabled:
                         await enqueue_load(loaded)
 
@@ -223,25 +231,6 @@ if settings.scheduler_enabled:
     state_backend = SQLiteStateBackend(db_path=":memory:")
     _crons = Crons(app, state_backend=state_backend)
     app.include_router(get_cron_router())
-
-    @_crons.cron("*/1 * * * *", name="run_scheduled_jobs")
-    async def run_jobs():
-        if _scheduler_lock.locked():
-            logger.warning("Skipping run_scheduled_jobs: previous run still in progress")
-            return
-        async with _scheduler_lock:
-            logger.info("start jobs")
-            if settings.scheduler_modules:
-                for module_name in settings.scheduler_modules:
-                    try:
-                        module = importlib.import_module(module_name)
-                        await module.run_schedule_minute()
-                    except Exception as e:
-                        logger.exception(
-                            f"Error running module {module_name}",
-                            exc_info=e,
-                        )
-            logger.info("end jobs")
 
 
 # Include the parent router in the app

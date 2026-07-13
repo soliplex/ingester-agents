@@ -678,7 +678,27 @@ export MANIFEST_DIR=/path/to/manifests
 si-agent serve
 ```
 
-The server loads all manifests from the directory at startup, validates that all manifest IDs are unique, and registers cron jobs for manifests that have a `schedule` defined.
+The server loads all manifests from the directory at startup, validates that all manifest IDs are unique, and then:
+
+- **Manifests with a `schedule`** are registered as cron jobs.
+- **Manifests without a `schedule`** are run once at startup (a
+  fire-and-forget task), then never again unless triggered via the API.
+
+**Execution behavior:**
+
+- **At most one manifest runs at a time.** A process-global lock serializes
+  all manifest execution (scheduled runs, startup runs, and API-triggered
+  runs), so different manifests never run concurrently. This bounds resource
+  use, since a single manifest can already fan out across its components.
+- **Overlapping schedules are dropped, not queued.** If a cron fires while
+  any manifest is still running, that fire is skipped (logged) instead of
+  being queued behind the in-progress run. This prevents pile-ups from
+  frequent schedules or long-running loads. Startup runs and explicit API
+  calls instead wait for the lock rather than being skipped.
+- **Single process only.** Because the cron state and locks are held in
+  memory, scheduling relies on the server running as a single worker (see
+  [Starting the Server](#starting-the-server)). If you run multiple server
+  instances, enable `SCHEDULER_ENABLED` on only one of them.
 
 #### haiku-rag Loading
 
@@ -888,10 +908,16 @@ si-agent serve --host 0.0.0.0 --port 8080
 
 # Development mode with auto-reload
 si-agent serve --reload
-
-# Production with multiple workers
-si-agent serve --workers 4
 ```
+
+**The server always runs as a single worker process.** The manifest
+scheduler keeps its cron state and execution locks in memory, so running
+multiple workers would make each worker register every cron and run every
+manifest independently, with no cross-process coordination. Multi-worker
+mode is therefore intentionally not exposed, and any `WEB_CONCURRENCY`
+environment variable is ignored. Scale out with multiple single-worker
+instances behind a load balancer instead (note that scheduling should only
+be enabled on one instance — see [Scheduling](#scheduling)).
 
 ### Authentication
 
