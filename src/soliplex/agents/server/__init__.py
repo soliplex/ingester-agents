@@ -6,6 +6,8 @@ Provides REST API endpoints for filesystem, SCM, and WebDAV ingestion agents.
 
 import asyncio
 import logging
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -14,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from soliplex.agents.config import configure_logging
 from soliplex.agents.config import settings
+from soliplex.agents.manifest.schedule_registry import ScheduleRegistry
 
 from .haiku_queue import enqueue_load
 from .haiku_queue import start_worker
@@ -30,36 +33,62 @@ from .routes.webdav import webdav_router
 
 logger = logging.getLogger(__name__)
 
-
-async def _run_manifest_at_startup(manifest_path: str) -> None:
-    """Run a single manifest and log the outcome."""
-    from soliplex.agents.manifest import runner as manifest_runner
-
-    try:
-        m = manifest_runner.load_manifest(manifest_path)
-        async with get_global_manifest_semaphore():
-            lock = get_manifest_lock(m.id)
-            async with lock:
-                result = await manifest_runner.run_manifest(m)
-                count = len(result.get("results", []))
-                logger.info(
-                    "Startup manifest '%s' completed: %d components",
-                    m.id,
-                    count,
-                )
-        if settings.haiku_load_enabled:
-            await enqueue_load(m)
-    except Exception:
-        logger.exception("Error running startup manifest %s", manifest_path)
+# Registry of manifest schedules, reconciled against the manifest directory
+# on each tick so schedule edits and added/removed files hot-reload without
+# a restart.
+_schedule_registry = ScheduleRegistry()
 
 
-def setup_manifest_schedules(crons) -> None:
-    """Register cron jobs for scheduled manifests and fire-and-forget
-    tasks for unscheduled ones.
+async def run_scheduled_manifest(manifest_id: str, path: str) -> None:
+    """Execute one manifest, honoring the global one-at-a-time lock.
+
+    Skips (rather than queues) when another manifest is already running so
+    frequent schedules don't pile up. Failures are logged, not raised, since
+    this is invoked as a fire-and-forget task.
 
     Args:
-        crons: A ``fastapi_crons.Crons`` instance used to register
-            cron handlers.
+        manifest_id: The manifest's id (used for locking and logging).
+        path: Path to the manifest YAML file, reloaded fresh on each run.
+    """
+    from soliplex.agents.manifest import runner as manifest_runner
+
+    if is_manifest_running(manifest_id):
+        logger.warning(
+            "Skipping manifest '%s': previous run still in progress",
+            manifest_id,
+        )
+        return
+    if is_any_manifest_running():
+        logger.info(
+            "Skipping manifest '%s': another manifest is running",
+            manifest_id,
+        )
+        return
+
+    try:
+        async with get_global_manifest_semaphore():
+            lock = get_manifest_lock(manifest_id)
+            async with lock:
+                loaded = manifest_runner.load_manifest(path)
+                result = await manifest_runner.run_manifest(loaded)
+                logger.info(
+                    "Manifest '%s' completed: %d components",
+                    manifest_id,
+                    len(result.get("results", [])),
+                )
+        if settings.haiku_load_enabled:
+            await enqueue_load(loaded)
+    except Exception:
+        logger.exception("Error running manifest '%s'", manifest_id)
+
+
+async def reconcile_manifest_schedules() -> None:
+    """Rescan the manifest directory and fire due/newly-added manifests.
+
+    Runs on a fixed interval (see ``scheduler_reconcile_cron``) so that
+    added, removed, and re-scheduled manifest files take effect without a
+    restart. Scheduled manifests fire when due; manifests without a schedule
+    run once when first seen.
     """
     from soliplex.agents.manifest import runner as manifest_runner
 
@@ -77,59 +106,38 @@ def setup_manifest_schedules(crons) -> None:
     try:
         pairs = manifest_runner.load_manifests_with_paths(settings.manifest_dir)
     except ValueError:
-        logger.exception("Error loading manifests from directory")
+        # e.g. a transient duplicate id mid-edit -- keep the last good state.
+        logger.exception("Error loading manifests; skipping this reconcile")
         return
 
-    for m_obj, yml_path in pairs:
-        if m_obj.schedule:
+    result = _schedule_registry.reconcile(pairs, datetime.now(UTC))
 
-            def make_handler(mpath, mid):
-                async def handler():
-                    if is_manifest_running(mid):
-                        logger.warning(
-                            "Skipping manifest '%s': previous run still in progress",
-                            mid,
-                        )
-                        return
-                    if is_any_manifest_running():
-                        logger.info(
-                            "Skipping manifest '%s': another manifest is running",
-                            mid,
-                        )
-                        return
-                    async with get_global_manifest_semaphore():
-                        lock = get_manifest_lock(mid)
-                        async with lock:
-                            loaded = manifest_runner.load_manifest(mpath)
-                            result = await manifest_runner.run_manifest(loaded)
-                            logger.info(
-                                "Manifest %s completed: %d components",
-                                mpath,
-                                len(result.get("results", [])),
-                            )
-                    if settings.haiku_load_enabled:
-                        await enqueue_load(loaded)
-
-                return handler
-
-            crons.cron(
-                m_obj.schedule.cron,
-                name=f"manifest_{m_obj.id}",
-            )(make_handler(yml_path, m_obj.id))
+    for entry in result.added:
+        if entry.cron_expr is not None:
             logger.info(
                 "Scheduled manifest '%s' cron='%s'",
-                m_obj.id,
-                m_obj.schedule.cron,
+                entry.manifest_id,
+                entry.cron_expr,
             )
         else:
-            asyncio.create_task(
-                _run_manifest_at_startup(yml_path),
-                name=f"startup_manifest_{m_obj.id}",
-            )
             logger.info(
-                "Queued startup run for manifest '%s'",
-                m_obj.id,
+                "Registered manifest '%s' (no schedule; one-time run)",
+                entry.manifest_id,
             )
+    for entry in result.rescheduled:
+        logger.info(
+            "Rescheduled manifest '%s' cron='%s'",
+            entry.manifest_id,
+            entry.cron_expr,
+        )
+    for mid in result.removed:
+        logger.info("Unregistered manifest '%s' (file removed)", mid)
+
+    for entry in result.to_run:
+        asyncio.create_task(
+            run_scheduled_manifest(entry.manifest_id, entry.path),
+            name=f"manifest_run_{entry.manifest_id}",
+        )
 
 
 def configure_logfire(app: FastAPI) -> None:
@@ -178,7 +186,10 @@ async def lifespan(app: FastAPI):
         start_worker()
 
     if settings.scheduler_enabled:
-        setup_manifest_schedules(_crons)
+        # Run one reconcile immediately so schedules register and
+        # unscheduled manifests run at startup; the reconciler cron picks
+        # up changes on every subsequent tick.
+        await reconcile_manifest_schedules()
 
     yield
     if settings.haiku_load_enabled:
@@ -231,6 +242,10 @@ if settings.scheduler_enabled:
     state_backend = SQLiteStateBackend(db_path=":memory:")
     _crons = Crons(app, state_backend=state_backend)
     app.include_router(get_cron_router())
+
+    @_crons.cron(settings.scheduler_reconcile_cron, name="manifest_reconciler")
+    async def _manifest_reconciler_job():
+        await reconcile_manifest_schedules()
 
 
 # Include the parent router in the app

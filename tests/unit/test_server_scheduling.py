@@ -1,4 +1,4 @@
-"""Tests for manifest scheduling in server startup."""
+"""Tests for manifest scheduling and hot-reload reconciliation."""
 
 import asyncio
 import logging
@@ -8,19 +8,24 @@ from unittest.mock import patch
 
 import pytest
 
-from soliplex.agents.server import _run_manifest_at_startup
-from soliplex.agents.server import setup_manifest_schedules
+import soliplex.agents.server as server
+from soliplex.agents.manifest.schedule_registry import ScheduleRegistry
+from soliplex.agents.server import reconcile_manifest_schedules
+from soliplex.agents.server import run_scheduled_manifest
+from soliplex.agents.server.locks import get_global_manifest_semaphore
 from soliplex.agents.server.locks import get_manifest_lock
 from soliplex.agents.server.locks import is_manifest_running
 from soliplex.agents.server.locks import reset_locks
 
 
 @pytest.fixture(autouse=True)
-def _clean_locks():
-    """Reset the lock registry between tests."""
+def _clean_state():
+    """Reset locks and the schedule registry between tests."""
     reset_locks()
+    server._schedule_registry = ScheduleRegistry()
     yield
     reset_locks()
+    server._schedule_registry = ScheduleRegistry()
 
 
 def _write_manifest(tmp_path, name, mid, schedule=None):
@@ -40,200 +45,12 @@ def _write_manifest(tmp_path, name, mid, schedule=None):
     (tmp_path / name).write_text("\n".join(lines) + "\n")
 
 
-class TestRunManifestAtStartup:
+class TestRunScheduledManifest:
     @pytest.mark.asyncio
-    async def test_runs_manifest_and_logs(self, tmp_path, caplog):
-        _write_manifest(tmp_path, "m.yml", "startup-m")
+    async def test_runs_and_logs(self, tmp_path, caplog):
+        _write_manifest(tmp_path, "m.yml", "run-m")
         with (
-            patch(
-                "soliplex.agents.manifest.runner.run_manifest",
-                new_callable=AsyncMock,
-                return_value={
-                    "results": [{"component": "comp"}],
-                },
-            ),
-            caplog.at_level(logging.INFO),
-        ):
-            await _run_manifest_at_startup(str(tmp_path / "m.yml"))
-        assert "Startup manifest 'startup-m' completed" in caplog.text
-        assert "1 components" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_logs_error_on_failure(self, caplog):
-        with caplog.at_level(logging.ERROR):
-            await _run_manifest_at_startup("/nonexistent.yml")
-        assert "Error running startup manifest" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_acquires_manifest_lock(self, tmp_path):
-        """Startup task holds the manifest lock while running."""
-        _write_manifest(tmp_path, "m.yml", "lock-test")
-        lock_was_held = False
-
-        async def fake_run(manifest):
-            nonlocal lock_was_held
-            lock_was_held = is_manifest_running("lock-test")
-            return {"results": []}
-
-        with patch(
-            "soliplex.agents.manifest.runner.run_manifest",
-            side_effect=fake_run,
-        ):
-            await _run_manifest_at_startup(str(tmp_path / "m.yml"))
-
-        assert lock_was_held
-
-
-class TestSetupManifestSchedules:
-    def test_no_manifest_dir_returns_early(self):
-        crons = MagicMock()
-        with patch("soliplex.agents.server.settings") as mock_settings:
-            mock_settings.manifest_dir = None
-            setup_manifest_schedules(crons)
-        crons.cron.assert_not_called()
-
-    def test_non_directory_warns(self, tmp_path, caplog):
-        crons = MagicMock()
-        fake_file = tmp_path / "not_a_dir.txt"
-        fake_file.write_text("hi")
-        with (
-            patch("soliplex.agents.server.settings") as mock_settings,
-            caplog.at_level(logging.WARNING),
-        ):
-            mock_settings.manifest_dir = str(fake_file)
-            setup_manifest_schedules(crons)
-        assert "not a directory" in caplog.text
-        crons.cron.assert_not_called()
-
-    def test_duplicate_ids_logs_error(self, tmp_path, caplog):
-        for name in ["a.yml", "b.yml"]:
-            _write_manifest(tmp_path, name, "same-id", schedule="0 0 * * *")
-        crons = MagicMock()
-        with (
-            patch("soliplex.agents.server.settings") as mock_settings,
-            caplog.at_level(logging.ERROR, logger="soliplex.agents.server"),
-        ):
-            mock_settings.manifest_dir = str(tmp_path)
-            setup_manifest_schedules(crons)
-        assert "Error loading manifests" in caplog.text
-        crons.cron.assert_not_called()
-
-    def test_scheduled_manifest_registers_cron(self, tmp_path, caplog):
-        _write_manifest(tmp_path, "cron.yml", "cron-m", schedule="0 0 * * *")
-        crons = MagicMock()
-        decorator = MagicMock(side_effect=lambda fn: fn)
-        crons.cron.return_value = decorator
-        with (
-            patch("soliplex.agents.server.settings") as mock_settings,
-            caplog.at_level(logging.INFO),
-        ):
-            mock_settings.manifest_dir = str(tmp_path)
-            setup_manifest_schedules(crons)
-        crons.cron.assert_called_once_with("0 0 * * *", name="manifest_cron-m")
-        assert "Scheduled manifest 'cron-m'" in caplog.text
-
-    def test_unscheduled_manifest_creates_startup_task(self, tmp_path, caplog):
-        _write_manifest(tmp_path, "no-sched.yml", "nosched-m")
-        crons = MagicMock()
-
-        mock_task = MagicMock()
-        with (
-            patch("soliplex.agents.server.settings") as mock_settings,
-            # Force a plain MagicMock: patch() auto-uses AsyncMock for an async
-            # function, which would still create an un-awaited coroutine when
-            # called and handed to the mocked create_task.
-            patch("soliplex.agents.server._run_manifest_at_startup", new=MagicMock()),
-            patch(
-                "soliplex.agents.server.asyncio.create_task",
-                return_value=mock_task,
-            ) as mock_create,
-            caplog.at_level(logging.INFO),
-        ):
-            mock_settings.manifest_dir = str(tmp_path)
-            setup_manifest_schedules(crons)
-        mock_create.assert_called_once()
-        assert mock_create.call_args.kwargs["name"] == ("startup_manifest_nosched-m")
-        crons.cron.assert_not_called()
-        assert "Queued startup run for manifest 'nosched-m'" in (caplog.text)
-
-    def test_mixed_scheduled_and_unscheduled(self, tmp_path, caplog):
-        _write_manifest(tmp_path, "a.yml", "sched-a", schedule="*/5 * * * *")
-        _write_manifest(tmp_path, "b.yml", "nosched-b")
-        crons = MagicMock()
-        decorator = MagicMock(side_effect=lambda fn: fn)
-        crons.cron.return_value = decorator
-
-        with (
-            patch("soliplex.agents.server.settings") as mock_settings,
-            patch("soliplex.agents.server._run_manifest_at_startup", new=MagicMock()),
-            patch(
-                "soliplex.agents.server.asyncio.create_task",
-            ) as mock_create,
-            caplog.at_level(logging.INFO),
-        ):
-            mock_settings.manifest_dir = str(tmp_path)
-            setup_manifest_schedules(crons)
-        crons.cron.assert_called_once_with("*/5 * * * *", name="manifest_sched-a")
-        mock_create.assert_called_once()
-
-    def test_empty_directory(self, tmp_path):
-        crons = MagicMock()
-        with patch("soliplex.agents.server.settings") as mock_settings:
-            mock_settings.manifest_dir = str(tmp_path)
-            setup_manifest_schedules(crons)
-        crons.cron.assert_not_called()
-
-
-class TestCronHandlerSkipsWhenBusy:
-    """Cron handler must skip execution when the manifest is already running."""
-
-    @pytest.mark.asyncio
-    async def test_cron_handler_skips_if_locked(self, tmp_path, caplog):
-        _write_manifest(tmp_path, "a.yml", "busy-cron", schedule="* * * * *")
-        crons = MagicMock()
-        registered_handler = None
-
-        def capture_handler(fn):
-            nonlocal registered_handler
-            registered_handler = fn
-            return fn
-
-        crons.cron.return_value = capture_handler
-
-        with (
-            patch("soliplex.agents.server.settings") as mock_settings,
-            caplog.at_level(logging.WARNING),
-        ):
-            mock_settings.manifest_dir = str(tmp_path)
-            setup_manifest_schedules(crons)
-
-        assert registered_handler is not None
-
-        # Simulate the manifest already running by holding its lock
-        lock = get_manifest_lock("busy-cron")
-        await lock.acquire()
-        try:
-            await registered_handler()
-        finally:
-            lock.release()
-
-        assert "previous run still in progress" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_cron_handler_runs_when_free(self, tmp_path, caplog):
-        _write_manifest(tmp_path, "a.yml", "free-cron", schedule="* * * * *")
-        crons = MagicMock()
-        registered_handler = None
-
-        def capture_handler(fn):
-            nonlocal registered_handler
-            registered_handler = fn
-            return fn
-
-        crons.cron.return_value = capture_handler
-
-        with (
-            patch("soliplex.agents.server.settings") as mock_settings,
+            patch("soliplex.agents.server.settings") as ms,
             patch(
                 "soliplex.agents.manifest.runner.run_manifest",
                 new_callable=AsyncMock,
@@ -241,25 +58,183 @@ class TestCronHandlerSkipsWhenBusy:
             ),
             caplog.at_level(logging.INFO),
         ):
-            mock_settings.manifest_dir = str(tmp_path)
-            setup_manifest_schedules(crons)
-            await registered_handler()
+            ms.haiku_load_enabled = False
+            await run_scheduled_manifest("run-m", str(tmp_path / "m.yml"))
+        assert "Manifest 'run-m' completed: 1 components" in caplog.text
 
-        assert "completed" in caplog.text
-        assert "previous run still in progress" not in caplog.text
+    @pytest.mark.asyncio
+    async def test_skips_when_same_manifest_running(self, caplog):
+        lock = get_manifest_lock("busy")
+        await lock.acquire()
+        try:
+            with caplog.at_level(logging.WARNING):
+                await run_scheduled_manifest("busy", "/does-not-matter.yml")
+        finally:
+            lock.release()
+        assert "previous run still in progress" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_skips_when_another_manifest_running(self, caplog):
+        sem = get_global_manifest_semaphore()
+        await sem.acquire()
+        try:
+            with caplog.at_level(logging.INFO):
+                await run_scheduled_manifest("x", "/does-not-matter.yml")
+        finally:
+            sem.release()
+        assert "another manifest is running" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_logs_error_on_failure(self, tmp_path, caplog):
+        _write_manifest(tmp_path, "m.yml", "err-m")
+        with (
+            patch("soliplex.agents.server.settings") as ms,
+            patch(
+                "soliplex.agents.manifest.runner.run_manifest",
+                side_effect=RuntimeError("boom"),
+            ),
+            caplog.at_level(logging.ERROR),
+        ):
+            ms.haiku_load_enabled = False
+            await run_scheduled_manifest("err-m", str(tmp_path / "m.yml"))
+        assert "Error running manifest 'err-m'" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_acquires_manifest_lock(self, tmp_path):
+        _write_manifest(tmp_path, "m.yml", "lock-m")
+        held = False
+
+        async def fake_run(manifest):
+            nonlocal held
+            held = is_manifest_running("lock-m")
+            return {"results": []}
+
+        with (
+            patch("soliplex.agents.server.settings") as ms,
+            patch(
+                "soliplex.agents.manifest.runner.run_manifest",
+                side_effect=fake_run,
+            ),
+        ):
+            ms.haiku_load_enabled = False
+            await run_scheduled_manifest("lock-m", str(tmp_path / "m.yml"))
+        assert held
+
+
+class TestReconcileManifestSchedules:
+    @pytest.mark.asyncio
+    async def test_no_manifest_dir_returns_early(self):
+        with (
+            patch("soliplex.agents.server.settings") as ms,
+            patch("soliplex.agents.server.asyncio.create_task") as mock_create,
+        ):
+            ms.manifest_dir = None
+            await reconcile_manifest_schedules()
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_directory_warns(self, tmp_path, caplog):
+        fake_file = tmp_path / "not_a_dir.txt"
+        fake_file.write_text("hi")
+        with (
+            patch("soliplex.agents.server.settings") as ms,
+            patch("soliplex.agents.server.asyncio.create_task") as mock_create,
+            caplog.at_level(logging.WARNING),
+        ):
+            ms.manifest_dir = str(fake_file)
+            await reconcile_manifest_schedules()
+        assert "not a directory" in caplog.text
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_ids_logs_error_and_skips(self, tmp_path, caplog):
+        _write_manifest(tmp_path, "a.yml", "dup", schedule="0 0 * * *")
+        _write_manifest(tmp_path, "b.yml", "dup", schedule="0 0 * * *")
+        with (
+            patch("soliplex.agents.server.settings") as ms,
+            patch("soliplex.agents.server.asyncio.create_task") as mock_create,
+            caplog.at_level(logging.ERROR, logger="soliplex.agents.server"),
+        ):
+            ms.manifest_dir = str(tmp_path)
+            await reconcile_manifest_schedules()
+        assert "Error loading manifests" in caplog.text
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_registers_scheduled_and_runs_unscheduled(self, tmp_path, caplog):
+        _write_manifest(tmp_path, "sched.yml", "sched-a", schedule="*/5 * * * *")
+        _write_manifest(tmp_path, "un.yml", "unsched-b")
+        with (
+            patch("soliplex.agents.server.settings") as ms,
+            patch("soliplex.agents.server.run_scheduled_manifest", new=MagicMock()),
+            patch("soliplex.agents.server.asyncio.create_task") as mock_create,
+            caplog.at_level(logging.INFO),
+        ):
+            ms.manifest_dir = str(tmp_path)
+            await reconcile_manifest_schedules()
+        names = [c.kwargs["name"] for c in mock_create.call_args_list]
+        # Scheduled manifest registered but not fired; unscheduled runs once.
+        assert names == ["manifest_run_unsched-b"]
+        assert "Scheduled manifest 'sched-a' cron='*/5 * * * *'" in caplog.text
+        assert "Registered manifest 'unsched-b'" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_new_file_picked_up_across_reconciles(self, tmp_path):
+        _write_manifest(tmp_path, "a.yml", "a", schedule="*/5 * * * *")
+        with (
+            patch("soliplex.agents.server.settings") as ms,
+            patch("soliplex.agents.server.run_scheduled_manifest", new=MagicMock()),
+            patch("soliplex.agents.server.asyncio.create_task") as mock_create,
+        ):
+            ms.manifest_dir = str(tmp_path)
+            await reconcile_manifest_schedules()
+            mock_create.reset_mock()
+            _write_manifest(tmp_path, "b.yml", "b")  # new unscheduled file
+            await reconcile_manifest_schedules()
+            names = [c.kwargs["name"] for c in mock_create.call_args_list]
+        assert names == ["manifest_run_b"]
+
+    @pytest.mark.asyncio
+    async def test_removed_file_unregistered(self, tmp_path, caplog):
+        _write_manifest(tmp_path, "a.yml", "a", schedule="*/5 * * * *")
+        _write_manifest(tmp_path, "b.yml", "b", schedule="*/5 * * * *")
+        with (
+            patch("soliplex.agents.server.settings") as ms,
+            patch("soliplex.agents.server.run_scheduled_manifest", new=MagicMock()),
+            patch("soliplex.agents.server.asyncio.create_task"),
+            caplog.at_level(logging.INFO),
+        ):
+            ms.manifest_dir = str(tmp_path)
+            await reconcile_manifest_schedules()
+            (tmp_path / "b.yml").unlink()
+            caplog.clear()
+            await reconcile_manifest_schedules()
+        assert "Unregistered manifest 'b'" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_rescheduled_logged(self, tmp_path, caplog):
+        _write_manifest(tmp_path, "a.yml", "a", schedule="0 0 * * *")
+        with (
+            patch("soliplex.agents.server.settings") as ms,
+            patch("soliplex.agents.server.run_scheduled_manifest", new=MagicMock()),
+            patch("soliplex.agents.server.asyncio.create_task"),
+            caplog.at_level(logging.INFO),
+        ):
+            ms.manifest_dir = str(tmp_path)
+            await reconcile_manifest_schedules()
+            _write_manifest(tmp_path, "a.yml", "a", schedule="*/5 * * * *")
+            caplog.clear()
+            await reconcile_manifest_schedules()
+        assert "Rescheduled manifest 'a' cron='*/5 * * * *'" in caplog.text
 
 
 class TestGlobalManifestLock:
-    """A cron fire must skip (not queue) while any manifest is running."""
+    """A run must skip (not queue) while another manifest is running."""
 
     @pytest.mark.asyncio
     async def test_second_manifest_skips_while_first_runs(self, tmp_path, caplog):
-        _write_manifest(tmp_path, "a.yml", "glob-a", schedule="* * * * *")
-        _write_manifest(tmp_path, "b.yml", "glob-b", schedule="* * * * *")
-        crons = MagicMock()
-        handlers = []
-        crons.cron.return_value = lambda fn: (handlers.append(fn), fn)[1]
-
+        _write_manifest(tmp_path, "a.yml", "glob-a")
+        _write_manifest(tmp_path, "b.yml", "glob-b")
         started = []
         release = asyncio.Event()
 
@@ -269,22 +244,19 @@ class TestGlobalManifestLock:
             return {"results": []}
 
         with (
-            patch("soliplex.agents.server.settings") as mock_settings,
+            patch("soliplex.agents.server.settings") as ms,
             patch(
                 "soliplex.agents.manifest.runner.run_manifest",
                 side_effect=fake_run,
             ),
             caplog.at_level(logging.INFO),
         ):
-            mock_settings.manifest_dir = str(tmp_path)
-            mock_settings.haiku_load_enabled = False
-            setup_manifest_schedules(crons)
-            first = asyncio.create_task(handlers[0]())
-            # Let the first handler acquire the global lock and start running.
+            ms.haiku_load_enabled = False
+            first = asyncio.create_task(run_scheduled_manifest("glob-a", str(tmp_path / "a.yml")))
+            # Let the first run acquire the global lock and start running.
             await asyncio.sleep(0)
-            # Second fire while the first is still running must be dropped,
-            # not queued behind it.
-            await handlers[1]()
+            # Second run while the first is in progress must be dropped.
+            await run_scheduled_manifest("glob-b", str(tmp_path / "b.yml"))
             release.set()
             await first
 
