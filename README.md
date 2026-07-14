@@ -169,6 +169,7 @@ AUTH_TRUST_PROXY_HEADERS=false
 
 # Manifest scheduling (requires SCHEDULER_ENABLED=true)
 MANIFEST_DIR=/path/to/manifests
+# SCHEDULER_RECONCILE_CRON="*/1 * * * *"   # how often the dir is rescanned
 
 # haiku-rag loading (runs `haiku-ingester run-batch` after each manifest run)
 HAIKU_LOAD_ENABLED=false
@@ -680,9 +681,28 @@ si-agent serve
 
 The server loads all manifests from the directory at startup, validates that all manifest IDs are unique, and then:
 
-- **Manifests with a `schedule`** are registered as cron jobs.
-- **Manifests without a `schedule`** are run once at startup (a
+- **Manifests with a `schedule`** are registered and run when their cron
+  expression is due.
+- **Manifests without a `schedule`** are run once when first seen (a
   fire-and-forget task), then never again unless triggered via the API.
+
+**Hot-reloading schedules:**
+
+The manifest directory is rescanned on a fixed interval (every minute by
+default; configurable via `SCHEDULER_RECONCILE_CRON`), so changes take
+effect **without restarting the server**:
+
+- **Added files** are picked up on the next scan — new schedules register,
+  and new unscheduled manifests run once.
+- **Removed files** are unregistered and stop firing.
+- **Edited `schedule` blocks** are re-read; the manifest is rescheduled to
+  its new cron expression (the next fire is computed from the change time,
+  not backfilled). Adding a `schedule` to a previously unscheduled manifest
+  starts scheduling it; removing the `schedule` stops it.
+
+A manifest that is invalid or introduces a duplicate id mid-edit is skipped
+for that scan (logged) and retried on the next one, so a bad save never
+takes down the scheduler.
 
 **Execution behavior:**
 

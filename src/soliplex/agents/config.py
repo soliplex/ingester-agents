@@ -101,6 +101,9 @@ class Settings(BaseSettings):
 
     # scheduler settings
     scheduler_enabled: bool = False  # turn on scheduler
+    # Cron expression for how often the manifest directory is rescanned to
+    # hot-reload schedule changes and added/removed manifest files.
+    scheduler_reconcile_cron: str = "*/1 * * * *"
 
     # State settings
     state_dir: str = "sync_state"
