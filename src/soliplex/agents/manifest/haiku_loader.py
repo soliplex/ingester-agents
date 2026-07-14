@@ -160,6 +160,7 @@ async def run_load(manifest: Manifest) -> dict:
     env = os.environ.copy()
     env["SOURCE"] = sanitize_source(source)
     env["DOWNLOAD_DIR"] = settings.download_dir
+    env["OTEL_SERVICE_NAME"] = env.get("OTEL_SERVICE_NAME", "ingester-agent") + f".haiku-ingester.{source}"
     # Force the (Python) child to flush stdout so we can stream it live.
     env["PYTHONUNBUFFERED"] = "1"
     if settings.logfire_token is not None:
