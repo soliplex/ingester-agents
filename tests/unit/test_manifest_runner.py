@@ -792,17 +792,85 @@ class TestRunManifestDeleteStale:
 
         with (
             patch.dict(runner._DISPATCH, {FSComponent: mock_fs, WebComponent: mock_web}),
-            patch("soliplex.agents.manifest.runner.local_state.prune_documents") as mock_check,
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
         ):
             mock_check.return_value = []
             result = await runner.run_manifest(delete_stale_manifest)
 
-        # prune_documents called once with the source and consolidated URI set
+        # reconcile_documents called once with the source and consolidated URI set
         mock_check.assert_called_once()
         call_args = mock_check.call_args
         assert call_args[0][0] == "ds-src"
         assert call_args[0][1] == {"a.md", "http://example.com"}
         assert result["delete_stale_result"] == []
+
+    @pytest.mark.asyncio
+    async def test_not_found_excluded_from_reconcile_set(self, delete_stale_manifest):
+        # A 404'd URI is reported in not_found and must be subtracted from the
+        # reconcile "should exist" set so its local copy is removed.
+        fs_result = {
+            "inventory": [{"path": "a.md", "sha256": "h1"}, {"path": "b.md", "sha256": "h2"}],
+            "ingested": [],
+            "errors": [],
+            "not_found": ["b.md"],
+        }
+        web_result = {"inventory": [{"path": "http://example.com", "sha256": "h3"}], "ingested": [], "errors": []}
+
+        with (
+            patch.dict(
+                runner._DISPATCH,
+                {FSComponent: AsyncMock(return_value=fs_result), WebComponent: AsyncMock(return_value=web_result)},
+            ),
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
+        ):
+            mock_check.return_value = []
+            await runner.run_manifest(delete_stale_manifest)
+
+        mock_check.assert_called_once()
+        assert mock_check.call_args[0][1] == {"a.md", "http://example.com"}
+
+    @pytest.mark.asyncio
+    async def test_not_found_does_not_block_reconcile(self, delete_stale_manifest):
+        # A not_found entry (with no transient errors) must not block the reconcile.
+        fs_result = {"inventory": [{"path": "a.md", "sha256": "h1"}], "ingested": [], "errors": [], "not_found": ["b.md"]}
+        web_result = {"inventory": [], "ingested": [], "errors": []}
+
+        with (
+            patch.dict(
+                runner._DISPATCH,
+                {FSComponent: AsyncMock(return_value=fs_result), WebComponent: AsyncMock(return_value=web_result)},
+            ),
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
+        ):
+            mock_check.return_value = []
+            await runner.run_manifest(delete_stale_manifest)
+
+        mock_check.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_per_file_errors_block_reconcile(self, delete_stale_manifest, caplog):
+        # A transient per-file error (returned in a component's errors list, not
+        # raised) must block the reconcile to stay safe.
+        fs_result = {
+            "inventory": [{"path": "a.md", "sha256": "h1"}],
+            "ingested": [],
+            "errors": [{"uri": "a.md", "error": "HTTP 500"}],
+        }
+        web_result = {"inventory": [], "ingested": [], "errors": []}
+
+        with (
+            patch.dict(
+                runner._DISPATCH,
+                {FSComponent: AsyncMock(return_value=fs_result), WebComponent: AsyncMock(return_value=web_result)},
+            ),
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await runner.run_manifest(delete_stale_manifest)
+
+        mock_check.assert_not_called()
+        assert result["delete_stale_result"] is None
+        assert "Skipping delete_stale" in caplog.text
 
     @pytest.mark.asyncio
     async def test_delete_stale_skipped_on_component_error(self, delete_stale_manifest, caplog):
@@ -811,7 +879,7 @@ class TestRunManifestDeleteStale:
 
         with (
             patch.dict(runner._DISPATCH, {FSComponent: mock_fs, WebComponent: mock_web}),
-            patch("soliplex.agents.manifest.runner.local_state.prune_documents") as mock_check,
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
             caplog.at_level(logging.WARNING),
         ):
             result = await runner.run_manifest(delete_stale_manifest)
@@ -832,7 +900,7 @@ class TestRunManifestDeleteStale:
         m.components[0] = MagicMock(name="fake")
         m.components[0].name = "unknown"
 
-        with patch("soliplex.agents.manifest.runner.local_state.prune_documents") as mock_check:
+        with patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check:
             result = await runner.run_manifest(m)
 
         mock_check.assert_not_called()
@@ -850,7 +918,7 @@ class TestRunManifestDeleteStale:
 
         with (
             patch.dict(runner._DISPATCH, {FSComponent: mock_handler}),
-            patch("soliplex.agents.manifest.runner.local_state.prune_documents") as mock_check,
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
         ):
             result = await runner.run_manifest(m)
 
@@ -870,7 +938,7 @@ class TestRunManifestDeleteStale:
 
         with (
             patch.dict(runner._DISPATCH, {FSComponent: mock_handler}),
-            patch("soliplex.agents.manifest.runner.local_state.prune_documents") as mock_check,
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
         ):
             result = await runner.run_manifest(m)
 
@@ -991,7 +1059,7 @@ class TestIncrementalSCMDeleteStale:
                 return_value=full_uris,
             ) as mock_list,
             patch(
-                "soliplex.agents.manifest.runner.local_state.prune_documents",
+                "soliplex.agents.manifest.runner.local_state.reconcile_documents",
                 return_value=[],
             ) as mock_check,
         ):
@@ -1060,7 +1128,7 @@ class TestIncrementalSCMDeleteStale:
                 new_callable=AsyncMock,
             ) as mock_list,
             patch(
-                "soliplex.agents.manifest.runner.local_state.prune_documents",
+                "soliplex.agents.manifest.runner.local_state.reconcile_documents",
             ) as mock_check,
         ):
             await runner.run_manifest(m)
@@ -1103,7 +1171,7 @@ class TestIncrementalSCMDeleteStale:
                 return_value=full_scm_uris,
             ),
             patch(
-                "soliplex.agents.manifest.runner.local_state.prune_documents",
+                "soliplex.agents.manifest.runner.local_state.reconcile_documents",
                 return_value=[],
             ) as mock_check,
         ):

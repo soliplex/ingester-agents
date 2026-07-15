@@ -569,7 +569,14 @@ async def load_inventory(
 
     ingested = []
     errors = []
-    ret = {"inventory": config, "to_process": to_process, "ingested": ingested, "errors": errors}
+    not_found = []
+    ret = {
+        "inventory": config,
+        "to_process": to_process,
+        "ingested": ingested,
+        "errors": errors,
+        "not_found": not_found,
+    }
     for idx, row in enumerate(to_process):
         uri = row["path"]
         try:
@@ -593,6 +600,11 @@ async def load_inventory(
             if "error" in res:
                 logger.error(f"Error writing {uri}: {res['error']}")
                 errors.append({"uri": uri, "error": res["error"]})
+            elif res.get("not_found"):
+                # Definitive removal, not a blocking error: excluded from the
+                # reconcile's "should exist" set below so its local copy is
+                # deleted (when delete_stale is on).
+                not_found.append(uri)
             elif res.get("skipped"):
                 logger.info("skipping %s: %s", uri, res["skipped"])
             else:
@@ -603,7 +615,8 @@ async def load_inventory(
 
     delete_stale_result = None
     if delete_stale and len(errors) == 0:
-        delete_stale_result = local_state.prune_documents(source, {r["path"] for r in config})
+        current = {r["path"] for r in config} - set(not_found)
+        delete_stale_result = local_state.reconcile_documents(source, current)
     ret["delete_stale_result"] = delete_stale_result
     return ret
 
@@ -655,6 +668,12 @@ async def do_ingest(
             logger.info(f"Downloading from WebDAV: {full_path}")
             async with webdav_client:
                 doc_body, header_type = await webdav_client.download(full_path)
+        except ResourceNotFound:
+            # 404 is a definitive "gone" signal (not a transient failure), so
+            # report it separately -- the caller treats it as a removal when
+            # delete_stale is enabled rather than a blocking error.
+            logger.info("source file gone (404): %s", uri)
+            return {"not_found": True, "uri": uri}
         except Exception as e:
             logger.exception(f"Error downloading {uri} from WebDAV")
             return {"error": str(e)}

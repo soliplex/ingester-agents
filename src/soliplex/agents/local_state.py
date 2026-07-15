@@ -146,6 +146,53 @@ def prune_documents(source: str, current_uris: set[str], download_dir: str | Non
     return removed
 
 
+def reconcile_documents(source: str, current_uris: set[str], download_dir: str | None = None) -> list[str]:
+    """Reconcile the on-disk download folder against *current_uris*.
+
+    Stricter than :func:`prune_documents`: in addition to dropping tracked
+    URIs that are no longer present, it sweeps the actual source download
+    folder and deletes any file that no longer backs a current URI --
+    catching orphans that have no state row (e.g. files left behind when a
+    document disappears from a WebDAV listing).
+
+    Args:
+        source: Source identifier.
+        current_uris: Set of URIs currently present in the source.
+        download_dir: Override for ``settings.download_dir``.
+
+    Returns:
+        List of removed identifiers (stale URIs and orphan relative paths).
+    """
+    state = load_file_state(source)
+
+    # (A) Tracked URIs no longer present: delete file, sidecar, and state row.
+    removed = [uri for uri in state if uri not in current_uris]
+    for uri in removed:
+        mime_type = state.get(uri, {}).get("mime_type")
+        local_store.delete_document(source, uri, mime_type=mime_type, download_dir=download_dir)
+    prune_files(source, current_uris)
+
+    # (B) Disk sweep: delete any file not backing a surviving URI. On-disk
+    # names use the resolved MIME type recorded in state, so recomputing the
+    # relative path from (uri, stored mime) reproduces the exact file written
+    # and cannot false-positive against a file we just stored.
+    expected: set[str] = set()
+    for uri, entry in state.items():
+        if uri in current_uris:
+            rel = local_store.uri_to_relpath(uri, mime_type=entry.get("mime_type")).as_posix()
+            expected.add(rel)
+            expected.add(rel + local_store.META_SUFFIX)
+
+    base = local_store.source_dir(source, download_dir)
+    if base.is_dir():
+        for path in base.rglob("*"):
+            if path.is_file() and path.relative_to(base).as_posix() not in expected:
+                path.unlink()
+                removed.append(path.relative_to(base).as_posix())
+
+    return removed
+
+
 def compute_to_process(inventory: list[dict], source: str) -> list[dict]:
     """Return inventory rows that are new or whose content changed.
 
