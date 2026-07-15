@@ -928,11 +928,26 @@ class TestHead:
 
 class TestDownload:
     @pytest.mark.asyncio
-    async def test_download_returns_bytes(self):
+    async def test_download_returns_bytes_and_content_type(self):
         client, session = _make_client()
-        session.request = AsyncMock(return_value=_mock_response(200, content=b"file content here"))
-        result = await client.download("/file.txt")
-        assert result == b"file content here"
+        session.request = AsyncMock(
+            return_value=_mock_response(
+                200,
+                content=b"file content here",
+                headers={"Content-Type": "text/plain"},
+            )
+        )
+        content, content_type = await client.download("/file.txt")
+        assert content == b"file content here"
+        assert content_type == "text/plain"
+
+    @pytest.mark.asyncio
+    async def test_download_content_type_none_when_absent(self):
+        client, session = _make_client()
+        session.request = AsyncMock(return_value=_mock_response(200, content=b"data"))
+        content, content_type = await client.download("/file.txt")
+        assert content == b"data"
+        assert content_type is None
 
     @pytest.mark.asyncio
     async def test_download_follows_redirects(self):

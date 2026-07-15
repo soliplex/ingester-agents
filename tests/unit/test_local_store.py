@@ -30,28 +30,22 @@ def test_sanitize_source_empty_fallback():
     assert local_store.sanitize_source(":::") == "source"
 
 
-# --- needs_extension ---
-
-
-@pytest.mark.parametrize(
-    "uri,expected",
-    [
-        ("https://example.com/page", True),
-        ("http://example.com/", True),
-        ("/owner/repo/issues/12", True),
-        ("docs/readme.md", False),
-        ("/abs/path/file.pdf", False),
-    ],
-)
-def test_needs_extension(uri, expected):
-    assert local_store.needs_extension(uri) is expected
-
-
 # --- uri_to_relpath ---
 
 
 def test_uri_to_relpath_plain_file():
     assert local_store.uri_to_relpath("docs/readme.md").as_posix() == "docs/readme.md"
+
+
+def test_uri_to_relpath_appends_extension_for_local_file():
+    # Extension is now reconciled for every source, not just URLs/issues.
+    rel = local_store.uri_to_relpath("docs/report", mime_type="application/pdf")
+    assert rel.as_posix() == "docs/report.pdf"
+
+
+def test_uri_to_relpath_replaces_wrong_extension():
+    rel = local_store.uri_to_relpath("docs/report.bin", mime_type="application/pdf")
+    assert rel.as_posix() == "docs/report.pdf"
 
 
 def test_uri_to_relpath_strips_leading_slash():

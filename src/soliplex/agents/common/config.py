@@ -2,30 +2,11 @@
 
 import json
 import logging
-import mimetypes
 from pathlib import Path
 
 import aiofiles
 
 from soliplex.agents import ValidationError
-
-# MIME type overrides for Office documents
-MIME_OVERRIDES = {
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",  # noqa: E501
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",  # noqa: E501
-    "application/vnd.openxmlformats-officedocument.presentationml.slideshow": "ppsx",  # noqa: E501
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",  # noqa: E501
-    "text/plantuml": "puml",  # noqa: E501
-    "text/asciidoc": "adoc",
-    "text/svg+xml": "svg",  # noqa: E501
-    "application/x-latex": "latex",  # noqa: E501
-    "text/python": "python",  # noqa: E501
-    "text/yaml": "yaml",  # noqa: E501
-    "text/toml": "toml",
-    "text/json": "json",
-    "text/xml": "xml",
-    "text/javascript": "js",
-}
 
 logger = logging.getLogger(__name__)
 
@@ -65,29 +46,6 @@ def check_config(config: list[dict], start: int = 0, end: int = None) -> list[di
             row["valid"] = False
             row["reason"] = f"Unsupported file extension {ext}"
     return config
-
-
-def detect_mime_type(path: str) -> str:
-    """
-    Detect MIME type for a file path with Office format overrides.
-
-    Args:
-        path: File path to detect MIME type for
-
-    Returns:
-        MIME type string
-    """
-    mime_type = mimetypes.guess_type(str(path))[0]
-    if mime_type is None:
-        # Check if it matches an Office format by extension
-        for mime, ext in MIME_OVERRIDES.items():
-            if path.endswith(ext):
-                return mime  # pragma: no cover
-        if "/issues/" in path:  # pragma: no cover
-            return "text/markdown"  # issues don't have mime types so use markdown
-        logger.error(f"unrecognized mime type for {path}")
-        mime_type = "application/octet-stream"
-    return mime_type
 
 
 async def read_config(config_path: str) -> list[dict]:
