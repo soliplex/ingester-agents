@@ -10,12 +10,13 @@ type and any other available metadata.
 import hashlib
 import json
 import logging
-import mimetypes
 import re
 from pathlib import Path
 from urllib.parse import unquote
 from urllib.parse import urlsplit
 
+from soliplex.agents.common.mime import ensure_extension
+from soliplex.agents.common.mime import guess_extension
 from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
@@ -37,14 +38,6 @@ _RESERVED_NAMES = frozenset(
         *(f"LPT{i}" for i in range(1, 10)),
     }
 )
-
-# Preferred extensions for MIME types where guess_extension is unhelpful
-# (e.g. it returns ".markdown" rather than ".md").
-_EXT_OVERRIDES = {
-    "text/markdown": ".md",
-    "text/html": ".html",
-    "text/plain": ".txt",
-}
 
 
 def sanitize_source(source: str) -> str:
@@ -76,37 +69,16 @@ def _sanitize_segment(segment: str) -> str:
     return cleaned
 
 
-def _guess_ext(mime_type: str | None) -> str:
-    """Return a file extension (including the dot) for a MIME type, or ``""``."""
-    if not mime_type:
-        return ""
-    mt = mime_type.split(";")[0].strip().lower()
-    if mt in _EXT_OVERRIDES:
-        return _EXT_OVERRIDES[mt]
-    return mimetypes.guess_extension(mt) or ""
-
-
-def needs_extension(uri: str) -> bool:
-    """Return True when *uri* names content that may lack a real extension.
-
-    Web URLs (HTML pages) and git issues are written from rendered content
-    whose URI often has no file extension; everything else (repo files,
-    filesystem paths, WebDAV paths) already carries one. Deriving this
-    purely from the URI keeps :func:`write_document` and
-    :func:`delete_document` symmetric without the caller tracking a flag.
-    """
-    return urlsplit(uri.strip()).scheme in ("http", "https") or "/issues/" in uri
-
-
 def uri_to_relpath(uri: str, *, mime_type: str | None = None) -> Path:
     """Map a source URI to a safe relative path under the source directory.
 
     Preserves the source directory structure where possible. URLs are
     mapped to ``host/path`` and gain a synthesized filename when they end
-    in ``/``. Path traversal segments (``..``) are dropped. When the URI
-    names extension-less content (see :func:`needs_extension`) and the
-    final segment has no extension, one is derived from ``mime_type``
-    (e.g. git issues -> ``.md``).
+    in ``/``. Path traversal segments (``..``) are dropped. The final
+    segment's extension is reconciled against ``mime_type`` for every
+    source (see :func:`~soliplex.agents.common.mime.ensure_extension`):
+    an extension is added when missing, replaced when it clearly
+    mismatches, and left alone when already correct.
 
     Args:
         uri: Source URI or path (e.g. ``"docs/readme.md"``,
@@ -136,9 +108,9 @@ def uri_to_relpath(uri: str, *, mime_type: str | None = None) -> Path:
         no_filename = False
 
     if no_filename:
-        rel_segs.append("index" + _guess_ext(mime_type))
-    elif needs_extension(raw) and "." not in rel_segs[-1]:
-        rel_segs[-1] = rel_segs[-1] + _guess_ext(mime_type)
+        rel_segs.append("index" + guess_extension(mime_type))
+    else:
+        rel_segs[-1] = ensure_extension(rel_segs[-1], mime_type)
 
     return Path(*rel_segs)
 

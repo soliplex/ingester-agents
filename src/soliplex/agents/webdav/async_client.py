@@ -535,8 +535,13 @@ class AsyncWebDAVClient:
         resp.release()
         return WebDAVResponse(status=status, headers=headers)
 
-    async def download(self, path: str) -> bytes:
-        """Download a file via HTTP GET. Returns the file content as bytes."""
+    async def download(self, path: str) -> tuple[bytes, str | None]:
+        """Download a file via HTTP GET.
+
+        Returns ``(content, content_type)`` where ``content_type`` is the
+        server's ``Content-Type`` header (``None`` when absent), used to type
+        the document ahead of content sniffing.
+        """
         resp = await self._request(
             "GET",
             path,
@@ -544,8 +549,9 @@ class AsyncWebDAVClient:
             timeout=aiohttp.ClientTimeout(total=300, connect=20),
         )
         content = await resp.read()
+        content_type = resp.headers.get("Content-Type")
         resp.release()
-        return content
+        return content, content_type
 
 
 # ---------------------------------------------------------------------------

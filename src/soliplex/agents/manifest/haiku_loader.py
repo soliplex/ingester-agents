@@ -178,7 +178,7 @@ async def run_load(manifest: Manifest) -> dict:
         async with asyncio.timeout(settings.haiku_load_timeout):
             out, err = await asyncio.gather(
                 _pump_stream(proc.stdout, logger.info, source),
-                _pump_stream(proc.stderr, logger.warning, source),
+                _pump_stream(proc.stderr, logger.info, source),
             )
             await proc.wait()
     except TimeoutError:

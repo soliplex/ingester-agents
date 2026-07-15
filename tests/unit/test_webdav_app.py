@@ -30,7 +30,7 @@ def mock_webdav_client():
         {"name": "test.md", "type": "file", "size": 100, "etag": '"etag1"', "content_length": 100},
         {"name": "readme.pdf", "type": "file", "size": 200, "etag": '"etag2"', "content_length": 200},
     ]
-    client.download.return_value = b"test content"
+    client.download.return_value = (b"test content", "text/markdown")
     client.info.return_value = {"etag": '"etag_info"'}
     client.head.return_value = WebDAVResponse(status=200, headers={"etag": '"etag_head"'})
     client.__aenter__ = AsyncMock(return_value=client)
@@ -492,7 +492,7 @@ async def test_do_ingest_returns_sha256_on_success(local_env):
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
-    mock_client.download.return_value = b"file content"
+    mock_client.download.return_value = (b"file content", None)
     mock_client.head.return_value = WebDAVResponse(status=200, headers={})
 
     expected_sha = hashlib.sha256(b"file content", usedforsecurity=False).hexdigest()
@@ -567,7 +567,7 @@ async def test_load_inventory_from_urls_updates_state(tmp_path, local_env):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.info.return_value = {"etag": '"new_etag"'}
-    mock_client.download.return_value = b"downloaded"
+    mock_client.download.return_value = (b"downloaded", None)
     mock_client.head.return_value = WebDAVResponse(status=200, headers={})
 
     with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):

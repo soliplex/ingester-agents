@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import mimetypes
 import re
 import shutil
 import tempfile
@@ -11,10 +10,12 @@ from typing import Any
 
 import aiofiles
 
+from soliplex.agents.common import mime
 from soliplex.agents.config import settings
 from soliplex.agents.scm import AuthenticationConfigError
 from soliplex.agents.scm import SCMException
 from soliplex.agents.scm.base import BaseSCMProvider
+from soliplex.agents.scm.base import passes_extension_prefilter
 from soliplex.agents.scm.lib.utils import compute_file_hash
 
 logger = logging.getLogger(__name__)
@@ -661,7 +662,7 @@ class GitCliDecorator(BaseSCMProvider):
             "url": "",  # No API URL for local files
             "file_bytes": content,
             "sha256": compute_file_hash(content),
-            "content-type": mimetypes.guess_type(full_path.name)[0],
+            "content-type": mime.detect_mime_type(full_path.name, data=content, text_fallback=True),
             "last_updated": commit_info["date"],
             "last_commit_sha": commit_info["sha"],
         }
@@ -681,18 +682,22 @@ class GitCliDecorator(BaseSCMProvider):
         repo_dir = await self._ensure_repo_cloned(repo, owner, branch)
 
         files = []
-        for ext in allowed_extensions:
-            for file_path in repo_dir.rglob(f"*.{ext}"):
-                # Skip .git directory
-                if ".git" in file_path.parts:
-                    continue
+        for file_path in repo_dir.rglob("*"):
+            # Skip directories and the .git directory
+            if not file_path.is_file() or ".git" in file_path.parts:
+                continue
+            # Coarse pre-filter: allowed extension or no extension (the real
+            # type is decided from content in _read_local_file); the
+            # authoritative filter runs later against the detected MIME type.
+            if not passes_extension_prefilter(file_path.name, allowed_extensions):
+                continue
 
-                rel_path = str(file_path.relative_to(repo_dir)).replace("\\", "/")
-                try:
-                    file_data = await self._read_local_file(repo_dir, rel_path)
-                    files.append(file_data)
-                except Exception as e:
-                    logger.warning(f"Failed to read {rel_path}: {e}")
+            rel_path = str(file_path.relative_to(repo_dir)).replace("\\", "/")
+            try:
+                file_data = await self._read_local_file(repo_dir, rel_path)
+                files.append(file_data)
+            except Exception as e:
+                logger.warning(f"Failed to read {rel_path}: {e}")
 
         logger.info(f"Found {len(files)} files in local clone of {owner}/{repo}")
         return files
