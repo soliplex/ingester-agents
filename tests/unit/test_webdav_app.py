@@ -488,6 +488,58 @@ async def test_do_ingest_returns_error_on_download_failure(local_env):
 
 
 @pytest.mark.asyncio
+async def test_do_ingest_returns_not_found_on_404(local_env):
+    from soliplex.agents.webdav.async_client import ResourceNotFound
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.download.side_effect = ResourceNotFound("/webdav/docs/gone.md")
+
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
+        result = await webdav_app.do_ingest(
+            base_path="/webdav/docs",
+            uri="gone.md",
+            meta={},
+            source="test-source",
+            mime_type="text/markdown",
+            webdav_url="http://dav",
+        )
+
+    assert result == {"not_found": True, "uri": "gone.md"}
+    assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_404_deletes_when_delete_stale(local_env):
+    # A previously-downloaded file that 404s on this run is removed from disk
+    # and state (via reconcile), and reported in not_found rather than errors.
+    source = "wd-src"
+    local_store.write_document(source, "gone.md", b"old", "text/markdown", {})
+    local_state.upsert_file(source, "gone.md", None, mime_type="text/markdown")
+    assert (local_store.source_dir(source) / "gone.md").exists()
+
+    from soliplex.agents.webdav.async_client import ResourceNotFound
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.download.side_effect = ResourceNotFound("/gone.md")
+    mock_client.head.return_value = WebDAVResponse(status=200, headers={})
+
+    # The listing still shows the file (race); sha256=None forces reprocessing.
+    config = [{"path": "gone.md", "sha256": None, "metadata": {"content-type": "text/markdown"}}]
+
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client):
+        result = await webdav_app.load_inventory("", source, config=config, webdav_url="http://dav", delete_stale=True)
+
+    assert result["not_found"] == ["gone.md"]
+    assert result["errors"] == []
+    assert not (local_store.source_dir(source) / "gone.md").exists()
+    assert "gone.md" not in local_state.load_file_state(source)
+
+
+@pytest.mark.asyncio
 async def test_do_ingest_returns_sha256_on_success(local_env):
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)

@@ -640,13 +640,19 @@ When `delete_stale: true` is set in a manifest's `config` block, the runner remo
 
 **How it works:**
 
-1. All components execute sequentially, collecting every discovered URI and its hash
-2. After **all** components complete successfully, the consolidated URI set is compared against the local sync state for the source (all components in a manifest share one source, hence one download folder and state DB)
-3. Any document in local state whose URI is **not** in the consolidated set has its file, `.meta.json` sidecar, and state entry deleted.
+1. All components execute sequentially, collecting every discovered URI and its hash.
+2. After **all** components complete, the consolidated URI set is *reconciled against the actual download folder* for the source (all components in a manifest share one source, hence one download folder and state DB). Reconciliation is two-pass:
+   - **State pass:** any document tracked in local state whose URI is **not** in the consolidated set has its file, `.meta.json` sidecar, and state entry deleted.
+   - **Disk sweep:** the source download folder is then walked, and any file (plus its sidecar) that doesn't back a surviving URI is deleted — catching *orphans that were never tracked in state* (e.g. files left behind by an earlier run), not just files with a state row.
+
+**WebDAV 404 handling:**
+
+- A WebDAV file that returns **404 (Not Found)** during download is treated as a definitive removal, not a transient error. When `delete_stale` is on, its local copy is deleted (via the reconcile above) even if it still appears in a stale listing. A 404 does **not** block the reconcile.
+- This is distinct from *transient* errors (timeouts, 5xx) — see Safety below.
 
 **Safety:**
 
-- If **any** component produces an error (exception or unknown type), `delete_stale` is **skipped entirely** for that manifest run. This prevents accidental deletions when the URI set is incomplete due to a failed component.
+- If **any** component raises, hits an unknown type, or reports a **transient per-file error** (timeout / 5xx), `delete_stale` is **skipped entirely** for that manifest run. This prevents accidental deletions when the URI set may be incomplete. (A 404 is a removal signal, not a transient error, so it does not trigger this skip.)
 - Components that succeed still have their documents ingested normally — only the stale deletion step is skipped.
 
 **Example:**
@@ -667,7 +673,7 @@ components:
     path: /shared/docs
 ```
 
-If a file is removed from `/data/docs` or from the WebDAV server, the next manifest run will detect that its URI is no longer present and delete it from the download directory.
+If a file is removed from `/data/docs` or from the WebDAV server (dropped from the listing, or returning 404 on fetch), the next manifest run detects that its URI is no longer present and deletes it — and its sidecar — from the download directory.
 
 **Note:** SCM components using `incremental: true` only return files changed since the last sync, not the full file listing. When `delete_stale` is enabled with incremental SCM components, the stale detection may not have complete URI coverage for those components. Consider using full inventory mode (`incremental: false`) when `delete_stale` is needed with SCM sources.
 
@@ -787,7 +793,7 @@ invocation with `si-agent manifest run <path> --load` / `--no-load`.
 3. **Status Check**: The system checks which files are new or changed against the local sync state, so only new or changed files are processed
 4. **Write**: Each file is written to `<DOWNLOAD_DIR>/<source>/<source-relative-path>`, with a `<filename>.meta.json` sidecar containing its MIME type and other metadata. The stored filename is given the extension implied by its detected MIME type (added when missing, replaced when it mismatches, left alone when already correct) — see [File Typing and Filtering](#file-typing-and-filtering)
 5. **State Update**: Content hashes (and, for SCM, the latest commit SHA) are recorded in local state
-6. **Stale Removal** (optional): When `delete_stale` is enabled, documents no longer present in the source are deleted from the download directory
+6. **Stale Removal** (optional): When `delete_stale` is enabled, the download folder is reconciled against the source — documents no longer present (dropped from the listing, or 404 on fetch) are deleted, along with untracked orphan files (see [Stale Document Removal](#stale-document-removal))
 7. **haiku-rag Load** (optional): When `HAIKU_LOAD_ENABLED` is set, the downloaded documents are indexed into a per-source LanceDB database via `haiku-ingester` (see [haiku-rag Loading](#haiku-rag-loading))
 
 ### Incremental Sync (SCM Agent)
