@@ -70,7 +70,13 @@ class TestDetectMimeType:
     def test_extension_used_when_no_sniff(self):
         assert mime.detect_mime_type("report.pdf") == "application/pdf"
 
-    def test_mime_override_by_extension(self):
+    def test_mime_override_by_extension(self, monkeypatch):
+        # Force a guess_type miss so the MIME_OVERRIDES fallback runs on every
+        # platform. Linux CI ships /etc/mime.types (media-types) which knows
+        # .docx, so guess_type would otherwise return early and never reach
+        # the override loop; Windows lacks it. Patching keeps the branch
+        # deterministic regardless of the host mime database.
+        monkeypatch.setattr(mime.mimetypes, "guess_type", lambda *a, **k: (None, None))
         expected = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         assert mime.detect_mime_type("/x/report.docx") == expected
 
