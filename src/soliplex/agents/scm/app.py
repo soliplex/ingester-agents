@@ -2,8 +2,9 @@ import datetime
 import hashlib
 import logging
 
-from soliplex.agents.common.config import detect_mime_type
+from soliplex.agents.common import mime
 from soliplex.agents.scm.base import BaseSCMProvider
+from soliplex.agents.scm.base import passes_extension_prefilter
 
 from .. import local_state
 from .. import local_store
@@ -62,11 +63,15 @@ def _doc_meta(row: dict, extra_metadata: dict[str, str] | None) -> dict:
 
 
 def _resolve_mime(row: dict) -> str:
-    """Resolve the MIME type for a row from its metadata or its URI."""
+    """Resolve the MIME type for a row from its metadata, content, or URI."""
     ct = row.get("content-type") or (row.get("metadata") or {}).get("content-type")
     if ct:
         return ct
-    return detect_mime_type(row.get("uri") or row.get("path"))
+    return mime.detect_mime_type(
+        row.get("uri") or row.get("path"),
+        data=row.get("file_bytes"),
+        text_fallback=True,
+    )
 
 
 async def load_inventory(
@@ -173,7 +178,7 @@ async def list_all_uris(
             branch=branch,
         )
         for f in files:
-            if f["name"].split(".")[-1] in allowed_extensions:
+            if mime.extension_allowed(f.get("content-type"), allowed_extensions):
                 items.append({"uri": f["uri"], "sha256": f.get("sha256", "")})
 
     if content_filter in (ContentFilter.ALL, ContentFilter.ISSUES):
@@ -214,7 +219,7 @@ async def get_data(scm: str, repo_name: str, owner: str = None, content_filter: 
             files = sorted(files, key=lambda x: x.get("last_updated"), reverse=True)
         except Exception as e:
             logger.exception("Error sorting files", exc_info=e)
-        filtered_files = [x for x in files if x["name"].split(".")[-1] in allowed_extensions]
+        filtered_files = [x for x in files if mime.extension_allowed(x.get("content-type"), allowed_extensions)]
         for f in filtered_files:
             row = {
                 "file_bytes": f["file_bytes"],
@@ -363,20 +368,24 @@ async def incremental_sync(
 
         logger.info(f"Files changed: {len(changed_files)}, removed: {len(removed_files)}")
 
-        # Delete removed files locally
+        # Delete removed files locally. Pass the stored mime_type so the
+        # synthesized-extension path round-trips (delete_document recomputes
+        # the relpath from the URI + mime_type).
+        removed_state = local_state.load_file_state(source)
         for removed_path in removed_files:
             logger.info(f"Deleting removed file: {removed_path}")
-            local_store.delete_document(source, removed_path)
+            removed_mime = removed_state.get(removed_path, {}).get("mime_type")
+            local_store.delete_document(source, removed_path, mime_type=removed_mime)
             local_state.delete_file(source, removed_path)
 
-        # Fetch only changed files
+        # Fetch changed files. Use a coarse extension pre-filter (allowed
+        # extension or none); the authoritative filter runs after fetch
+        # against the content-detected MIME type.
         allowed_extensions = settings.extensions
 
         for file_path in changed_files:
-            # Check if extension is allowed
-            ext = file_path.split(".")[-1] if "." in file_path else ""
-            if ext not in allowed_extensions:
-                logger.debug(f"Skipping {file_path} - extension '{ext}' not in allowed list")
+            if not passes_extension_prefilter(file_path, allowed_extensions):
+                logger.debug(f"Skipping {file_path} - extension not in allowed list")
                 continue
 
             try:
@@ -385,6 +394,9 @@ async def incremental_sync(
             except Exception as e:
                 fetch_errors = True
                 logger.exception(f"Failed to fetch {file_path}", exc_info=e)
+
+        # Drop fetched files whose detected content type isn't allowed.
+        file_data = [f for f in file_data if mime.extension_allowed(_resolve_mime(f), allowed_extensions)]
 
         logger.info(f"Fetched {len(file_data)} changed files with allowed extensions")
     elif not issues:

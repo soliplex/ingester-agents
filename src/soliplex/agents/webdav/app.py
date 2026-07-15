@@ -10,7 +10,9 @@ import aiohttp
 from soliplex.agents import local_state
 from soliplex.agents import local_store
 from soliplex.agents.common.config import check_config
-from soliplex.agents.common.config import detect_mime_type
+from soliplex.agents.common.mime import detect_mime_type
+from soliplex.agents.common.mime import extension_allowed
+from soliplex.agents.common.mime import passes_extension_prefilter
 from soliplex.agents.config import settings
 from soliplex.agents.webdav.async_client import AsyncWebDAVClient
 from soliplex.agents.webdav.async_client import ResourceNotFound
@@ -171,9 +173,11 @@ async def build_config_from_urls(
 
     async with webdav_client:
         for full_path in lines:
-            ext = Path(full_path).suffix.lstrip(".")
-            if ext not in allowed_extensions:
+            # Coarse pre-filter: allowed extension or none (extension-less
+            # files are typed from the server header / content at download).
+            if not passes_extension_prefilter(full_path, allowed_extensions):
                 logger.info(f"skipping {full_path}")
+                ext = Path(full_path).suffix.lstrip(".")
                 results.append({"url": full_path, "status": "skipped", "error_message": f"Extension .{ext} not allowed"})
                 continue
 
@@ -182,10 +186,12 @@ async def build_config_from_urls(
                 # last-modified (this server omits ETags but sends modified).
                 server_etag = None
                 modified = None
+                server_content_type = None
                 try:
                     info = await webdav_client.info(full_path)
                     server_etag = info.get("etag")
                     modified = info.get("modified")
+                    server_content_type = info.get("content_type")
                 except Exception:
                     logger.debug("Could not get info for %s", full_path, exc_info=True)
                 if not server_etag:
@@ -194,6 +200,8 @@ async def build_config_from_urls(
                         server_etag = resp.headers.get("etag")
                         if not modified:
                             modified = resp.headers.get("last-modified")
+                        if not server_content_type:
+                            server_content_type = resp.headers.get("content-type")
                     except Exception:
                         logger.debug("Could not HEAD %s", full_path, exc_info=True)
 
@@ -204,7 +212,10 @@ async def build_config_from_urls(
                     logger.debug("no etag or last-modified for %s -- will re-download every run", full_path)
 
                 cached_entry = cached_state.get(full_path)
-                mime_type = detect_mime_type(full_path)
+                # Provisional type from the server header (falls back to the
+                # extension). The authoritative type is resolved from headers
+                # + content at download time in do_ingest.
+                mime_type = detect_mime_type(full_path, header_type=server_content_type)
 
                 if server_token and cached_entry and cached_entry.get("etag") == server_token:
                     # Cache hit — reuse cached SHA256, no download
@@ -266,13 +277,18 @@ async def list_config(
 
     for file_info in files:
         full_path = file_info["path"]
-        ext = Path(full_path).suffix.lstrip(".")
 
-        if ext not in allowed_extensions:
+        if not passes_extension_prefilter(full_path, allowed_extensions):
             logger.info(f"skipping {full_path}")
             continue
 
-        mime_type = detect_mime_type(full_path)
+        mime_type = detect_mime_type(full_path, header_type=file_info.get("content_type"))
+        # Drop only positively-identified disallowed types. An indeterminate
+        # type (octet-stream: no header, no extension) is deferred so it can
+        # be sniffed from content when the file is downloaded for ingestion.
+        if mime_type != "application/octet-stream" and not extension_allowed(mime_type, allowed_extensions):
+            logger.info(f"skipping {full_path} (detected {mime_type})")
+            continue
 
         normalized_base = webdav_path.strip("/")
         normalized_full = full_path.strip("/")
@@ -342,14 +358,14 @@ async def build_config(
 
         for file_info in files:
             full_path = file_info["path"]  # This is the absolute WebDAV path
-            ext = Path(full_path).suffix.lstrip(".")
 
-            if ext not in allowed_extensions:
+            if not passes_extension_prefilter(full_path, allowed_extensions):
                 logger.info(f"skipping {full_path}")
                 continue
 
             server_etag = file_info.get("etag")
             modified = file_info.get("modified")
+            server_content_type = file_info.get("content_type")
             etag_source = "listing"
             if not server_etag:
                 etag_source = "HEAD"
@@ -358,8 +374,19 @@ async def build_config(
                     server_etag = resp.headers.get("etag")
                     if not modified:
                         modified = resp.headers.get("last-modified")
+                    if not server_content_type:
+                        server_content_type = resp.headers.get("content-type")
                 except Exception:
                     logger.debug("Could not HEAD %s", full_path, exc_info=True)
+
+            # Provisional type from the server header (else extension).
+            # Indeterminate types (octet-stream) are deferred to do_ingest,
+            # which sniffs the downloaded content; positively-identified
+            # disallowed types are dropped here without downloading.
+            mime_type = detect_mime_type(full_path, header_type=server_content_type)
+            if mime_type != "application/octet-stream" and not extension_allowed(mime_type, allowed_extensions):
+                logger.info(f"skipping {full_path} (detected {mime_type})")
+                continue
 
             # Validator: strong ETag if present, else last-modified timestamp.
             server_token, token_source = _version_token(server_etag, modified)
@@ -415,8 +442,6 @@ async def build_config(
                 else:
                     miss_reason = f"validator changed (cached={cached_entry.get('etag')!r}, server={server_token!r})"
                 logger.debug("cache MISS for %s: %s", relative_path, miss_reason)
-
-            mime_type = detect_mime_type(full_path)
 
             rec = {
                 "path": relative_path,
@@ -551,7 +576,9 @@ async def load_inventory(
             meta = _doc_meta(row, extra_metadata)
             etag = row.get("_etag")
             logger.info(f"writing {uri} {idx + 1}/{len(to_process)}")
-            mime_type = (row.get("metadata") or {}).get("content-type") or detect_mime_type(uri)
+            # Provisional type from discovery; do_ingest resolves the final
+            # type from the GET Content-Type header and content sniffing.
+            mime_type = (row.get("metadata") or {}).get("content-type")
             res = await do_ingest(
                 base_path,
                 uri,
@@ -566,6 +593,8 @@ async def load_inventory(
             if "error" in res:
                 logger.error(f"Error writing {uri}: {res['error']}")
                 errors.append({"uri": uri, "error": res["error"]})
+            elif res.get("skipped"):
+                logger.info("skipping %s: %s", uri, res["skipped"])
             else:
                 ingested.append(uri)
         except Exception as e:
@@ -598,17 +627,21 @@ async def do_ingest(
         uri: Relative file path
         meta: File metadata for the sidecar
         source: Source identifier
-        mime_type: MIME type of the file
+        mime_type: Provisional MIME type from discovery (may be ``None``);
+            the final type is resolved from the GET ``Content-Type`` header
+            and content sniffing.
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
         etag: Server ETag to record in local state, if known
 
     Returns:
-        Result dictionary with success/error information
+        Result dictionary with success/error information (or a ``skipped``
+        reason when the resolved content type is not allowed).
     """
     logger.info(f"base_path={base_path}, uri={uri}")
 
+    header_type = None
     # Check if base_path is a local directory
     if base_path and Path(base_path).exists():
         load_path = Path(base_path) / uri
@@ -621,7 +654,7 @@ async def do_ingest(
             full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}" if base_path else uri
             logger.info(f"Downloading from WebDAV: {full_path}")
             async with webdav_client:
-                doc_body = await webdav_client.download(full_path)
+                doc_body, header_type = await webdav_client.download(full_path)
         except Exception as e:
             logger.exception(f"Error downloading {uri} from WebDAV")
             return {"error": str(e)}
@@ -641,6 +674,20 @@ async def do_ingest(
                 logger.debug("do_ingest HEAD validator for %s via %s: %s", uri, token_source, etag)
             except Exception:
                 logger.debug("Could not get validator via HEAD for %s", uri, exc_info=True)
+
+    # Resolve the final type: server GET header wins, then content sniffing,
+    # then the filename extension. WebDAV relies on the server's mime type,
+    # so no plain-text (.txt) fallback is applied. The provisional type from
+    # discovery (e.g. a PROPFIND getcontenttype) is used only when nothing
+    # else identifies the content.
+    resolved = detect_mime_type(uri, data=doc_body, header_type=header_type)
+    if resolved == "application/octet-stream" and mime_type:
+        resolved = mime_type
+    mime_type = resolved
+    if not extension_allowed(mime_type, settings.extensions):
+        reason = f"content type {mime_type} not allowed"
+        logger.info("skipping %s: %s", uri, reason)
+        return {"skipped": reason, "uri": uri}
 
     sha256_hash = hashlib.sha256(doc_body, usedforsecurity=False).hexdigest()
     local_store.write_document(source, uri, doc_body, mime_type, meta)

@@ -4,18 +4,20 @@
 
 Agents for collecting documents from multiple sources — local filesystems, WebDAV servers, web pages, and source code management platforms (GitHub, Gitea) — and writing them to a local download directory for downstream processing. Each document is written with a `.meta.json` sidecar capturing its MIME type and other metadata, and synchronization state is tracked locally so subsequent runs only fetch what changed.
 
+MIME types are detected from file **content** (via [puremagic](https://pypi.org/project/puremagic/)) rather than trusting the filename extension, and the stored file is given the extension implied by its detected type. This means files with no extension (or the wrong one) are classified correctly and filtered consistently across every source. See [File Typing and Filtering](#file-typing-and-filtering).
+
 ## Features
 
 - **Filesystem Agent (`fs`)**: Ingest documents from local directories
   - Recursive directory scanning
-  - MIME type detection
+  - Content-based MIME type detection (extension-less files supported)
   - Configuration validation
   - Status checking to avoid re-ingesting unchanged files
 
 - **WebDAV Agent (`webdav`)**: Ingest documents from WebDAV servers
   - Support for any WebDAV-compliant server (Nextcloud, ownCloud, SharePoint, etc.)
   - Recursive directory scanning
-  - MIME type detection
+  - MIME type from the server `Content-Type` header, falling back to content sniffing
   - Authentication support (username/password)
   - Status checking to avoid re-ingesting unchanged files
   - URL export for reviewing discovered files before ingestion
@@ -28,7 +30,7 @@ Agents for collecting documents from multiple sources — local filesystems, Web
 
 - **SCM Agent (`scm`)**: Ingest files and issues from Git repositories
   - Support for GitHub and Gitea platforms
-  - Automatic file type filtering
+  - Content-based file type filtering (extension-less files supported)
   - Issue ingestion with comments (rendered as Markdown)
   - Status checking to avoid re-ingesting unchanged files
 
@@ -783,7 +785,7 @@ invocation with `si-agent manifest run <path> --load` / `--no-load`.
    - Filesystem/WebDAV/Web sources: SHA256 hash
    - SCM sources: SHA3-256 hash for files, SHA256 for issues
 3. **Status Check**: The system checks which files are new or changed against the local sync state, so only new or changed files are processed
-4. **Write**: Each file is written to `<DOWNLOAD_DIR>/<source>/<source-relative-path>`, with a `<filename>.meta.json` sidecar containing its MIME type and other metadata
+4. **Write**: Each file is written to `<DOWNLOAD_DIR>/<source>/<source-relative-path>`, with a `<filename>.meta.json` sidecar containing its MIME type and other metadata. The stored filename is given the extension implied by its detected MIME type (added when missing, replaced when it mismatches, left alone when already correct) — see [File Typing and Filtering](#file-typing-and-filtering)
 5. **State Update**: Content hashes (and, for SCM, the latest commit SHA) are recorded in local state
 6. **Stale Removal** (optional): When `delete_stale` is enabled, documents no longer present in the source are deleted from the download directory
 7. **haiku-rag Load** (optional): When `HAIKU_LOAD_ENABLED` is set, the downloaded documents are indexed into a per-source LanceDB database via `haiku-ingester` (see [haiku-rag Loading](#haiku-rag-loading))
@@ -801,25 +803,54 @@ The `run-incremental` command uses commit-based tracking for efficient synchroni
 
 This approach reduces API calls and bandwidth by 80-95% compared to full repository scans. On first run (or after reset), a full sync is performed to establish the baseline.
 
-### File Filtering
+### File Typing and Filtering
 
-Both agents filter files by the `EXTENSIONS` configuration. The default extensions are: `md`, `pdf`, `doc`, `docx`.
+MIME types are determined from file **content**, not the filename. Detection
+resolves in this order:
 
-To add more types:
+1. **Explicit `Content-Type` header** (WebDAV only — the GET response header,
+   or the PROPFIND `getcontenttype` property), unless it is generic
+   (`application/octet-stream`).
+2. **Content sniffing** via [puremagic](https://pypi.org/project/puremagic/),
+   which recognises binary formats (PDF, PNG, Office documents, …) by their
+   magic bytes.
+3. **Filename extension** via the standard library, plus overrides for Office
+   and text formats.
+4. **Plain-text default** (filesystem and git only): an extension-less file
+   whose bytes look like UTF-8 text is treated as `text/plain`. WebDAV does
+   **not** apply this default — it relies on the server-provided type.
+5. Otherwise `application/octet-stream`.
+
+Once typed, the document is written with the extension implied by its MIME
+type (e.g. an extension-less PDF is stored as `<name>.pdf`; an extension-less
+text file on the fs/git agents is stored as `<name>.txt`).
+
+**Detect-then-filter.** Files are filtered by the `EXTENSIONS` configuration
+against their **detected** type, not their original filename. The default
+extensions are `md`, `pdf`, `doc`, `docx`. Extension-less files are no longer
+skipped up front — they are read/downloaded, classified by content, and only
+then filtered. A file survives when the extension implied by its detected MIME
+type is in `EXTENSIONS`.
+
+To add more types (for example, to keep extension-less text files, whose
+detected type is `text/plain` → `txt`):
 
 ```bash
 export EXTENSIONS=md,pdf,doc,docx,txt,rst
 ```
 
-It also validates that files have supported content types and rejects:
+> **Note:** puremagic identifies binary formats by signature but cannot
+> recognise plain text or Markdown (which have no magic bytes); those still
+> resolve via their extension or, on the fs/git agents, the `text/plain`
+> default above.
+
+The `validate-config` / `check-status` commands additionally reject files
+whose recorded content type is an archive or opaque binary:
+
 - ZIP archives
 - RAR archives
 - 7z archives
 - Generic binary files without proper MIME types
-
-#### SCM Agent
-
-The SCM agent only includes files with extensions specified in the `EXTENSIONS` configuration (default: `md`, `pdf`, `doc`, `docx`).
 
 ### Issues as Documents
 
@@ -1291,7 +1322,8 @@ soliplex.agents/
 │   ├── common/              # Shared utilities
 │   │   ├── urls_file.py     # URL list reader (local, S3, WebDAV)
 │   │   ├── s3.py            # S3 object reader
-│   │   └── config.py        # MIME type detection, config helpers
+│   │   ├── mime.py          # Content-based MIME detection + extension logic
+│   │   └── config.py        # Inventory read/validate helpers
 │   ├── fs/                 # Filesystem agent
 │   │   ├── app.py          # Core filesystem logic
 │   │   └── cli.py          # Filesystem CLI commands

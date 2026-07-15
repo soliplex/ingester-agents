@@ -5,9 +5,7 @@ import json
 import pytest
 
 from soliplex.agents import ValidationError
-from soliplex.agents.common.config import MIME_OVERRIDES
 from soliplex.agents.common.config import check_config
-from soliplex.agents.common.config import detect_mime_type
 from soliplex.agents.common.config import read_config
 
 
@@ -165,87 +163,6 @@ class TestCheckConfig:
         result = check_config(config, start=0, end=10)
         assert len(result) == 1
         assert result[0]["valid"] is True
-
-
-class TestDetectMimeType:
-    """Tests for detect_mime_type function."""
-
-    def test_detect_mime_type_standard_file(self):
-        """Test detect_mime_type with standard file type."""
-        mime_type = detect_mime_type("test.pdf")
-        assert mime_type == "application/pdf"
-
-    def test_detect_mime_type_text_file(self):
-        """Test detect_mime_type with text file."""
-        mime_type = detect_mime_type("readme.txt")
-        assert mime_type == "text/plain"
-
-    def test_detect_mime_type_markdown(self):
-        """Test detect_mime_type with markdown file."""
-        mime_type = detect_mime_type("doc.md")
-        # Markdown files may not be recognized by mimetypes
-        assert mime_type in ["text/markdown", "text/x-markdown", "application/octet-stream"]
-
-    def test_detect_mime_type_docx_override(self):
-        """Test detect_mime_type with .docx file using MIME override."""
-        mime_type = detect_mime_type("document.docx")
-        expected = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        assert mime_type == expected
-
-    def test_detect_mime_type_xlsx_override(self):
-        """Test detect_mime_type with .xlsx file using MIME override."""
-        mime_type = detect_mime_type("spreadsheet.xlsx")
-        expected = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        assert mime_type == expected
-
-    def test_detect_mime_type_pptx_override(self):
-        """Test detect_mime_type with .pptx file using MIME override."""
-        mime_type = detect_mime_type("presentation.pptx")
-        expected = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        assert mime_type == expected
-
-    def test_detect_mime_type_unknown_extension(self):
-        """Test detect_mime_type with unknown extension."""
-        mime_type = detect_mime_type("file.unknownext")
-        assert mime_type == "application/octet-stream"
-
-    def test_detect_mime_type_no_extension(self):
-        """Test detect_mime_type with file without extension."""
-        mime_type = detect_mime_type("filename")
-        assert mime_type == "application/octet-stream"
-
-    def test_detect_mime_type_path_with_directory(self):
-        """Test detect_mime_type with full path."""
-        mime_type = detect_mime_type("/path/to/document.docx")
-        expected = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        assert mime_type == expected
-
-
-class TestMimeOverrides:
-    """Tests for MIME_OVERRIDES constant."""
-
-    def test_mime_overrides_exists(self):
-        """Test MIME_OVERRIDES constant exists."""
-        assert MIME_OVERRIDES is not None
-        assert isinstance(MIME_OVERRIDES, dict)
-
-    def test_mime_overrides_has_office_formats(self):
-        """Test MIME_OVERRIDES includes Office formats."""
-        assert "application/vnd.openxmlformats-officedocument.wordprocessingml.document" in MIME_OVERRIDES
-        assert "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" in MIME_OVERRIDES
-        assert "application/vnd.openxmlformats-officedocument.presentationml.presentation" in MIME_OVERRIDES
-
-    def test_mime_overrides_values(self):
-        """Test MIME_OVERRIDES maps to correct extensions.
-
-        Extensions are stored without a leading dot, matching the other
-        entries in the table and how ``detect_mime_type`` compares them
-        with ``str.endswith``.
-        """
-        assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.wordprocessingml.document"] == "docx"
-        assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] == "xlsx"
-        assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.presentationml.presentation"] == "pptx"
-        assert MIME_OVERRIDES["application/vnd.openxmlformats-officedocument.presentationml.slideshow"] == "ppsx"
 
 
 class TestReadConfig:

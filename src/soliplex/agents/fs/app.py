@@ -9,8 +9,9 @@ import aiofiles.os as aos
 from soliplex.agents import local_state
 from soliplex.agents import local_store
 from soliplex.agents.common.config import check_config
-from soliplex.agents.common.config import detect_mime_type
 from soliplex.agents.common.config import read_config
+from soliplex.agents.common.mime import detect_mime_type
+from soliplex.agents.common.mime import extension_allowed
 from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
@@ -84,18 +85,20 @@ async def build_config(source_dir) -> list[dict]:
     allowed_extensions = settings.extensions
     config = []
     for path in paths:
-        ext = path.suffix.lstrip(".")
-        if ext not in allowed_extensions and not path.is_dir():
-            logger.info(f"skipping {path}")
-            continue
         try:
+            body = path.read_bytes()
             adj_path = path.relative_to(Path(source_dir))
-            mime_type = detect_mime_type(str(adj_path))
+            # Detect from content (extension-less text -> text/plain), then
+            # filter by the detected MIME type rather than the filename.
+            mime_type = detect_mime_type(str(adj_path), data=body, text_fallback=True)
+            if not extension_allowed(mime_type, allowed_extensions):
+                logger.info(f"skipping {path} (detected {mime_type})")
+                continue
             rec = {
                 "path": str(adj_path),
-                "sha256": hashlib.sha256(path.read_bytes(), usedforsecurity=False).hexdigest(),
+                "sha256": hashlib.sha256(body, usedforsecurity=False).hexdigest(),
                 "metadata": {
-                    "size": path.stat().st_size,
+                    "size": len(body),
                     "content-type": mime_type,
                 },
             }
@@ -172,7 +175,7 @@ async def load_inventory(
             if extra_metadata:
                 meta.update(extra_metadata)
             logger.info(f"writing {uri}")
-            mime_type = (row.get("metadata") or {}).get("content-type") or detect_mime_type(uri)
+            mime_type = (row.get("metadata") or {}).get("content-type")
             await _write_local(data_path, uri, meta, source, mime_type, row.get("sha256"))
             ingested.append(uri)
         except Exception as e:
@@ -191,13 +194,17 @@ async def _write_local(
     uri: str,
     meta: dict[str, str],
     source: str,
-    mime_type: str,
+    mime_type: str | None,
     sha256: str | None,
 ):
     """Read a source file and write it (plus its sidecar) to the download dir."""
     load_path = uri if uri.startswith("/") else data_path / uri
     async with aiofiles.open(load_path, "rb") as f:
         doc_body = await f.read()
+    # When the inventory row carried no (or a generic) content type, detect
+    # it from the bytes, defaulting extension-less text to text/plain.
+    if not mime_type or mime_type == "application/octet-stream":
+        mime_type = detect_mime_type(uri, data=doc_body, text_fallback=True)
     local_store.write_document(source, uri, doc_body, mime_type, meta)
     local_state.upsert_file(source, uri, sha256, size=len(doc_body), mime_type=mime_type)
 

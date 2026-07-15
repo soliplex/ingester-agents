@@ -81,7 +81,7 @@ async def read_text_from_webdav(
 
     client = create_async_webdav_client(base_url, webdav_username, webdav_password)
     async with client:
-        content = await client.download(path)
+        content, _content_type = await client.download(path)
     return content.decode("utf-8")
 
 

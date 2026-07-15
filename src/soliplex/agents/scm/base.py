@@ -4,19 +4,19 @@ import asyncio
 import base64
 import datetime
 import logging
-import mimetypes
 import random
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 import aiohttp
 from tenacity import AsyncRetrying
 
+from soliplex.agents.common import mime
+from soliplex.agents.common.mime import passes_extension_prefilter
 from soliplex.agents.config import settings
 from soliplex.agents.retry import RETRYABLE_STATUS_CODES
 from soliplex.agents.retry import RetryableHTTPError
@@ -292,7 +292,7 @@ class BaseSCMProvider(ABC):
             "path": uri,
             "file_bytes": file_bytes,
             "sha256": file_hash,
-            "content-type": mimetypes.guess_type(rec["name"])[0],
+            "content-type": mime.detect_mime_type(rec["name"], data=file_bytes, text_fallback=True),
             "last_updated": self.get_last_updated(rec),
             "last_commit_sha": rec["last_commit_sha"],
         }
@@ -395,7 +395,7 @@ class BaseSCMProvider(ABC):
                 # This is a directory, recursively fetch all files
                 parsed = []
                 for r in res:
-                    if allowed_extensions is None or Path(r["name"]).suffix.lstrip(".") in allowed_extensions:
+                    if passes_extension_prefilter(r["name"], allowed_extensions):
                         logger.debug(f"fetching file in dir for url = {r['url']}")
                         parsed.append(
                             await self.get_data_from_url(r["url"], session, owner, repo, allowed_extensions, semaphore)
@@ -464,7 +464,7 @@ class BaseSCMProvider(ABC):
                 tasks = [
                     self.get_data_from_url(file["url"], session, owner, repo, None, semaphore)
                     for file in files
-                    if Path(file["name"]).suffix.lstrip(".") in allowed_extensions
+                    if passes_extension_prefilter(file["name"], allowed_extensions)
                 ]
                 for dir in dirs:
                     tasks.append(self.get_data_from_url(dir["url"], session, owner, repo, allowed_extensions, semaphore))
