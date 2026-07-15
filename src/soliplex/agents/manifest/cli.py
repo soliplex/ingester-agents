@@ -51,3 +51,8 @@ def run(
                     ingested = len(result.get("ingested", []))
                     errors = len(result.get("errors", []))
                     print(f"  {name}: {ingested} ingested, {errors} errors")
+            # Stale removal is reconciled once per manifest (over all
+            # components); report the count when delete_stale ran.
+            deleted = manifest_result.get("delete_stale_result")
+            if deleted is not None:
+                print(f"  deleted (stale): {len(deleted)}")

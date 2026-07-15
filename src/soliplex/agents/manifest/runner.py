@@ -325,6 +325,7 @@ async def run_manifest(manifest: Manifest) -> dict:
     logger.info("Starting manifest '%s' (%s) with %d components", manifest.id, manifest.name, len(manifest.components))
     results: list[dict[str, Any]] = []
     all_uri_hashes: list[dict[str, str]] = []
+    all_not_found: set[str] = set()
     has_errors = False
     incremental_scm_components: list[SCMComponent] = []
 
@@ -344,6 +345,13 @@ async def run_manifest(manifest: Manifest) -> dict:
                 incremental_scm_components.append(component)
             else:
                 all_uri_hashes.extend(collect_inventory_uris(result))
+            # 404s are removals, not errors: exclude them from the reconcile
+            # "should exist" set so their local copies are deleted.
+            all_not_found.update(result.get("not_found", []))
+            # Per-file transient errors (timeout/5xx) block the reconcile to
+            # stay safe, mirroring a raised component exception.
+            if result.get("errors"):
+                has_errors = True
             results.append({"component": component.name, "result": result})
             logger.info("Component '%s' completed successfully", component.name)
         except Exception as e:
@@ -366,15 +374,17 @@ async def run_manifest(manifest: Manifest) -> dict:
                 manifest.source,
             )
         else:
-            current_uris = {item["uri"] for item in all_uri_hashes}
-            delete_stale_result = local_state.prune_documents(manifest.source, current_uris)
+            current_uris = {item["uri"] for item in all_uri_hashes} - all_not_found
+            delete_stale_result = local_state.reconcile_documents(manifest.source, current_uris)
 
     error_count = sum(1 for r in results if "error" in r)
+    deleted_count = len(delete_stale_result or [])
     logger.info(
-        "Manifest '%s' finished: %d components, %d errors",
+        "Manifest '%s' finished: %d components, %d errors, %d deleted",
         manifest.id,
         len(results),
         error_count,
+        deleted_count,
     )
 
     return {

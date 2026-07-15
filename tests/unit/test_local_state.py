@@ -121,6 +121,61 @@ def test_prune_documents_deletes_files_and_state(state_env):
     assert set(local_state.load_file_state("s")) == {"a.md"}
 
 
+# --- reconcile_documents ---
+
+
+def test_reconcile_documents_removes_delisted(state_env):
+    # a.md (top level) and sub/c.md survive; b.md is delisted and removed.
+    local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+    local_store.write_document("s", "sub/c.md", b"c", "text/markdown", {})
+    local_store.write_document("s", "b.md", b"b", "text/markdown", {})
+    for uri, sha in (("a.md", "1"), ("sub/c.md", "2"), ("b.md", "3")):
+        local_state.upsert_file("s", uri, sha, mime_type="text/markdown")
+
+    removed = local_state.reconcile_documents("s", {"a.md", "sub/c.md"})
+
+    assert removed == ["b.md"]
+    base = local_store.source_dir("s")
+    assert (base / "a.md").exists()
+    assert (base / "sub" / "c.md").exists()
+    assert not (base / "b.md").exists()
+    assert not (base / "b.md.meta.json").exists()
+    assert set(local_state.load_file_state("s")) == {"a.md", "sub/c.md"}
+
+
+def test_reconcile_documents_sweeps_disk_orphan(state_env):
+    # A file present on disk with no state row is swept even though the state
+    # comparison alone would never touch it.
+    local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+    local_state.upsert_file("s", "a.md", "1", mime_type="text/markdown")
+    base = local_store.source_dir("s")
+    (base / "orphan.bin").write_bytes(b"x")
+
+    removed = local_state.reconcile_documents("s", {"a.md"})
+
+    assert removed == ["orphan.bin"]
+    assert (base / "a.md").exists()
+    assert (base / "a.md.meta.json").exists()
+    assert not (base / "orphan.bin").exists()
+
+
+def test_reconcile_documents_keeps_current(state_env):
+    local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+    local_state.upsert_file("s", "a.md", "1", mime_type="text/markdown")
+
+    removed = local_state.reconcile_documents("s", {"a.md"})
+
+    assert removed == []
+    assert (local_store.source_dir("s") / "a.md").exists()
+
+
+def test_reconcile_documents_no_download_dir(state_env):
+    # No files ever written: the source folder doesn't exist, so the disk
+    # sweep is skipped and nothing is removed.
+    removed = local_state.reconcile_documents("s", set())
+    assert removed == []
+
+
 # --- sync meta ---
 
 
