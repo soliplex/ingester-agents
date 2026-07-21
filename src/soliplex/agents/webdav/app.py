@@ -655,6 +655,7 @@ async def do_ingest(
     logger.info(f"base_path={base_path}, uri={uri}")
 
     header_type = None
+    source_url = None
     # Check if base_path is a local directory
     if base_path and Path(base_path).exists():
         load_path = Path(base_path) / uri
@@ -665,6 +666,8 @@ async def do_ingest(
         try:
             webdav_client = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
             full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}" if base_path else uri
+            if webdav_url:
+                source_url = f"{webdav_url.rstrip('/')}/{full_path.lstrip('/')}"
             logger.info(f"Downloading from WebDAV: {full_path}")
             async with webdav_client:
                 doc_body, header_type = await webdav_client.download(full_path)
@@ -709,7 +712,7 @@ async def do_ingest(
         return {"skipped": reason, "uri": uri}
 
     sha256_hash = hashlib.sha256(doc_body, usedforsecurity=False).hexdigest()
-    local_store.write_document(source, uri, doc_body, mime_type, meta)
+    local_store.write_document(source, uri, doc_body, mime_type, meta, ingestion_type="webdav", source_url=source_url)
     if etag:
         logger.debug("recording %s in local state (validator=%s)", uri, etag)
     else:
