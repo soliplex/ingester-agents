@@ -1,6 +1,7 @@
 """Tests for soliplex.agents.webdav.app module."""
 
 import hashlib
+import json
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -562,8 +563,13 @@ async def test_do_ingest_returns_sha256_on_success(local_env):
     assert result["_sha256"] == expected_sha
     assert result["_size"] == len(b"file content")
     # file written under the source folder and state updated
-    assert (local_store.source_dir("test-source") / "test.md").read_bytes() == b"file content"
+    target = local_store.source_dir("test-source") / "test.md"
+    assert target.read_bytes() == b"file content"
     assert local_state.load_file_state("test-source")["test.md"]["sha256"] == expected_sha
+    # the sidecar records the webdav ingestion type and the full download URL
+    sidecar = json.loads((target.parent / "test.md.meta.json").read_text())
+    assert sidecar["ingestion_type"] == "webdav"
+    assert sidecar["source_url"] == "http://dav/webdav/docs/test.md"
 
 
 @pytest.mark.asyncio
@@ -582,6 +588,11 @@ async def test_do_ingest_local_file_returns_sha256(tmp_path, local_env):
 
     assert result["_sha256"] == expected_sha
     assert result["_size"] == len(b"local content")
+    # a local-directory read has no download URL, so source_url is omitted
+    target = local_store.source_dir("test-source") / "test.md"
+    sidecar = json.loads((target.parent / "test.md.meta.json").read_text())
+    assert sidecar["ingestion_type"] == "webdav"
+    assert "source_url" not in sidecar
 
 
 # --- load_inventory_from_urls ---

@@ -138,6 +138,9 @@ class TestLoadInventory:
         assert (sd / "test.md").read_text() == "# Test Document\n\nThis is a test."
         assert (sd / "test.md.meta.json").exists()
         assert (sd / "readme.md").exists()
+        meta = json.loads((sd / "test.md.meta.json").read_text())
+        assert meta["ingestion_type"] == "fs"
+        assert "source_url" not in meta
 
     @pytest.mark.asyncio
     async def test_load_inventory_skips_unchanged(self, temp_document_dir, local_env):

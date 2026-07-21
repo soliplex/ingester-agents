@@ -791,10 +791,41 @@ invocation with `si-agent manifest run <path> --load` / `--no-load`.
    - Filesystem/WebDAV/Web sources: SHA256 hash
    - SCM sources: SHA3-256 hash for files, SHA256 for issues
 3. **Status Check**: The system checks which files are new or changed against the local sync state, so only new or changed files are processed
-4. **Write**: Each file is written to `<DOWNLOAD_DIR>/<source>/<source-relative-path>`, with a `<filename>.meta.json` sidecar containing its MIME type and other metadata. The stored filename is given the extension implied by its detected MIME type (added when missing, replaced when it mismatches, left alone when already correct) — see [File Typing and Filtering](#file-typing-and-filtering)
+4. **Write**: Each file is written to `<DOWNLOAD_DIR>/<source>/<source-relative-path>`, with a `<filename>.meta.json` sidecar (see [Metadata Sidecars](#metadata-sidecars)). The stored filename is given the extension implied by its detected MIME type (added when missing, replaced when it mismatches, left alone when already correct) — see [File Typing and Filtering](#file-typing-and-filtering)
 5. **State Update**: Content hashes (and, for SCM, the latest commit SHA) are recorded in local state
 6. **Stale Removal** (optional): When `delete_stale` is enabled, the download folder is reconciled against the source — documents no longer present (dropped from the listing, or 404 on fetch) are deleted, along with untracked orphan files (see [Stale Document Removal](#stale-document-removal))
 7. **haiku-rag Load** (optional): When `HAIKU_LOAD_ENABLED` is set, the downloaded documents are indexed into a per-source LanceDB database via `haiku-ingester` (see [haiku-rag Loading](#haiku-rag-loading))
+
+### Metadata Sidecars
+
+Every downloaded document is accompanied by a `<filename>.meta.json` sidecar
+written next to it. The sidecar records:
+
+| Field | Description |
+| --- | --- |
+| `mime_type` | Detected MIME type (see [File Typing and Filtering](#file-typing-and-filtering)) |
+| `source` | Source identifier (the per-source folder name) |
+| `source_uri` | Source URI the document was discovered at |
+| `ingestion_type` | Method used to fetch the document: `fs`, `webdav`, `scm`, or `web` |
+| `sha256` | SHA256 of the written bytes |
+| `size` | Size of the written bytes |
+| `metadata` | Any additional source-specific metadata |
+| `source_url` | Full URL the document was downloaded from. Written for **WebDAV** downloads (omitted when a WebDAV source resolves to a local directory) and for **web** pages (the fetched page URL); omitted for `fs` and `scm` sources |
+
+Example sidecar for a WebDAV download:
+
+```json
+{
+  "mime_type": "text/markdown",
+  "source": "webdav:docs",
+  "source_uri": "handbook/readme.md",
+  "ingestion_type": "webdav",
+  "sha256": "…",
+  "size": 1234,
+  "metadata": {},
+  "source_url": "https://dav.example.com/docs/handbook/readme.md"
+}
+```
 
 ### Incremental Sync (SCM Agent)
 

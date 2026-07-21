@@ -122,6 +122,25 @@ def test_write_document_writes_file_and_sidecar(dl):
     assert meta["size"] == 5
     assert meta["sha256"]
     assert meta["metadata"] == {"last_commit_sha": "abc"}
+    # ingestion_type defaults to None; source_url is omitted unless provided.
+    assert meta["ingestion_type"] is None
+    assert "source_url" not in meta
+
+
+def test_write_document_records_ingestion_type_and_source_url(dl):
+    target = local_store.write_document(
+        "webdav:host",
+        "docs/readme.md",
+        b"hello",
+        "text/markdown",
+        {},
+        ingestion_type="webdav",
+        source_url="https://dav.example.com/docs/readme.md",
+    )
+    sidecar = target.with_name(target.name + ".meta.json")
+    meta = json.loads(sidecar.read_text())
+    assert meta["ingestion_type"] == "webdav"
+    assert meta["source_url"] == "https://dav.example.com/docs/readme.md"
 
 
 def test_write_document_accepts_str(dl):

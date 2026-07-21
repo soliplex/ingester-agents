@@ -205,7 +205,7 @@ async def _write_local(
     # it from the bytes, defaulting extension-less text to text/plain.
     if not mime_type or mime_type == "application/octet-stream":
         mime_type = detect_mime_type(uri, data=doc_body, text_fallback=True)
-    local_store.write_document(source, uri, doc_body, mime_type, meta)
+    local_store.write_document(source, uri, doc_body, mime_type, meta, ingestion_type="fs")
     local_state.upsert_file(source, uri, sha256, size=len(doc_body), mime_type=mime_type)
 
 

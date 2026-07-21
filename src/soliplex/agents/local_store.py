@@ -128,6 +128,8 @@ def write_document(
     mime_type: str | None,
     metadata: dict | None = None,
     *,
+    ingestion_type: str | None = None,
+    source_url: str | None = None,
     download_dir: str | None = None,
 ) -> Path:
     """Write *content* and its metadata sidecar to the download directory.
@@ -138,6 +140,10 @@ def write_document(
         content: Document bytes (str is encoded as UTF-8).
         mime_type: MIME type recorded in the sidecar and used for extensions.
         metadata: Additional metadata stored under the sidecar ``metadata`` key.
+        ingestion_type: Method used to fetch the document (e.g. ``"fs"``,
+            ``"webdav"``, ``"scm"``, ``"web"``), recorded in the sidecar.
+        source_url: Full URL the document was downloaded from, recorded in the
+            sidecar when available (currently WebDAV only).
         download_dir: Override for ``settings.download_dir`` (mainly for tests).
 
     Returns:
@@ -155,10 +161,13 @@ def write_document(
         "mime_type": mime_type,
         "source": source,
         "source_uri": uri,
+        "ingestion_type": ingestion_type,
         "sha256": hashlib.sha256(data, usedforsecurity=False).hexdigest(),
         "size": len(data),
         "metadata": metadata or {},
     }
+    if source_url is not None:
+        payload["source_url"] = source_url
     sidecar.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     logger.info("wrote %s (%d bytes)", target, len(data))
     return target

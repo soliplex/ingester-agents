@@ -138,7 +138,7 @@ async def load_inventory(
         if extra_metadata:
             meta.update(extra_metadata)
         try:
-            local_store.write_document(source, url, content_bytes, content_type, meta)
+            local_store.write_document(source, url, content_bytes, content_type, meta, ingestion_type="web", source_url=url)
             local_state.upsert_file(source, url, row.get("sha256"), size=len(content_bytes), mime_type=content_type)
             ingested.append(url)
         except Exception as e:
