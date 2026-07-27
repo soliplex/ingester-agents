@@ -576,6 +576,7 @@ Top-level fields:
   - **extensions**: File extensions to include (overrides the global `EXTENSIONS` setting).
   - **delete_stale**: Remove locally-stored documents that no longer appear in any component (default: false). See [Stale Document Removal](#stale-document-removal) below.
   - **haiku_config**: Override the haiku-rag config file used when loading this manifest's source. Absolute paths are used as-is; relative values resolve under `HAIKU_PATH`. Defaults to `${HAIKU_PATH}/haiku.rag.default.yaml`. See [haiku-rag Loading](#haiku-rag-loading).
+  - **post_process**: Ordered callbacks run after the haiku-rag load completes. See [Post-process callbacks](#post-process-callbacks) below.
 - **components** (required): List of ingestion components (see below).
 
 #### Component Types
@@ -777,6 +778,42 @@ si-agent serve
 
 The CLI honors the same `HAIKU_LOAD_ENABLED` default; override per
 invocation with `si-agent manifest run <path> --load` / `--no-load`.
+
+#### Post-process callbacks
+
+A manifest's `config.post_process` is an ordered list of callbacks invoked
+**after** the haiku-rag load for that source completes successfully (and after
+its summary has been streamed). Each entry names a `method` (a dotted import
+path) and optional `kwargs`; the callback is invoked as
+`method(source, **kwargs)` — `source` is the manifest's source and `kwargs`
+are the configured extra args.
+
+```yaml
+config:
+  haiku_config: haiku.rag.custom.yaml
+  post_process:
+    - method: soliplex.agents.manifest.post_processors:vacuum
+      kwargs: { vacuum_retention_seconds: 0 }
+    - method: your_project.postprocess:identify_and_apply
+      kwargs: { only_missing: true, overrides: /etc/agent/overrides.json }
+```
+
+- **Dotted path:** `pkg.mod:func` or `pkg.mod.func`. The module must be
+  importable in the agent's environment.
+- **Ordering:** steps run sequentially in the order listed.
+- **Config auto-inject:** when a step omits `config` and the callable accepts
+  one (an explicit `config` parameter or `**kwargs`), the manifest's resolved
+  haiku config path is passed so the callback opens the store with the same
+  config the load used.
+- **Failure isolation:** a step that raises is logged and recorded; the
+  remaining steps still run. The per-step outcomes are returned under the load
+  result's `post_process` key.
+- **Only after a successful load:** post-process does not run when the load
+  fails, times out, or is skipped (`--no-load`).
+
+Built-in callback: `soliplex.agents.manifest.post_processors:vacuum` runs
+LanceDB maintenance (optimize + clean up table history) on the per-source
+database.
 
 **Note:** All commands support WebDAV credentials via environment variables (`WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD`) or command-line options (`--webdav-url`, `--webdav-username`, `--webdav-password`).
 
