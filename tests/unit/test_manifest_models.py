@@ -201,10 +201,22 @@ class TestManifestConfig:
         c = ManifestConfig()
         assert c.delete_stale is True
         assert c.haiku_config is None
+        assert c.post_process == []
 
     def test_haiku_config_override(self):
         c = ManifestConfig(haiku_config="custom.yaml")
         assert c.haiku_config == "custom.yaml"
+
+    def test_post_process_steps(self):
+        c = ManifestConfig(
+            post_process=[
+                {"method": "pkg.mod:fn", "kwargs": {"x": 1}},
+                {"method": "pkg.mod:other"},  # kwargs defaults to {}
+            ]
+        )
+        assert [s.method for s in c.post_process] == ["pkg.mod:fn", "pkg.mod:other"]
+        assert c.post_process[0].kwargs == {"x": 1}
+        assert c.post_process[1].kwargs == {}
 
 
 # --- Schedule ---
