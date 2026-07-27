@@ -8,6 +8,7 @@ from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
+from typing import Any
 from typing import Literal
 
 from pydantic import BaseModel
@@ -378,6 +379,18 @@ Component = Annotated[
 # --- Manifest Config ---
 
 
+class PostProcessStep(BaseModel):
+    """One post-load callback, invoked as ``method(source, **kwargs)``.
+
+    ``method`` is a dotted import path (``pkg.mod:func`` or ``pkg.mod.func``);
+    ``kwargs`` are passed through as keyword arguments. See
+    ``docs/post-process-plan.md``.
+    """
+
+    method: str
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+
+
 class ManifestConfig(BaseModel):
     """Shared configuration applied to all components in a manifest."""
 
@@ -385,6 +398,9 @@ class ManifestConfig(BaseModel):
     metadata: dict[str, str] | None = None
     delete_stale: bool = True
     haiku_config: str | None = None  # Per-manifest haiku-rag config (abs path, or filename under HAIKU_PATH)
+    # Ordered callbacks run after the haiku-rag load completes (see
+    # soliplex.agents.manifest.post_process).
+    post_process: list[PostProcessStep] = Field(default_factory=list)
 
 
 class Schedule(BaseModel):

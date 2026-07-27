@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import ManifestConfig
+from soliplex.agents.config import PostProcessStep
 from soliplex.agents.config import settings
 from soliplex.agents.manifest import haiku_loader
 
@@ -251,3 +252,54 @@ class TestRunLoad:
         proc.wait.assert_awaited_once()
         assert result["timed_out"] is True
         assert result["returncode"] is None
+
+    @pytest.mark.asyncio
+    async def test_post_process_runs_on_success(self, haiku_env):
+        manifest = Manifest(
+            id="m",
+            name="M",
+            source="src",
+            config=ManifestConfig(post_process=[PostProcessStep(method="pkg:fn")]),
+            components=[{"type": "fs", "name": "c", "path": "/data"}],
+        )
+        proc = _fake_proc(returncode=0)
+        with (
+            patch(
+                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=proc,
+            ),
+            patch(
+                "soliplex.agents.manifest.post_process.run_post_process",
+                new_callable=AsyncMock,
+                return_value=[{"method": "pkg:fn", "ok": True, "error": None}],
+            ) as mock_pp,
+        ):
+            result = await haiku_loader.run_load(manifest)
+        mock_pp.assert_awaited_once_with(manifest)
+        assert result["post_process"] == [{"method": "pkg:fn", "ok": True, "error": None}]
+
+    @pytest.mark.asyncio
+    async def test_post_process_skipped_on_nonzero(self, haiku_env):
+        manifest = Manifest(
+            id="m",
+            name="M",
+            source="src",
+            config=ManifestConfig(post_process=[PostProcessStep(method="pkg:fn")]),
+            components=[{"type": "fs", "name": "c", "path": "/data"}],
+        )
+        proc = _fake_proc(returncode=1, stdout_lines=[], stderr_lines=[b"x\n"])
+        with (
+            patch(
+                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=proc,
+            ),
+            patch(
+                "soliplex.agents.manifest.post_process.run_post_process",
+                new_callable=AsyncMock,
+            ) as mock_pp,
+        ):
+            result = await haiku_loader.run_load(manifest)
+        mock_pp.assert_not_awaited()
+        assert result["post_process"] == []

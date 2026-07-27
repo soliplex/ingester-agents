@@ -217,6 +217,14 @@ async def run_load(manifest: Manifest) -> dict:
             source,
             proc.returncode,
         )
+    post_process_results: list[dict] = []
+    if proc.returncode == 0 and manifest.config and manifest.config.post_process:
+        # Local import avoids a circular import (post_process imports
+        # resolve_haiku_cfg from this module).
+        from soliplex.agents.manifest import post_process
+
+        post_process_results = await post_process.run_post_process(manifest)
+
     return {
         "source": source,
         "db": db,
@@ -224,4 +232,5 @@ async def run_load(manifest: Manifest) -> dict:
         "stdout": out,
         "stderr": err,
         "timed_out": False,
+        "post_process": post_process_results,
     }
