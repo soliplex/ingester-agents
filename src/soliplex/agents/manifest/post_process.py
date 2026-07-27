@@ -20,10 +20,14 @@ See ``docs/post-process-plan.md``.
 import importlib
 import inspect
 import logging
+import os
 from collections.abc import Callable
+from contextlib import contextmanager
 from inspect import Parameter
 
 from soliplex.agents.config import Manifest
+from soliplex.agents.config import settings
+from soliplex.agents.local_store import sanitize_source
 from soliplex.agents.manifest.haiku_loader import resolve_haiku_cfg
 
 logger = logging.getLogger(__name__)
@@ -42,19 +46,57 @@ def _resolve_method(spec: str) -> Callable:
     return getattr(module, attr)
 
 
-def _wants_config(method: Callable) -> bool:
-    """Whether ``method`` accepts a ``config`` keyword (named or via ``**kwargs``)."""
+def _accepts_kwarg(method: Callable, name: str) -> bool:
+    """Whether ``method`` accepts ``name`` as a keyword (named or via ``**kwargs``)."""
     try:
         params = inspect.signature(method).parameters
     except (TypeError, ValueError):  # pragma: no cover - builtins without signatures
         return False
-    if "config" in params:
+    if name in params:
         return True
     return any(p.kind is Parameter.VAR_KEYWORD for p in params.values())
 
 
-async def run_post_process(manifest: Manifest) -> list[dict]:
+@contextmanager
+def _load_env(manifest: Manifest):
+    """Temporarily expose the env vars ``run_load`` injects into the load
+    subprocess (``SOURCE`` / ``DOWNLOAD_DIR``).
+
+    In-process callbacks load the same haiku config the load used, and that
+    config interpolates ``${SOURCE}`` / ``${DOWNLOAD_DIR}`` (which
+    ``load_yaml_config`` expands eagerly). Those two are only ever set in the
+    subprocess env, so mirror them here for the duration of the callbacks. Other
+    ``${VAR}`` references (``STATE_DIR``, embedder URLs, ...) are expected in the
+    inherited environment, exactly as they are for the subprocess. Loads are
+    serialized, so the temporary global mutation does not race.
+    """
+    overrides = {
+        "SOURCE": sanitize_source(manifest.source),
+        "DOWNLOAD_DIR": settings.download_dir,
+    }
+    previous = {key: os.environ.get(key) for key in overrides}
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+async def run_post_process(
+    manifest: Manifest,
+    *,
+    ingester_exit_code: int | None = None,
+) -> list[dict]:
     """Run ``manifest.config.post_process`` callbacks in order.
+
+    ``ingester_exit_code`` is the haiku-ingester load's exit code (``None`` on
+    timeout). Callbacks run regardless of it, so a step can inspect the outcome;
+    it is auto-injected as an ``ingester_exit_code`` kwarg for callables that
+    accept one.
 
     Returns a per-step outcome list of ``{"method", "ok", "error"}`` dicts. A
     step that raises is logged and recorded with ``ok=False``; execution
@@ -64,29 +106,32 @@ async def run_post_process(manifest: Manifest) -> list[dict]:
         return []
 
     results: list[dict] = []
-    for step in manifest.config.post_process:
-        outcome: dict = {"method": step.method, "ok": True, "error": None}
-        try:
-            method = _resolve_method(step.method)
-            kwargs = dict(step.kwargs)
-            if "config" not in kwargs and _wants_config(method):
-                kwargs["config"] = resolve_haiku_cfg(manifest)
-            logger.info(
-                "Running post-process '%s' for source '%s'",
-                step.method,
-                manifest.source,
-            )
-            value = method(manifest.source, **kwargs)
-            if inspect.isawaitable(value):
-                await value
-            logger.info("Post-process '%s' completed", step.method)
-        except Exception as exc:
-            logger.exception(
-                "Post-process '%s' failed for source '%s'",
-                step.method,
-                manifest.source,
-            )
-            outcome["ok"] = False
-            outcome["error"] = str(exc)
-        results.append(outcome)
+    with _load_env(manifest):
+        for step in manifest.config.post_process:
+            outcome: dict = {"method": step.method, "ok": True, "error": None}
+            try:
+                method = _resolve_method(step.method)
+                kwargs = dict(step.kwargs)
+                if "config" not in kwargs and _accepts_kwarg(method, "config"):
+                    kwargs["config"] = resolve_haiku_cfg(manifest)
+                if "ingester_exit_code" not in kwargs and _accepts_kwarg(method, "ingester_exit_code"):
+                    kwargs["ingester_exit_code"] = ingester_exit_code
+                logger.info(
+                    "Running post-process '%s' for source '%s'",
+                    step.method,
+                    manifest.source,
+                )
+                value = method(manifest.source, **kwargs)
+                if inspect.isawaitable(value):
+                    await value
+                logger.info("Post-process '%s' completed", step.method)
+            except Exception as exc:
+                logger.exception(
+                    "Post-process '%s' failed for source '%s'",
+                    step.method,
+                    manifest.source,
+                )
+                outcome["ok"] = False
+                outcome["error"] = str(exc)
+            results.append(outcome)
     return results

@@ -253,15 +253,19 @@ class TestRunLoad:
         assert result["timed_out"] is True
         assert result["returncode"] is None
 
-    @pytest.mark.asyncio
-    async def test_post_process_runs_on_success(self, haiku_env):
-        manifest = Manifest(
+    @staticmethod
+    def _pp_manifest():
+        return Manifest(
             id="m",
             name="M",
             source="src",
             config=ManifestConfig(post_process=[PostProcessStep(method="pkg:fn")]),
             components=[{"type": "fs", "name": "c", "path": "/data"}],
         )
+
+    @pytest.mark.asyncio
+    async def test_post_process_runs_on_success(self, haiku_env):
+        manifest = self._pp_manifest()
         proc = _fake_proc(returncode=0)
         with (
             patch(
@@ -276,18 +280,13 @@ class TestRunLoad:
             ) as mock_pp,
         ):
             result = await haiku_loader.run_load(manifest)
-        mock_pp.assert_awaited_once_with(manifest)
+        mock_pp.assert_awaited_once_with(manifest, ingester_exit_code=0)
         assert result["post_process"] == [{"method": "pkg:fn", "ok": True, "error": None}]
 
     @pytest.mark.asyncio
-    async def test_post_process_skipped_on_nonzero(self, haiku_env):
-        manifest = Manifest(
-            id="m",
-            name="M",
-            source="src",
-            config=ManifestConfig(post_process=[PostProcessStep(method="pkg:fn")]),
-            components=[{"type": "fs", "name": "c", "path": "/data"}],
-        )
+    async def test_post_process_runs_on_nonzero_with_exit_code(self, haiku_env):
+        # Fires even when the load failed; the exit code is forwarded.
+        manifest = self._pp_manifest()
         proc = _fake_proc(returncode=1, stdout_lines=[], stderr_lines=[b"x\n"])
         with (
             patch(
@@ -298,8 +297,34 @@ class TestRunLoad:
             patch(
                 "soliplex.agents.manifest.post_process.run_post_process",
                 new_callable=AsyncMock,
+                return_value=[{"method": "pkg:fn", "ok": True, "error": None}],
             ) as mock_pp,
         ):
             result = await haiku_loader.run_load(manifest)
-        mock_pp.assert_not_awaited()
-        assert result["post_process"] == []
+        mock_pp.assert_awaited_once_with(manifest, ingester_exit_code=1)
+        assert result["post_process"] == [{"method": "pkg:fn", "ok": True, "error": None}]
+
+    @pytest.mark.asyncio
+    async def test_post_process_runs_on_timeout_with_none_exit_code(self, haiku_env):
+        manifest = self._pp_manifest()
+        proc = _fake_proc(returncode=0)
+        with (
+            patch(
+                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=proc,
+            ),
+            patch(
+                "soliplex.agents.manifest.haiku_loader.asyncio.timeout",
+                _RaisingTimeout,
+            ),
+            patch(
+                "soliplex.agents.manifest.post_process.run_post_process",
+                new_callable=AsyncMock,
+                return_value=[{"method": "pkg:fn", "ok": True, "error": None}],
+            ) as mock_pp,
+        ):
+            result = await haiku_loader.run_load(manifest)
+        mock_pp.assert_awaited_once_with(manifest, ingester_exit_code=None)
+        assert result["timed_out"] is True
+        assert result["post_process"] == [{"method": "pkg:fn", "ok": True, "error": None}]

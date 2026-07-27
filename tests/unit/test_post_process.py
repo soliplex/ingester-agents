@@ -32,25 +32,25 @@ def test_resolve_method_dotted():
     assert post_process._resolve_method("os.getcwd") is os.getcwd
 
 
-# --- _wants_config ---
+# --- _accepts_kwarg ---
 
 
-def test_wants_config_named_param():
+def test_accepts_kwarg_named_param():
     def method(source, *, config=None): ...
 
-    assert post_process._wants_config(method) is True
+    assert post_process._accepts_kwarg(method, "config") is True
 
 
-def test_wants_config_var_keyword():
+def test_accepts_kwarg_var_keyword():
     def method(source, **kwargs): ...
 
-    assert post_process._wants_config(method) is True
+    assert post_process._accepts_kwarg(method, "anything") is True
 
 
-def test_wants_config_absent():
+def test_accepts_kwarg_absent():
     def method(source, *, x=1): ...
 
-    assert post_process._wants_config(method) is False
+    assert post_process._accepts_kwarg(method, "config") is False
 
 
 # --- run_post_process ---
@@ -94,11 +94,39 @@ async def test_runs_in_order_with_inject_and_sync_async(monkeypatch):
     assert [r["ok"] for r in results] == [True, True, True, True]
     assert all(r["error"] is None for r in results)
     assert calls == [
-        ("async", "s1", {"config": "CFG"}),
+        # **kwargs accepts both config and ingester_exit_code -> both injected
+        ("async", "s1", {"config": "CFG", "ingester_exit_code": None}),
         ("sync", "s1", {"config": "CFG", "x": 1}),
         ("sync", "s1", {"config": "OWN", "x": 2}),
         ("noconf", "s1", {"y": None}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_injects_ingester_exit_code_when_accepted(monkeypatch):
+    calls: list[tuple] = []
+
+    def wants_code(source, *, ingester_exit_code=None):
+        calls.append(("named", ingester_exit_code))
+
+    def wants_kwargs(source, **kwargs):
+        calls.append(("kwargs", kwargs.get("ingester_exit_code")))
+
+    def no_code(source, *, x=None):  # no exit-code param, no **kwargs -> no inject
+        calls.append(("none", x))
+
+    registry = {"a": wants_code, "b": wants_kwargs, "c": no_code}
+    monkeypatch.setattr(post_process, "_resolve_method", lambda spec: registry[spec])
+    monkeypatch.setattr(post_process, "resolve_haiku_cfg", lambda manifest: "CFG")
+
+    steps = [
+        PostProcessStep(method="a"),
+        PostProcessStep(method="b"),
+        PostProcessStep(method="c"),
+    ]
+    await post_process.run_post_process(_manifest(steps=steps), ingester_exit_code=2)
+
+    assert calls == [("named", 2), ("kwargs", 2), ("none", None)]
 
 
 @pytest.mark.asyncio
@@ -122,3 +150,28 @@ async def test_failing_step_is_logged_and_others_continue(monkeypatch):
     assert "nope" in results[0]["error"]
     assert results[1]["ok"] is True
     assert ran == ["src"]  # the step after the failure still ran
+
+
+# --- _load_env ---
+
+
+def test_load_env_sets_and_restores(monkeypatch):
+    # SOURCE preexists (restored to old value); DOWNLOAD_DIR is unset (popped).
+    monkeypatch.setenv("SOURCE", "preexisting")
+    monkeypatch.delenv("DOWNLOAD_DIR", raising=False)
+    monkeypatch.setattr(post_process.settings, "download_dir", "downloads", raising=False)
+
+    with post_process._load_env(_manifest(source="army-airfield")):
+        assert os.environ["SOURCE"] == "army-airfield"
+        assert os.environ["DOWNLOAD_DIR"] == "downloads"
+
+    assert os.environ["SOURCE"] == "preexisting"  # restored
+    assert "DOWNLOAD_DIR" not in os.environ  # popped
+
+
+def test_load_env_sanitizes_source(monkeypatch):
+    monkeypatch.delenv("SOURCE", raising=False)
+    monkeypatch.setattr(post_process.settings, "download_dir", "downloads", raising=False)
+
+    with post_process._load_env(_manifest(source="gitea:admin:repo")):
+        assert os.environ["SOURCE"] == "gitea_admin_repo"  # ':' -> '_'
