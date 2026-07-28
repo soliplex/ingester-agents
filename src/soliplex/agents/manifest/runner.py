@@ -379,11 +379,13 @@ async def run_manifest(manifest: Manifest) -> dict:
 
     error_count = sum(1 for r in results if "error" in r)
     deleted_count = len(delete_stale_result or [])
+    not_found_count = len(all_not_found)
     logger.info(
-        "Manifest '%s' finished: %d components, %d errors, %d deleted",
+        "Manifest '%s' finished: %d components, %d errors, %d not found (404), %d deleted",
         manifest.id,
         len(results),
         error_count,
+        not_found_count,
         deleted_count,
     )
 
@@ -405,6 +407,11 @@ async def run_manifests(path: str, load: bool = False) -> list[dict]:
         path: Path to a single YAML file or directory of YAML files.
         load: Run a haiku-rag load after each manifest.
 
+    A failure while running or loading one manifest is isolated to that
+    manifest: it is logged and recorded (an ``error`` on the result, or a
+    ``haiku_load_error`` when the load/post-process step is the one that failed)
+    and the remaining manifests still run.
+
     Returns:
         List of per-manifest result dicts.
 
@@ -421,10 +428,19 @@ async def run_manifests(path: str, load: bool = False) -> list[dict]:
         manifests = load_manifests_from_dir(path)
     results = []
     for manifest in manifests:
-        result = await run_manifest(manifest)
+        try:
+            result = await run_manifest(manifest)
+        except Exception as e:
+            logger.exception("Manifest '%s' (%s) failed", manifest.id, manifest.name)
+            results.append({"manifest_id": manifest.id, "manifest_name": manifest.name, "error": str(e)})
+            continue
         if load:
             from soliplex.agents.manifest import haiku_loader
 
-            result["haiku_load"] = await haiku_loader.run_load(manifest)
+            try:
+                result["haiku_load"] = await haiku_loader.run_load(manifest)
+            except Exception as e:
+                logger.exception("haiku load failed for manifest '%s' (%s)", manifest.id, manifest.name)
+                result["haiku_load_error"] = str(e)
         results.append(result)
     return results

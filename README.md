@@ -782,11 +782,11 @@ invocation with `si-agent manifest run <path> --load` / `--no-load`.
 #### Post-process callbacks
 
 A manifest's `config.post_process` is an ordered list of callbacks invoked
-**after** the haiku-rag load for that source completes successfully (and after
-its summary has been streamed). Each entry names a `method` (a dotted import
-path) and optional `kwargs`; the callback is invoked as
-`method(source, **kwargs)` — `source` is the manifest's source and `kwargs`
-are the configured extra args.
+**after** the haiku-rag load for that source finishes (and after its summary
+has been streamed) — **whether the load succeeded, failed, or timed out**. Each
+entry names a `method` (a dotted import path) and optional `kwargs`; the
+callback is invoked as `method(source, **kwargs)` — `source` is the manifest's
+source and `kwargs` are the configured extra args.
 
 ```yaml
 config:
@@ -804,12 +804,21 @@ config:
 - **Config auto-inject:** when a step omits `config` and the callable accepts
   one (an explicit `config` parameter or `**kwargs`), the manifest's resolved
   haiku config path is passed so the callback opens the store with the same
-  config the load used.
-- **Failure isolation:** a step that raises is logged and recorded; the
-  remaining steps still run. The per-step outcomes are returned under the load
-  result's `post_process` key.
-- **Only after a successful load:** post-process does not run when the load
-  fails, times out, or is skipped (`--no-load`).
+  config the load used. While the callbacks run, `SOURCE` and `DOWNLOAD_DIR` are
+  set in the environment (as they are for the load subprocess), so a config that
+  interpolates `${SOURCE}` / `${DOWNLOAD_DIR}` loads in-process too. Other
+  `${VAR}` references must be present in the inherited environment.
+- **Load outcome (`ingester_exit_code`):** callbacks fire regardless of the
+  load result. The load's exit code (`0` on success, non-zero on failure,
+  `None` on timeout) is auto-injected as an `ingester_exit_code` kwarg for
+  callables that accept one, so a step can decide what to do on failure.
+- **Terminate on error:** a step that raises is logged and the exception
+  propagates — the remaining steps do **not** run. The per-step outcomes are
+  returned under the load result's `post_process` key only when every step
+  succeeds. In a batch/directory run the failure is isolated to that manifest
+  (recorded as `haiku_load_error` on its result); the other manifests still run.
+- **Requires a load:** post-process only runs when a load runs — it is skipped
+  with `--no-load`.
 
 Built-in callback: `soliplex.agents.manifest.post_processors:vacuum` runs
 LanceDB maintenance (optimize + clean up table history) on the per-source

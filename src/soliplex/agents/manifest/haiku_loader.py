@@ -134,6 +134,19 @@ async def _pump_stream(reader, log, source: str) -> str:
     return "\n".join(lines)
 
 
+async def _run_post_process(manifest: Manifest, ingester_exit_code: int | None) -> list[dict]:
+    """Run the manifest's post-process callbacks after a load.
+
+    Fires regardless of the load outcome (success, failure, or timeout);
+    ``ingester_exit_code`` is the load's exit code (``None`` on timeout) and is
+    forwarded to the callbacks. The local import avoids a circular import
+    (``post_process`` imports ``resolve_haiku_cfg`` from this module).
+    """
+    from soliplex.agents.manifest import post_process
+
+    return await post_process.run_post_process(manifest, ingester_exit_code=ingester_exit_code)
+
+
 async def run_load(manifest: Manifest) -> dict:
     """Run a single haiku-rag batch load for *manifest*.
 
@@ -189,7 +202,13 @@ async def run_load(manifest: Manifest) -> dict:
             source,
             settings.haiku_load_timeout,
         )
-        return {"source": source, "db": db, "returncode": None, "timed_out": True}
+        return {
+            "source": source,
+            "db": db,
+            "returncode": None,
+            "timed_out": True,
+            "post_process": await _run_post_process(manifest, None),
+        }
 
     logger.info(
         "haiku load subprocess for source '%s' exited with code %s",
@@ -217,14 +236,6 @@ async def run_load(manifest: Manifest) -> dict:
             source,
             proc.returncode,
         )
-    post_process_results: list[dict] = []
-    if proc.returncode == 0 and manifest.config and manifest.config.post_process:
-        # Local import avoids a circular import (post_process imports
-        # resolve_haiku_cfg from this module).
-        from soliplex.agents.manifest import post_process
-
-        post_process_results = await post_process.run_post_process(manifest)
-
     return {
         "source": source,
         "db": db,
@@ -232,5 +243,5 @@ async def run_load(manifest: Manifest) -> dict:
         "stdout": out,
         "stderr": err,
         "timed_out": False,
-        "post_process": post_process_results,
+        "post_process": await _run_post_process(manifest, proc.returncode),
     }
