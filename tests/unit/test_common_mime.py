@@ -71,7 +71,7 @@ class TestDetectMimeType:
         assert mime.detect_mime_type("report.pdf") == "application/pdf"
 
     def test_mime_override_by_extension(self, monkeypatch):
-        # Force a guess_type miss so the MIME_OVERRIDES fallback runs on every
+        # Force a guess_type miss so the _EXTENSION_MIME fallback runs on every
         # platform. Linux CI ships /etc/mime.types (media-types) which knows
         # .docx, so guess_type would otherwise return early and never reach
         # the override loop; Windows lacks it. Patching keeps the branch
@@ -79,6 +79,17 @@ class TestDetectMimeType:
         monkeypatch.setattr(mime.mimetypes, "guess_type", lambda *a, **k: (None, None))
         expected = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         assert mime.detect_mime_type("/x/report.docx") == expected
+
+    def test_mime_override_case_insensitive(self, monkeypatch):
+        monkeypatch.setattr(mime.mimetypes, "guess_type", lambda *a, **k: (None, None))
+        expected = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        assert mime.detect_mime_type("/x/REPORT.DOCX") == expected
+
+    def test_mime_override_requires_dot_not_bare_suffix(self, monkeypatch):
+        # A name merely ending in the bare token (no dot) must not match --
+        # "roadoc" is not an AsciiDoc file.
+        monkeypatch.setattr(mime.mimetypes, "guess_type", lambda *a, **k: (None, None))
+        assert mime.detect_mime_type("/x/roadoc") == "application/octet-stream"
 
     def test_issues_default_markdown(self):
         assert mime.detect_mime_type("/owner/repo/issues/12") == "text/markdown"
@@ -109,6 +120,32 @@ class TestGuessExtension:
     def test_unknown_returns_empty(self):
         assert mime.guess_extension("application/x-madeup-type") == ""
 
+    def test_mime_override_docx(self):
+        # OOXML / custom types resolve via _MIME_EXTENSIONS even where the
+        # runtime mimetypes DB does not know them.
+        docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        assert mime.guess_extension(docx) == ".docx"
+
+    def test_mime_override_custom_types_return_canonical(self):
+        # Canonical (first) extension is returned even when aliases exist.
+        assert mime.guess_extension("text/plantuml") == ".puml"
+        assert mime.guess_extension("text/asciidoc") == ".adoc"
+
+
+class TestExtensionsFor:
+    def test_none_returns_empty(self):
+        assert mime.extensions_for(None) == []
+
+    def test_override_aliases_plus_stdlib_synonym_deduped(self, monkeypatch):
+        # Table gives canonical + alias; stdlib adds a new synonym; a duplicate
+        # from stdlib is deduped.
+        monkeypatch.setattr(mime.mimetypes, "guess_all_extensions", lambda mt: [".puml", ".xyz"])
+        assert mime.extensions_for("text/plantuml") == ["puml", "plantuml", "xyz"]
+
+    def test_stdlib_only_when_not_in_table(self, monkeypatch):
+        monkeypatch.setattr(mime.mimetypes, "guess_all_extensions", lambda mt: [".jpg", ".jpeg"])
+        assert mime.extensions_for("image/jpeg") == ["jpg", "jpeg"]
+
 
 class TestEnsureExtension:
     def test_no_extension_for_unknown_mime_kept(self):
@@ -137,6 +174,32 @@ class TestExtensionAllowed:
 
     def test_text_plain_allowed_when_txt_listed(self):
         assert mime.extension_allowed("text/plain", ["md", "pdf", "txt"]) is True
+
+    def test_office_and_custom_types_allowed_via_overrides(self):
+        # Regression: office/custom MIME types must round-trip to their
+        # extension via _MIME_EXTENSIONS even when the runtime mimetypes DB does
+        # not know them (the original ".docx skipped" bug).
+        exts = ["md", "pdf", "docx", "adoc", "pptx", "ppsx", "txt", "xlsx", "puml"]
+        for mt in (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "text/plantuml",
+            "text/asciidoc",
+        ):
+            assert mime.extension_allowed(mt, exts) is True
+
+    def test_alias_extension_allowed(self):
+        # C: long-form spellings the old single-extension map lacked.
+        assert mime.extension_allowed("text/plantuml", ["plantuml"]) is True
+        assert mime.extension_allowed("text/asciidoc", ["asciidoc"]) is True
+
+    def test_synonym_extension_allowed(self, monkeypatch):
+        # D: a synonym spelling (jpeg) is honored even though the canonical
+        # guess is .jpg.
+        monkeypatch.setattr(mime.mimetypes, "guess_all_extensions", lambda mt: [".jpg", ".jpeg"])
+        assert mime.extension_allowed("image/jpeg", ["md", "jpeg"]) is True
 
 
 class TestPassesExtensionPrefilter:
