@@ -25,33 +25,41 @@ import puremagic
 
 logger = logging.getLogger(__name__)
 
-# MIME type -> canonical extension (dot included) where
-# ``mimetypes.guess_extension`` is unhelpful (e.g. ".markdown" not ".md").
-_EXT_OVERRIDES = {
-    "text/markdown": ".md",
-    "text/html": ".html",
-    "text/plain": ".txt",
+# Single bidirectional source of truth: canonical MIME type -> the bare
+# extensions it maps to, most-canonical first. Covers types the stdlib
+# ``mimetypes`` DB is missing or resolves unhelpfully (e.g. ".markdown"
+# instead of ".md", or OOXML office types absent from a minimal container's
+# mime database).
+#
+# The FIRST extension is canonical -- used when naming/storing a file
+# (:func:`guess_extension`). EVERY extension is an accepted alias, both when
+# filtering (:func:`extension_allowed` / :func:`extensions_for`) and when
+# detecting a MIME from a filename (:func:`detect_mime_type`). Deriving both
+# directions from one table keeps them from drifting apart.
+_MIME_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "text/markdown": ("md",),
+    "text/html": ("html",),
+    "text/plain": ("txt",),
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ("docx",),  # noqa: E501
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ("pptx",),  # noqa: E501
+    "application/vnd.openxmlformats-officedocument.presentationml.slideshow": ("ppsx",),  # noqa: E501
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ("xlsx",),  # noqa: E501
+    "text/plantuml": ("puml", "plantuml"),
+    "text/asciidoc": ("adoc", "asciidoc"),
+    "text/svg+xml": ("svg",),
+    "application/x-latex": ("latex",),
+    "text/python": ("python",),
+    "text/yaml": ("yaml", "yml"),
+    "text/toml": ("toml",),
+    "text/json": ("json",),
+    "text/xml": ("xml",),
+    "text/javascript": ("js",),
 }
 
-# Extension overrides for MIME types the stdlib doesn't know, used when
-# ``mimetypes.guess_type`` returns ``None`` for a path. Maps MIME -> the
-# bare extension that identifies it.
-MIME_OVERRIDES = {
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",  # noqa: E501
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",  # noqa: E501
-    "application/vnd.openxmlformats-officedocument.presentationml.slideshow": "ppsx",  # noqa: E501
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",  # noqa: E501
-    "text/plantuml": "puml",
-    "text/asciidoc": "adoc",
-    "text/svg+xml": "svg",
-    "application/x-latex": "latex",
-    "text/python": "python",
-    "text/yaml": "yaml",
-    "text/toml": "toml",
-    "text/json": "json",
-    "text/xml": "xml",
-    "text/javascript": "js",
-}
+# Reverse index (extension -> MIME) for detecting a MIME from a filename when
+# the stdlib doesn't know the extension. Built from _MIME_EXTENSIONS; the first
+# MIME to claim an extension wins (insertion order preserved).
+_EXTENSION_MIME: dict[str, str] = {ext: mime for mime, exts in _MIME_EXTENSIONS.items() for ext in exts}
 
 # Content types that carry no useful information -- treat as "unknown" so we
 # fall through to sniffing / extension rather than trusting them.
@@ -137,8 +145,9 @@ def detect_mime_type(
     if mime_type:
         return mime_type
 
-    for mime, ext in MIME_OVERRIDES.items():
-        if path_str.endswith(ext):
+    lowered = path_str.lower()
+    for ext, mime in _EXTENSION_MIME.items():
+        if lowered.endswith(f".{ext}"):
             return mime
 
     if "/issues/" in path_str:
@@ -153,13 +162,39 @@ def detect_mime_type(
 
 
 def guess_extension(mime_type: str | None) -> str:
-    """Return a file extension (including the dot) for *mime_type*, or ``""``."""
+    """Return the canonical file extension (including the dot) for *mime_type*.
+
+    Consults :data:`_MIME_EXTENSIONS` (returning its first/canonical extension)
+    before the stdlib, so OOXML / office / custom types resolve even where the
+    runtime's ``mimetypes`` database does not know them (e.g. a minimal
+    container without ``/etc/mime.types``). Returns ``""`` when unknown.
+    """
     if not mime_type:
         return ""
     mt = _normalize(mime_type)
-    if mt in _EXT_OVERRIDES:
-        return _EXT_OVERRIDES[mt]
+    if mt in _MIME_EXTENSIONS:
+        return "." + _MIME_EXTENSIONS[mt][0]
     return mimetypes.guess_extension(mt) or ""
+
+
+def extensions_for(mime_type: str | None) -> list[str]:
+    """Return every accepted bare extension for *mime_type*, canonical first.
+
+    Combines the override aliases in :data:`_MIME_EXTENSIONS` (e.g. ``puml`` and
+    ``plantuml`` for PlantUML) with the stdlib's synonyms
+    (``mimetypes.guess_all_extensions``, e.g. ``jpg``/``jpeg``/``jpe`` for JPEG
+    or ``htm``/``html`` for HTML). Used by :func:`extension_allowed` so a file
+    is accepted when *any* valid spelling of its type is in the allowlist.
+    """
+    if not mime_type:
+        return []
+    mt = _normalize(mime_type)
+    exts = list(_MIME_EXTENSIONS.get(mt, ()))
+    for ext in mimetypes.guess_all_extensions(mt):
+        bare = ext.lstrip(".").lower()
+        if bare not in exts:
+            exts.append(bare)
+    return exts
 
 
 def ensure_extension(name: str, mime_type: str | None) -> str:
@@ -184,8 +219,14 @@ def ensure_extension(name: str, mime_type: str | None) -> str:
 
 
 def extension_allowed(mime_type: str | None, allowed_extensions: list[str]) -> bool:
-    """Return ``True`` when *mime_type*'s extension is in *allowed_extensions*."""
-    return guess_extension(mime_type).lstrip(".") in allowed_extensions
+    """Return ``True`` when *any* extension for *mime_type* is allowed.
+
+    Accepts the file when any valid spelling of its type (see
+    :func:`extensions_for`) appears in *allowed_extensions*, so alias/synonym
+    extensions (``plantuml`` vs ``puml``, ``jpeg`` vs ``jpg``) are all honored.
+    """
+    allowed = set(allowed_extensions)
+    return any(ext in allowed for ext in extensions_for(mime_type))
 
 
 def passes_extension_prefilter(name: str, allowed_extensions: list[str] | None) -> bool:
