@@ -98,9 +98,10 @@ async def run_post_process(
     it is auto-injected as an ``ingester_exit_code`` kwarg for callables that
     accept one.
 
-    Returns a per-step outcome list of ``{"method", "ok", "error"}`` dicts. A
-    step that raises is logged and recorded with ``ok=False``; execution
-    continues with the next step.
+    Runs the steps in order and **terminates on the first error**: a step that
+    raises is logged and the exception propagates, so the remaining steps do not
+    run. Returns a per-step ``{"method", "ok", "error"}`` list (all ``ok``) only
+    when every step succeeds.
     """
     if manifest.config is None or not manifest.config.post_process:
         return []
@@ -108,7 +109,11 @@ async def run_post_process(
     results: list[dict] = []
     with _load_env(manifest):
         for step in manifest.config.post_process:
-            outcome: dict = {"method": step.method, "ok": True, "error": None}
+            logger.info(
+                "Running post-process '%s' for source '%s'",
+                step.method,
+                manifest.source,
+            )
             try:
                 method = _resolve_method(step.method)
                 kwargs = dict(step.kwargs)
@@ -116,22 +121,16 @@ async def run_post_process(
                     kwargs["config"] = resolve_haiku_cfg(manifest)
                 if "ingester_exit_code" not in kwargs and _accepts_kwarg(method, "ingester_exit_code"):
                     kwargs["ingester_exit_code"] = ingester_exit_code
-                logger.info(
-                    "Running post-process '%s' for source '%s'",
-                    step.method,
-                    manifest.source,
-                )
                 value = method(manifest.source, **kwargs)
                 if inspect.isawaitable(value):
                     await value
-                logger.info("Post-process '%s' completed", step.method)
-            except Exception as exc:
+            except Exception:
                 logger.exception(
-                    "Post-process '%s' failed for source '%s'",
+                    "Post-process '%s' failed for source '%s'; terminating",
                     step.method,
                     manifest.source,
                 )
-                outcome["ok"] = False
-                outcome["error"] = str(exc)
-            results.append(outcome)
+                raise
+            logger.info("Post-process '%s' completed", step.method)
+            results.append({"method": step.method, "ok": True, "error": None})
     return results

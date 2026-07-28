@@ -130,26 +130,26 @@ async def test_injects_ingester_exit_code_when_accepted(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_failing_step_is_logged_and_others_continue(monkeypatch):
+async def test_failing_step_terminates_and_skips_rest(monkeypatch):
     ran: list[str] = []
 
     def boom(source, **kwargs):
         raise RuntimeError("nope")
 
-    def ok(source, **kwargs):
+    def later(source, **kwargs):
         ran.append(source)
 
-    registry = {"boom": boom, "ok": ok}
+    registry = {"boom": boom, "later": later}
     monkeypatch.setattr(post_process, "_resolve_method", lambda spec: registry[spec])
     monkeypatch.setattr(post_process, "resolve_haiku_cfg", lambda manifest: "CFG")
 
-    steps = [PostProcessStep(method="boom"), PostProcessStep(method="ok")]
-    results = await post_process.run_post_process(_manifest(steps=steps))
+    steps = [PostProcessStep(method="boom"), PostProcessStep(method="later")]
 
-    assert results[0]["ok"] is False
-    assert "nope" in results[0]["error"]
-    assert results[1]["ok"] is True
-    assert ran == ["src"]  # the step after the failure still ran
+    # The error propagates (terminate on error) rather than being swallowed.
+    with pytest.raises(RuntimeError, match="nope"):
+        await post_process.run_post_process(_manifest(steps=steps))
+
+    assert ran == []  # the step after the failure did not run
 
 
 # --- _load_env ---

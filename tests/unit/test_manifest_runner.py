@@ -706,6 +706,54 @@ class TestRunManifests:
         assert results[0]["haiku_load"] == {"source": "src", "returncode": 0}
 
     @pytest.mark.asyncio
+    async def test_manifest_failure_isolated_to_that_manifest(self, tmp_path):
+        for name, mid in [("a.yml", "a"), ("b.yml", "b")]:
+            (tmp_path / name).write_text(
+                textwrap.dedent(f"""\
+                id: {mid}
+                name: M{mid}
+                source: src
+                components:
+                  - type: fs
+                    name: c
+                    path: /data
+            """)
+            )
+        with patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock:
+            mock.side_effect = [RuntimeError("boom"), {"manifest_id": "b", "results": []}]
+            results = await runner.run_manifests(str(tmp_path))
+        # First manifest failed, but the second still ran.
+        assert len(results) == 2
+        assert results[0] == {"manifest_id": "a", "manifest_name": "Ma", "error": "boom"}
+        assert results[1]["manifest_id"] == "b"
+
+    @pytest.mark.asyncio
+    async def test_haiku_load_failure_isolated(self, tmp_path):
+        f = tmp_path / "test.yml"
+        f.write_text(
+            textwrap.dedent("""\
+            id: test
+            name: Test
+            source: src
+            components:
+              - type: fs
+                name: c
+                path: /data
+        """)
+        )
+        with (
+            patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run,
+            patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock) as mock_load,
+        ):
+            mock_run.return_value = {"manifest_id": "test", "results": []}
+            mock_load.side_effect = RuntimeError("load boom")
+            results = await runner.run_manifests(str(f), load=True)
+        # Component result preserved; the load failure is recorded, not raised.
+        assert results[0]["manifest_id"] == "test"
+        assert results[0]["haiku_load_error"] == "load boom"
+        assert "haiku_load" not in results[0]
+
+    @pytest.mark.asyncio
     async def test_nonexistent_path(self):
         with pytest.raises(FileNotFoundError, match="not found"):
             await runner.run_manifests("/nonexistent/path")

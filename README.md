@@ -812,9 +812,11 @@ config:
   load result. The load's exit code (`0` on success, non-zero on failure,
   `None` on timeout) is auto-injected as an `ingester_exit_code` kwarg for
   callables that accept one, so a step can decide what to do on failure.
-- **Failure isolation:** a step that raises is logged and recorded; the
-  remaining steps still run. The per-step outcomes are returned under the load
-  result's `post_process` key.
+- **Terminate on error:** a step that raises is logged and the exception
+  propagates — the remaining steps do **not** run. The per-step outcomes are
+  returned under the load result's `post_process` key only when every step
+  succeeds. In a batch/directory run the failure is isolated to that manifest
+  (recorded as `haiku_load_error` on its result); the other manifests still run.
 - **Requires a load:** post-process only runs when a load runs — it is skipped
   with `--no-load`.
 
