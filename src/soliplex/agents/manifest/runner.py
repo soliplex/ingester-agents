@@ -379,11 +379,13 @@ async def run_manifest(manifest: Manifest) -> dict:
 
     error_count = sum(1 for r in results if "error" in r)
     deleted_count = len(delete_stale_result or [])
+    not_found_count = len(all_not_found)
     logger.info(
-        "Manifest '%s' finished: %d components, %d errors, %d deleted",
+        "Manifest '%s' finished: %d components, %d errors, %d not found (404), %d deleted",
         manifest.id,
         len(results),
         error_count,
+        not_found_count,
         deleted_count,
     )
 

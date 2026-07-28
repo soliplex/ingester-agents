@@ -853,7 +853,7 @@ class TestRunManifestDeleteStale:
         assert result["delete_stale_result"] == []
 
     @pytest.mark.asyncio
-    async def test_not_found_excluded_from_reconcile_set(self, delete_stale_manifest):
+    async def test_not_found_excluded_from_reconcile_set(self, delete_stale_manifest, caplog):
         # A 404'd URI is reported in not_found and must be subtracted from the
         # reconcile "should exist" set so its local copy is removed.
         fs_result = {
@@ -870,12 +870,15 @@ class TestRunManifestDeleteStale:
                 {FSComponent: AsyncMock(return_value=fs_result), WebComponent: AsyncMock(return_value=web_result)},
             ),
             patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
+            caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.runner"),
         ):
             mock_check.return_value = []
             await runner.run_manifest(delete_stale_manifest)
 
         mock_check.assert_called_once()
         assert mock_check.call_args[0][1] == {"a.md", "http://example.com"}
+        # The completion summary reports the 404 count.
+        assert "1 not found (404)" in caplog.text
 
     @pytest.mark.asyncio
     async def test_not_found_does_not_block_reconcile(self, delete_stale_manifest):
