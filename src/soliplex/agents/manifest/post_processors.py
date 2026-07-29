@@ -7,51 +7,80 @@ list by dotted path and invoked as ``method(source, **kwargs)`` after the
 ingester-agents.
 """
 
+import asyncio
 import logging
-from pathlib import Path
+import os
 
-from haiku.rag.app import HaikuRAGApp
-from haiku.rag.config import AppConfig
-from haiku.rag.config import get_config
-from haiku.rag.config import load_yaml_config
-
+from soliplex.agents.config import settings
+from soliplex.agents.local_store import sanitize_source
+from soliplex.agents.manifest.haiku_loader import _pump_stream
 from soliplex.agents.manifest.haiku_loader import resolve_db_path
 
 logger = logging.getLogger(__name__)
 
-
-def _load_app_config(config: str | None) -> AppConfig:
-    """Load an ``AppConfig`` from a path, or haiku's own config discovery."""
-    if config:
-        return AppConfig.model_validate(load_yaml_config(config))
-    return get_config()
+# Default upper bound (seconds) on a vacuum subprocess before it is killed.
+DEFAULT_VACUUM_TIMEOUT = 1800
 
 
 async def vacuum(
     source: str,
     *,
     config: str | None = None,
-    vacuum_retention_seconds: int | None = 0,
+    timeout: float = DEFAULT_VACUUM_TIMEOUT,
 ) -> None:
-    """Vacuum the per-source LanceDB (optimize + clean up table history).
+    """Vacuum the per-source LanceDB by running ``haiku-rag vacuum`` as a
+    subprocess.
 
-    A post-process callback: resolves the same ``${LANCEDB_DIR}/<slug>.lancedb``
-    the load wrote (via :func:`resolve_db_path`), opens a
-    :class:`~haiku.rag.app.HaikuRAGApp`, and runs its ``vacuum``.
+    Running out-of-process -- exactly like the ``haiku-ingester`` load -- keeps
+    LanceDB's async runtime out of the agent's event loop (avoiding an
+    in-process deadlock) and makes the pass killable, so a stuck compaction
+    cannot hang the run or leave the process unable to exit. The subprocess's
+    stdout/stderr are streamed to the logger line by line. Retention is taken
+    from the haiku config's ``storage.vacuum_retention_seconds``.
 
     Args:
         source: The manifest source; slugified to locate the database.
-        config: Optional haiku.rag config path. When omitted, the manifest's
-            resolved config is auto-injected by the post-process runner (or
-            haiku's own discovery is used). It must match the DB embedder.
-        vacuum_retention_seconds: Overrides the config's retention window before
-            vacuuming. Defaults to ``0`` -- reclaim everything
+        config: Optional haiku.rag config path (auto-injected by the
+            post-process runner). Passed as ``haiku-rag --config``; when omitted
+            the subprocess falls back to haiku's own config discovery. It must
+            match the DB embedder.
+        timeout: Seconds before the vacuum subprocess is killed.
+
+    Raises:
+        RuntimeError: if the vacuum times out or exits non-zero.
     """
-    db_path = Path(resolve_db_path(source))
-    app_config = _load_app_config(config)
-    if vacuum_retention_seconds is not None:
-        app_config.storage.vacuum_retention_seconds = vacuum_retention_seconds
+    db_path = resolve_db_path(source)
+    argv = ["haiku-rag"]
+    if config:
+        argv += ["--config", str(config)]
+    argv += ["vacuum", "--db", db_path]
+
+    # Mirror the load subprocess env so a config that interpolates ${SOURCE} /
+    # ${DOWNLOAD_DIR} resolves, and force unbuffered output for live streaming.
+    env = os.environ.copy()
+    env["SOURCE"] = sanitize_source(source)
+    env["DOWNLOAD_DIR"] = settings.download_dir
+    env["PYTHONUNBUFFERED"] = "1"
+
     logger.info("Vacuuming LanceDB for source '%s' -> %s", source, db_path)
-    app = HaikuRAGApp(db_path=db_path, config=app_config)
-    await app.vacuum()
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        async with asyncio.timeout(timeout):
+            await asyncio.gather(
+                _pump_stream(proc.stdout, logger.info, source),
+                _pump_stream(proc.stderr, logger.info, source),
+            )
+            await proc.wait()
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(f"Vacuum for source '{source}' timed out after {timeout}s") from None
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"Vacuum for source '{source}' failed (rc={proc.returncode})")
     logger.info("Vacuum completed for source '%s'", source)
