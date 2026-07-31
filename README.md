@@ -793,7 +793,7 @@ config:
   haiku_config: haiku.rag.custom.yaml
   post_process:
     - method: soliplex.agents.manifest.post_processors:vacuum
-      kwargs: { vacuum_retention_seconds: 0 }
+      kwargs: { timeout: 1800 }
     - method: your_project.postprocess:identify_and_apply
       kwargs: { only_missing: true, overrides: /etc/agent/overrides.json }
 ```
@@ -822,7 +822,11 @@ config:
 
 Built-in callback: `soliplex.agents.manifest.post_processors:vacuum` runs
 LanceDB maintenance (optimize + clean up table history) on the per-source
-database.
+database. It shells out to `haiku-rag vacuum` as a subprocess (like the load) —
+keeping LanceDB's async runtime out of the agent's event loop and making the
+pass killable via its `timeout` kwarg (default 1800s), so a stuck compaction
+can't hang the run. Retention comes from the haiku config's
+`storage.vacuum_retention_seconds`.
 
 **Note:** All commands support WebDAV credentials via environment variables (`WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD`) or command-line options (`--webdav-url`, `--webdav-username`, `--webdav-password`).
 
