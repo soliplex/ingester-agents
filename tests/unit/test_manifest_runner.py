@@ -636,6 +636,52 @@ class TestRunWebComponent:
             assert mock_resolve.call_args.kwargs["base_dir"] == "/manifests"
 
 
+# --- resolve_manifests ---
+
+_MANIFEST_YAML = textwrap.dedent("""\
+    id: {mid}
+    name: Test
+    source: {mid}
+    components:
+      - type: fs
+        name: c
+        path: /data
+""")
+
+
+class TestResolveManifests:
+    def test_single_file(self, tmp_path):
+        f = tmp_path / "one.yml"
+        f.write_text(_MANIFEST_YAML.format(mid="one"))
+        assert [m.id for m in runner.resolve_manifests(str(f))] == ["one"]
+
+    def test_directory(self, tmp_path):
+        (tmp_path / "a.yml").write_text(_MANIFEST_YAML.format(mid="a"))
+        (tmp_path / "b.yaml").write_text(_MANIFEST_YAML.format(mid="b"))
+        assert [m.id for m in runner.resolve_manifests(str(tmp_path))] == ["a", "b"]
+
+    def test_all_uses_manifest_dir(self, tmp_path, monkeypatch):
+        (tmp_path / "a.yml").write_text(_MANIFEST_YAML.format(mid="a"))
+        monkeypatch.setattr(settings, "manifest_dir", str(tmp_path), raising=False)
+        assert [m.id for m in runner.resolve_manifests("all")] == ["a"]
+
+    def test_all_without_manifest_dir_raises(self, monkeypatch):
+        monkeypatch.setattr(settings, "manifest_dir", None, raising=False)
+        with pytest.raises(FileNotFoundError, match="MANIFEST_DIR"):
+            runner.resolve_manifests("all")
+
+    def test_all_with_non_directory_manifest_dir_raises(self, tmp_path, monkeypatch):
+        f = tmp_path / "not-a-dir.yml"
+        f.write_text(_MANIFEST_YAML.format(mid="a"))
+        monkeypatch.setattr(settings, "manifest_dir", str(f), raising=False)
+        with pytest.raises(FileNotFoundError, match="not a directory"):
+            runner.resolve_manifests("all")
+
+    def test_missing_path_raises(self):
+        with pytest.raises(FileNotFoundError, match="Path not found"):
+            runner.resolve_manifests("/nonexistent/path")
+
+
 # --- run_manifests ---
 
 

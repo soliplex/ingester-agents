@@ -19,6 +19,9 @@ from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Sentinel path meaning "every manifest in settings.manifest_dir".
+ALL_MANIFESTS = "all"
+
 
 def load_manifest(path: str) -> Manifest:
     """Read a YAML file and validate it as a Manifest.
@@ -97,6 +100,42 @@ def load_manifests_from_dir(dir_path: str) -> list[Manifest]:
         ValueError: If duplicate manifest IDs are found.
     """
     return [m for m, _ in load_manifests_with_paths(dir_path)]
+
+
+def resolve_manifests(path: str) -> list[Manifest]:
+    """Resolve *path* into a list of manifests.
+
+    ``path`` is either the sentinel ``"all"`` (every ``.yml``/``.yaml`` in
+    ``settings.manifest_dir``), a single manifest file, or a directory of
+    manifests. ``"all"`` is therefore a reserved word: a file or directory
+    literally named ``all`` cannot be addressed by name.
+
+    Args:
+        path: ``"all"``, a manifest file path, or a directory path.
+
+    Returns:
+        Validated Manifest instances (invalid files in directory mode are
+        skipped with a warning by :func:`load_manifests_with_paths`).
+
+    Raises:
+        FileNotFoundError: If *path* does not exist, or ``"all"`` was given
+            and ``settings.manifest_dir`` is unset or not a directory.
+        ValueError: If duplicate manifest IDs are found (directory mode).
+    """
+    if path == ALL_MANIFESTS:
+        if not settings.manifest_dir:
+            raise FileNotFoundError(
+                f"MANIFEST_DIR (settings.manifest_dir) must be set to use '{ALL_MANIFESTS}'",
+            )
+        if not Path(settings.manifest_dir).is_dir():
+            raise FileNotFoundError(f"MANIFEST_DIR is not a directory: {settings.manifest_dir}")
+        return load_manifests_from_dir(settings.manifest_dir)
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+    if p.is_file():
+        return [load_manifest(path)]
+    return load_manifests_from_dir(path)
 
 
 @contextmanager
@@ -404,7 +443,8 @@ async def run_manifests(path: str, load: bool = False) -> list[dict]:
     manifest. The sequential loop guarantees only one load runs at a time.
 
     Args:
-        path: Path to a single YAML file or directory of YAML files.
+        path: ``"all"`` (every manifest in ``settings.manifest_dir``), a
+            single YAML file, or a directory of YAML files.
         load: Run a haiku-rag load after each manifest.
 
     A failure while running or loading one manifest is isolated to that
@@ -419,13 +459,7 @@ async def run_manifests(path: str, load: bool = False) -> list[dict]:
         FileNotFoundError: If the path does not exist.
         ValueError: If duplicate manifest IDs are found (directory mode).
     """
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"Path not found: {path}")
-    if p.is_file():
-        manifests = [load_manifest(path)]
-    else:
-        manifests = load_manifests_from_dir(path)
+    manifests = resolve_manifests(path)
     results = []
     for manifest in manifests:
         try:

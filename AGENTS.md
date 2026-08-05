@@ -55,9 +55,10 @@ src/soliplex/agents/
 ├── webdav/             # WebDAV agent (cli.py + app.py + async_client.py)
 ├── web/                # Web agent (app.py)
 ├── manifest/           # Declarative multi-source runner
-│   ├── cli.py          # `manifest run` command
-│   ├── runner.py       # load_manifest / run_manifest dispatch
-│   └── haiku_loader.py # haiku-rag batch load subprocess
+│   ├── cli.py          # `manifest run` / `migrate` / `vacuum` commands
+│   ├── runner.py       # resolve_manifests / run_manifest dispatch
+│   ├── haiku_loader.py # haiku-rag batch load subprocess
+│   └── haiku_maint.py  # haiku-rag migrate/vacuum subprocesses
 └── server/             # FastAPI REST API
     ├── __init__.py     # App setup, CORS, scheduler, lifespan
     ├── auth.py         # Authentication
@@ -155,6 +156,7 @@ HAIKU_LOAD_ENABLED=true                       # Queue a haiku-rag load after eac
 LANCEDB_DIR=/var/lib/lancedb                  # Base dir for per-source <source>.lancedb
 HAIKU_PATH=/etc/haiku                         # Base dir for haiku-rag config files
 # HAIKU_LOAD_COMMAND, HAIKU_DEFAULT_CONFIG, HAIKU_LOAD_TIMEOUT, HAIKU_LOAD_CWD also available
+# HAIKU_MAINTENANCE_COMMAND, HAIKU_MAINTENANCE_TIMEOUT for `manifest migrate` / `manifest vacuum`
 ```
 
 ### SCM Authentication
@@ -204,7 +206,9 @@ si-agent
 │   ├── check-status <path> <source>
 │   └── run-inventory <path> <source>
 ├── manifest
-│   └── run <path> [--json] [--load/--no-load]   # Run manifest(s); optionally haiku-rag load
+│   ├── run <path> [--json] [--load/--no-load]   # Run manifest(s); optionally haiku-rag load
+│   ├── migrate [path|all] [--json] [--timeout] [--dry-run]  # haiku-rag DB migrations
+│   └── vacuum [path|all] [--json] [--timeout] [--dry-run]   # haiku-rag DB compaction
 └── serve [--host] [--port] [--reload]
 ```
 
@@ -264,6 +268,17 @@ global FIFO queue (`server/haiku_queue.py`), so only one load runs at a
 time; the CLI runs loads sequentially for the same effect. The subprocess
 inherits the parent environment plus injected `SOURCE` (sanitized
 download-folder name) and `DOWNLOAD_DIR`. See `manifest/haiku_loader.py`.
+
+### haiku-rag Database Maintenance
+
+`si-agent manifest {migrate,vacuum} [path|all]` runs
+`haiku-rag --config=<cfg> <verb> --db=<db>` per manifest source, reusing the
+load's config/DB/env resolution (see `manifest/haiku_maint.py`). `all`
+(the default) means every manifest in `MANIFEST_DIR`. Operations run
+sequentially, manifests sharing a database are deduplicated, no post-process
+callbacks fire, and `--dry-run` prints the command lines without spawning.
+`post_processors.vacuum` delegates to the same `run_verb` code path but
+raises on failure, because the post-process chain stops on the first error.
 
 ### Incremental Sync (SCM)
 

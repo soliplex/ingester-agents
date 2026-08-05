@@ -43,6 +43,9 @@ si-agent webdav validate-config <path>
 si-agent manifest run <path>            # Run manifest file or directory
 si-agent manifest run <path> --json     # Output results as JSON
 si-agent manifest run <path> --load     # Also run a haiku-rag load per manifest
+si-agent manifest migrate [path|all]    # Run pending haiku-rag DB migrations
+si-agent manifest vacuum [path|all]     # Compact the haiku-rag databases
+si-agent manifest vacuum --dry-run      # Print the commands without running them
 
 # REST API server
 si-agent serve
@@ -80,6 +83,7 @@ src/soliplex/agents/
 ├── manifest/           # Manifest runner
 │   ├── runner.py       # YAML loading, validation, agent dispatch
 │   ├── haiku_loader.py # haiku-rag batch load subprocess
+│   ├── haiku_maint.py  # haiku-rag migrate/vacuum subprocesses
 │   └── cli.py          # CLI commands
 ├── scm/                # SCM agent
 │   ├── cli.py          # CLI commands
@@ -111,6 +115,7 @@ STATE_DIR=sync_state                   # Local sync state, one SQLite file per s
 HAIKU_LOAD_ENABLED=true                # Queue a haiku-rag load after each manifest run
 LANCEDB_DIR=/var/lib/lancedb           # Base dir for per-source <source>.lancedb
 HAIKU_PATH=/etc/haiku                  # Base dir for haiku-rag config files
+# HAIKU_MAINTENANCE_TIMEOUT=3600       # Timeout for a migrate/vacuum subprocess
 
 # SCM authentication
 scm_auth_token=your-token
@@ -155,6 +160,15 @@ After each manifest run, a `haiku-ingester` load is queued for the source.
 Inside the server one worker drains a global FIFO queue
 (`server/haiku_queue.py`) so only one load runs at a time; the CLI runs
 loads sequentially. See `manifest/haiku_loader.py`.
+
+### haiku-rag Database Maintenance
+
+`si-agent manifest {migrate,vacuum} [path|all]` runs
+`haiku-rag --config=<cfg> <verb> --db=<db>` once per manifest source,
+reusing the load's config/DB/env resolution. `all` (the default) means
+every manifest in `MANIFEST_DIR`. Sequential, deduplicated by database, no
+post-process callbacks; `--dry-run` prints the command lines instead of
+running them. See `manifest/haiku_maint.py`.
 
 ### Status Checking
 
