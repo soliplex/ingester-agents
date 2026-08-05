@@ -106,6 +106,7 @@ Different contexts use different algorithms:
 ```python
 # Filesystem/WebDAV files: SHA256
 import hashlib
+
 hashlib.sha256(content, usedforsecurity=False).hexdigest()
 
 # SCM files: SHA3-256
@@ -236,6 +237,7 @@ from soliplex.agents.scm.base import BaseSCMProvider
 from soliplex.agents.scm.github import GitHubProvider
 from soliplex.agents.scm.gitea import GiteaProvider
 
+
 # Factory pattern with optional Git CLI decorator
 def get_provider(platform: str) -> BaseSCMProvider:
     if platform == "github":
@@ -246,6 +248,7 @@ def get_provider(platform: str) -> BaseSCMProvider:
     # Git CLI mode wraps provider with decorator
     if settings.scm_use_git_cli:
         from soliplex.agents.scm.git_cli import GitCliDecorator
+
         provider = GitCliDecorator(provider)
 
     return provider
