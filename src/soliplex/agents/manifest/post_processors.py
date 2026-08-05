@@ -7,14 +7,9 @@ list by dotted path and invoked as ``method(source, **kwargs)`` after the
 ingester-agents.
 """
 
-import asyncio
 import logging
-import os
 
-from soliplex.agents.config import settings
-from soliplex.agents.local_store import sanitize_source
-from soliplex.agents.manifest.haiku_loader import _pump_stream
-from soliplex.agents.manifest.haiku_loader import resolve_db_path
+from soliplex.agents.manifest import haiku_maint
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +26,17 @@ async def vacuum(
     """Vacuum the per-source LanceDB by running ``haiku-rag vacuum`` as a
     subprocess.
 
+    Delegates to :func:`soliplex.agents.manifest.haiku_maint.run_verb`, which
+    is the same code path the ``si-agent manifest vacuum`` CLI verb uses.
     Running out-of-process -- exactly like the ``haiku-ingester`` load -- keeps
     LanceDB's async runtime out of the agent's event loop (avoiding an
     in-process deadlock) and makes the pass killable, so a stuck compaction
     cannot hang the run or leave the process unable to exit. The subprocess's
     stdout/stderr are streamed to the logger line by line. Retention is taken
     from the haiku config's ``storage.vacuum_retention_seconds``.
+
+    Unlike the CLI verb, a failure is **raised**: the post-process chain stops
+    on the first error (see :func:`post_process.run_post_process`).
 
     Args:
         source: The manifest source; slugified to locate the database.
@@ -49,38 +49,14 @@ async def vacuum(
     Raises:
         RuntimeError: if the vacuum times out or exits non-zero.
     """
-    db_path = resolve_db_path(source)
-    argv = ["haiku-rag"]
-    if config:
-        argv += ["--config", str(config)]
-    argv += ["vacuum", "--db", db_path]
-
-    # Mirror the load subprocess env so a config that interpolates ${SOURCE} /
-    # ${DOWNLOAD_DIR} resolves, and force unbuffered output for live streaming.
-    env = os.environ.copy()
-    env["SOURCE"] = sanitize_source(source)
-    env["DOWNLOAD_DIR"] = settings.download_dir
-    env["PYTHONUNBUFFERED"] = "1"
-
-    logger.info("Vacuuming LanceDB for source '%s' -> %s", source, db_path)
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    result = await haiku_maint.run_verb(
+        source,
+        "vacuum",
+        haiku_cfg=str(config) if config else None,
+        timeout=timeout,
     )
-    try:
-        async with asyncio.timeout(timeout):
-            await asyncio.gather(
-                _pump_stream(proc.stdout, logger.info, source),
-                _pump_stream(proc.stderr, logger.info, source),
-            )
-            await proc.wait()
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise RuntimeError(f"Vacuum for source '{source}' timed out after {timeout}s") from None
-
-    if proc.returncode != 0:
-        raise RuntimeError(f"Vacuum for source '{source}' failed (rc={proc.returncode})")
+    if result["timed_out"]:
+        raise RuntimeError(f"Vacuum for source '{source}' timed out after {timeout}s")
+    if result["returncode"] != 0:
+        raise RuntimeError(f"Vacuum for source '{source}' failed (rc={result['returncode']})")
     logger.info("Vacuum completed for source '%s'", source)

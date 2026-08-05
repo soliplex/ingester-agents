@@ -9,8 +9,9 @@ import pytest
 from soliplex.agents.config import settings
 from soliplex.agents.manifest import post_processors
 
-_EXEC = "soliplex.agents.manifest.post_processors.asyncio.create_subprocess_exec"
-_TIMEOUT = "soliplex.agents.manifest.post_processors.asyncio.timeout"
+# `vacuum` delegates to haiku_maint.run_verb, which owns the subprocess.
+_EXEC = "soliplex.agents.manifest.haiku_maint.asyncio.create_subprocess_exec"
+_TIMEOUT = "soliplex.agents.manifest.haiku_maint.asyncio.timeout"
 
 
 class _FakeStream:
@@ -55,6 +56,14 @@ class _RaisingTimeout:
 def lancedb_env(monkeypatch):
     monkeypatch.setattr(settings, "lancedb_dir", "/data/lance", raising=False)
     monkeypatch.setattr(settings, "download_dir", "downloads", raising=False)
+    monkeypatch.setattr(
+        settings,
+        "haiku_maintenance_command",
+        "haiku-rag --config={haiku_cfg} {verb} --db={db}",
+        raising=False,
+    )
+    monkeypatch.setattr(settings, "haiku_maintenance_timeout", 3600, raising=False)
+    monkeypatch.setattr(settings, "haiku_load_cwd", None, raising=False)
 
 
 @pytest.mark.asyncio
@@ -65,10 +74,10 @@ async def test_vacuum_runs_subprocess_with_config(lancedb_env):
 
     argv = list(mock_exec.call_args.args)
     assert argv[0] == "haiku-rag"
-    assert "--config" in argv
-    assert "/etc/haiku/haiku.rag.yaml" in argv
-    assert argv[-2] == "--db"
+    assert "--config=/etc/haiku/haiku.rag.yaml" in argv
+    assert "vacuum" in argv
     # DB resolved to the slugified source under $LANCEDB_DIR.
+    assert argv[-1].startswith("--db=")
     assert argv[-1].replace("\\", "/").endswith("army-airfield.lancedb")
     # Env carries SOURCE / DOWNLOAD_DIR so a config with ${SOURCE} resolves.
     env = mock_exec.call_args.kwargs["env"]
@@ -83,7 +92,7 @@ async def test_vacuum_omits_config_when_none(lancedb_env):
     with patch(_EXEC, new_callable=AsyncMock, return_value=proc) as mock_exec:
         await post_processors.vacuum("src")
 
-    assert "--config" not in mock_exec.call_args.args
+    assert not any(arg.startswith("--config") for arg in mock_exec.call_args.args)
 
 
 @pytest.mark.asyncio

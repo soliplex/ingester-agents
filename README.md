@@ -47,6 +47,7 @@ MIME types are detected from file **content** (via [puremagic](https://pypi.org/
   - Runs `haiku-ingester run-batch` after each manifest run
   - One per-source `.lancedb` database, configurable command and config file
   - Globally serialized — only one load runs at a time
+  - `manifest migrate` / `manifest vacuum` maintain those databases
 
 - **REST API Server**: Run agents as a web service
   - FastAPI-based HTTP endpoints for all operations
@@ -181,6 +182,10 @@ HAIKU_PATH=/etc/haiku                  # base dir for haiku-rag config files
 # HAIKU_LOAD_COMMAND=haiku-ingester --config={haiku_cfg} run-batch --db={db}
 # HAIKU_LOAD_TIMEOUT=1800
 # HAIKU_LOAD_CWD=/var/lib/ingester     # subprocess working dir (default: inherit)
+
+# haiku-rag maintenance (`si-agent manifest migrate` / `manifest vacuum`)
+# HAIKU_MAINTENANCE_COMMAND=haiku-rag --config={haiku_cfg} {verb} --db={db}
+# HAIKU_MAINTENANCE_TIMEOUT=3600
 
 # S3-compatible storage (for urls_file references using s3:// URLs)
 S3_ENDPOINT_URL=https://minio.example.com:9000
@@ -521,6 +526,14 @@ Output results as JSON:
 si-agent manifest run /path/to/manifest.yml --json
 ```
 
+Maintain the databases those manifests load into (see
+[Database Maintenance](#database-maintenance)):
+
+```bash
+si-agent manifest migrate           # every manifest in $MANIFEST_DIR
+si-agent manifest vacuum --dry-run  # print the commands without running them
+```
+
 #### Manifest YAML Format
 
 A manifest file defines the ingestion source, optional shared configuration, and one or more components:
@@ -778,6 +791,70 @@ si-agent serve
 
 The CLI honors the same `HAIKU_LOAD_ENABLED` default; override per
 invocation with `si-agent manifest run <path> --load` / `--no-load`.
+
+#### Database Maintenance
+
+Two verbs operate on the per-source LanceDB databases rather than on the
+downloaded documents:
+
+```bash
+si-agent manifest migrate [PATH] [--json] [--timeout N] [--dry-run]
+si-agent manifest vacuum  [PATH] [--json] [--timeout N] [--dry-run]
+```
+
+- `migrate` runs pending haiku-rag schema migrations; `vacuum` optimizes and
+  compacts the tables to reclaim disk space.
+- `PATH` is optional and defaults to `all`:
+
+  | `PATH`               | Scope                                            |
+  |----------------------|--------------------------------------------------|
+  | `all` (default)      | Every `*.yml` / `*.yaml` in `$MANIFEST_DIR`      |
+  | a manifest YAML file | That manifest only                               |
+  | a directory          | Every manifest in that directory                 |
+
+  `all` is a reserved word, so a file or directory literally named `all`
+  cannot be addressed by name.
+- **Command** is configurable via `HAIKU_MAINTENANCE_COMMAND` (default
+  `haiku-rag --config={haiku_cfg} {verb} --db={db}`). Placeholders:
+  `{verb}`, `{haiku_cfg}`, `{db}`, `{source}`, `{lancedb_dir}`,
+  `{haiku_path}`. As with the load command, the template is tokenized before
+  substitution, so values containing spaces cannot inject extra arguments.
+- **Config file, database path, and environment** resolve exactly as they do
+  for a load: `config.haiku_config` (or `${HAIKU_PATH}/${HAIKU_DEFAULT_CONFIG}`),
+  `${LANCEDB_DIR}/<slug>.lancedb`, and the parent environment plus injected
+  `SOURCE` / `DOWNLOAD_DIR` so the haiku-rag config's `${VAR}` references
+  resolve. Output is streamed to the log line by line.
+- **One at a time.** Operations run strictly sequentially, the same capacity
+  constraint that applies to loads.
+- **Deduplicated.** Manifests that share a source resolve to the same
+  database; it is processed once and the rest are reported as skipped.
+- **Timeout** defaults to `HAIKU_MAINTENANCE_TIMEOUT` (3600s — higher than
+  the load timeout because a compaction can outlast a batch load) and can be
+  overridden per invocation with `--timeout`.
+- **Exit code** is 1 if any operation failed or timed out, so the verbs can
+  be used directly in cron or a deploy script. A skipped duplicate is not a
+  failure.
+
+`--dry-run` resolves every target and prints the command lines that *would*
+run, one per line, in execution order — nothing is spawned. Skips and
+resolution failures appear as `#`-prefixed comments so the block stays
+paste-safe:
+
+```console
+$ si-agent manifest vacuum --dry-run
+haiku-rag --config=/etc/haiku/haiku.rag.default.yaml vacuum --db=/var/lib/lancedb/synced-docs.lancedb
+haiku-rag --config=/etc/haiku/haiku.rag.default.yaml vacuum --db=/var/lib/lancedb/web-source.lancedb
+# composite source: skipped (duplicate db)
+```
+
+Under `--dry-run` the exit code reflects resolution only, so a dry run
+doubles as a config check. Add `--json` for the full per-target detail
+(argv, resolved paths, return codes).
+
+> **Note:** nothing coordinates a CLI maintenance run with a load already
+> running inside the server — the FIFO queue in `server/haiku_queue.py` only
+> serializes loads within that process. Run maintenance during a quiet
+> window, or with the scheduler stopped.
 
 #### Post-process callbacks
 
@@ -1421,6 +1498,8 @@ soliplex.agents/
 │   │   └── cli.py          # WebDAV CLI commands
 │   ├── manifest/           # Manifest runner
 │   │   ├── runner.py       # YAML loading, validation, dispatch
+│   │   ├── haiku_loader.py # haiku-ingester batch load subprocess
+│   │   ├── haiku_maint.py  # haiku-rag migrate/vacuum subprocesses
 │   │   └── cli.py          # Manifest CLI commands
 │   └── scm/                # SCM agent
 │       ├── app.py          # Core SCM logic

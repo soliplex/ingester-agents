@@ -86,7 +86,7 @@ def resolve_db_path(source: str) -> str:
         ValueError: If ``settings.lancedb_dir`` is unset.
     """
     if not settings.lancedb_dir:
-        raise ValueError("LANCEDB_DIR (settings.lancedb_dir) must be set to run haiku loads")
+        raise ValueError("LANCEDB_DIR (settings.lancedb_dir) must be set to resolve a per-source database path")
     return str(Path(settings.lancedb_dir) / f"{slugify_source(source)}.lancedb")
 
 

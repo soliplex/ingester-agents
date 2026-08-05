@@ -13,7 +13,7 @@ repos:
       - id: debug-statements
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
-    rev: v0.15.7
+    rev: v0.16.1
     hooks:
       # Run the linter (reads all config from pyproject.toml).
       - id: ruff
@@ -21,7 +21,7 @@ repos:
       # Run the formatter (reads line-length from pyproject.toml).
       - id: ruff-format
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.30.1
+    rev: v8.30.0
     hooks:
       - id: gitleaks
   - repo: local
@@ -30,12 +30,12 @@ repos:
         name: pip-audit
         #ignore 2026-4539 as not fixed
         #ignore 2026-25645 due to cooldown
-        entry: uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-217 --ignore-vuln PYSEC-2026-2288 --ignore-vuln PYSEC-2026-2289 --ignore-vuln PYSEC-2026-2290
+        entry: uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2026-3545 --ignore-vuln PYSEC-2026-3546 --ignore-vuln PYSEC-2026-3547 --ignore-vuln PYSEC-2026-3552
         language: system
         pass_filenames: false
         files: (^pyproject\.toml$|^uv\.lock$)
   - repo: https://github.com/jackdewinter/pymarkdown
-    rev: v0.9.36
+    rev: v0.9.39
     hooks:
       - id: pymarkdown
         args:
