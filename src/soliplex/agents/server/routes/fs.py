@@ -23,13 +23,12 @@ fs_router = APIRouter(
 
 @fs_router.post("/validate-config")
 async def validate_config(
-    config_file: str = Form(..., description="Path to inventory file or directory (will build config if directory)"),
+    config_file: str = Form(..., description="Path to the document directory"),
 ):
     """
     Validate an inventory configuration.
 
-    If a file is provided, it will be treated as an inventory.json config file.
-    If a directory is provided, a config will be built from the directory contents.
+    The inventory is built by scanning the directory's contents.
 
     Checks file support and identifies invalid files.
     """
@@ -70,15 +69,9 @@ async def build_config(
     try:
         config = await fs_app.build_config(path)
 
-        # Optionally save to file
-        cfg_file = os.path.join(path, "inventory.json")
-        with open(cfg_file, "w") as f:
-            json.dump(config, f, indent=2)
-
         return {
             "status": "ok",
             "files_count": len(config),
-            "inventory_file": cfg_file,
             "inventory": config,
         }
     except Exception as e:
@@ -88,15 +81,14 @@ async def build_config(
 
 @fs_router.post("/check-status")
 async def check_status(
-    config_file: str = Form(..., description="Path to inventory file or directory (will build config if directory)"),
+    config_file: str = Form(..., description="Path to the document directory"),
     source: str = Form(..., description="Source name"),
     detail: bool = Form(False, description="Include detailed file list"),
 ):
     """
     Check which files need to be ingested.
 
-    If a file is provided, it will be treated as an inventory.json config file.
-    If a directory is provided, a config will be built from the directory contents.
+    The inventory is built by scanning the directory's contents.
 
     Compares file hashes against the Ingester database to identify
     new or modified files.
@@ -127,18 +119,17 @@ async def check_status(
 
 @fs_router.post("/run-inventory")
 async def run_inventory(
-    config_file: str = Form(..., description="Path to inventory file or directory (will build config if directory)"),
+    config_file: str = Form(..., description="Path to the document directory"),
     source: str = Form(..., description="Source name"),
     start: int = Form(0, description="Start index"),
     end: int | None = Form(None, description="End index"),
     metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
 ):
     """
-    Run document ingestion from an inventory.
+    Run document ingestion from a directory.
 
-    If a file is provided, it will be treated as an inventory.json config file.
-    If a directory is provided, a config will be built from the directory contents.
-    Path resolution is now handled internally by load_inventory via resolve_config_path.
+    The inventory is built by scanning the directory's contents; path
+    resolution happens inside load_inventory via resolve_config_path.
     """
     if not os.path.exists(config_file):
         raise HTTPException(status_code=404, detail=f"Path not found: {config_file}")

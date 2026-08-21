@@ -20,28 +20,6 @@ def local_env(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def temp_inventory_file():
-    """Create a temporary inventory file for testing."""
-    inventory = [
-        {
-            "path": "doc1.md",
-            "sha256": "abc123",
-            "metadata": {"size": 100, "content-type": "text/markdown"},
-        },
-        {
-            "path": "doc2.pdf",
-            "sha256": "def456",
-            "metadata": {"size": 200, "content-type": "application/pdf"},
-        },
-    ]
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(inventory, f)
-        temp_path = f.name
-    yield temp_path
-    Path(temp_path).unlink()
-
-
-@pytest.fixture
 def temp_document_dir():
     """Create a temporary directory with test documents."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -59,15 +37,13 @@ class TestResolveConfigPath:
     """Tests for resolve_config_path function."""
 
     @pytest.mark.asyncio
-    async def test_resolve_config_path_with_file(self, temp_inventory_file):
-        """Test resolve_config_path with a file path."""
-        config, data_path = await fs_app.resolve_config_path(temp_inventory_file)
+    async def test_resolve_config_path_with_file(self, tmp_path):
+        """A file path is rejected; only directories are scanned."""
+        target = tmp_path / "doc1.md"
+        target.write_text("hello", encoding="utf-8")
 
-        assert isinstance(config, list)
-        assert len(config) == 2
-        assert config[0]["path"] == "doc1.md"
-        assert config[1]["path"] == "doc2.pdf"
-        assert data_path == Path(temp_inventory_file).parent
+        with pytest.raises(NotADirectoryError):
+            await fs_app.resolve_config_path(str(target))
 
     @pytest.mark.asyncio
     async def test_resolve_config_path_with_directory(self, temp_document_dir):
@@ -102,15 +78,6 @@ class TestResolveConfigPath:
 
 class TestValidateConfig:
     """Tests for validate_config function."""
-
-    @pytest.mark.asyncio
-    async def test_validate_config_with_file(self, temp_inventory_file, capsys):
-        """Test validate_config with inventory file."""
-        await fs_app.validate_config(temp_inventory_file)
-
-        captured = capsys.readouterr()
-        assert "Total files: 2" in captured.out
-        assert temp_inventory_file in captured.out
 
     @pytest.mark.asyncio
     async def test_validate_config_with_directory(self, temp_document_dir, capsys):
@@ -165,15 +132,6 @@ class TestLoadInventory:
 
 class TestStatusReport:
     """Tests for status_report function."""
-
-    @pytest.mark.asyncio
-    async def test_status_report_with_file(self, temp_inventory_file, local_env, capsys):
-        """Test status_report with inventory file (all files new -> to process)."""
-        await fs_app.status_report(temp_inventory_file, "fs-src")
-
-        captured = capsys.readouterr()
-        assert "Total files: 2" in captured.out
-        assert "Files to process: 2" in captured.out
 
     @pytest.mark.asyncio
     async def test_status_report_with_directory(self, temp_document_dir, local_env, capsys):

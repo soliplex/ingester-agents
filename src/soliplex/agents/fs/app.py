@@ -9,7 +9,6 @@ import aiofiles.os as aos
 from soliplex.agents import local_state
 from soliplex.agents import local_store
 from soliplex.agents.common.config import check_config
-from soliplex.agents.common.config import read_config
 from soliplex.agents.common.mime import detect_mime_type
 from soliplex.agents.common.mime import extension_allowed
 from soliplex.agents.config import settings
@@ -21,11 +20,10 @@ async def validate_config(path: str):
     """
     Validate a configuration and print out validation results.
 
-    If path is a file, treats it as a config file.
-    If path is a directory, builds config from directory contents.
+    The inventory is built by scanning the directory's contents.
 
     Args:
-        path: Path to either a config file or directory to validate
+        path: Path to the directory to validate
 
     Returns:
         None
@@ -43,41 +41,29 @@ async def validate_config(path: str):
 
 async def resolve_config_path(path: str) -> tuple[list[dict], Path]:
     """
-    Resolve a path to a configuration and data directory.
-
-    If the path is a file, treat it as an inventory.json config file.
-    If the path is a directory, build a config from the directory contents.
+    Build an inventory by scanning *path* and return it with its data dir.
 
     Args:
-        path: Path to either a config file or directory to scan
+        path: Path to the directory to scan
 
     Returns:
-        Tuple of (config list, data_path) where data_path is the parent
-        directory containing the files referenced in the config
+        Tuple of (config list, data_path) where data_path is the directory
+        containing the files referenced in the config
 
     Raises:
         FileNotFoundError: If the path doesn't exist
-        ValidationError: If the config file format is invalid
+        NotADirectoryError: If the path is a file
     """
     path_obj = Path(path)
 
     if not await aos.path.exists(path_obj):
         raise FileNotFoundError(f"Path does not exist: {path}")
 
-    is_file = await aos.path.isfile(path_obj)
+    if await aos.path.isfile(path_obj):
+        raise NotADirectoryError(f"Expected a directory, got a file: {path}")
 
-    if is_file:
-        # Path is a config file - read it directly
-        logger.info(f"Using {path} as config file")
-        config = await read_config(path)
-        data_path = path_obj.parent
-    else:
-        # Path is a directory - build config from contents
-        logger.info(f"Building config from directory {path}")
-        config = await build_config(path)
-        data_path = path_obj
-
-    return config, data_path
+    logger.info(f"Building config from directory {path}")
+    return await build_config(path), path_obj
 
 
 async def build_config(source_dir) -> list[dict]:
@@ -135,11 +121,10 @@ async def load_inventory(
     """
     Load an inventory and write changed files to the download directory.
 
-    If path is a file, treats it as a config file.
-    If path is a directory, builds config from directory contents.
+    The inventory is built by scanning the directory's contents.
 
     Args:
-        path: Path to either a config file or directory to process
+        path: Path to the directory to process
         source: Source identifier (becomes the per-source download folder)
         start: Starting index for processing (default: 0)
         end: Ending index for processing (default: None, processes all)
@@ -213,11 +198,10 @@ async def status_report(config_path: str, source: str, detail: bool = False):
     """
     Generate a status report for an inventory.
 
-    If config_path is a file, treats it as a config file.
-    If config_path is a directory, builds config from directory contents.
+    The inventory is built by scanning the directory's contents.
 
     Args:
-        config_path: Path to either a config file or directory
+        config_path: Path to the directory to report on
         source: Source identifier to check against
         detail: Whether to print detailed file list (default: False)
     """
