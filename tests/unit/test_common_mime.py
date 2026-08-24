@@ -1,5 +1,8 @@
 """Tests for soliplex.agents.common.mime module."""
 
+import io
+import zipfile
+
 import puremagic
 
 from soliplex.agents.common import mime
@@ -7,6 +10,34 @@ from soliplex.agents.common import mime
 # Minimal magic-byte payloads puremagic recognises deterministically.
 PDF_BYTES = b"%PDF-1.4\n1 0 obj\n"
 PNG_BYTES = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+PPSX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
+
+
+def ooxml_bytes(part: str) -> bytes:
+    """Build a minimal OOXML package carrying the Office 2007+ ZIP header.
+
+    puremagic cannot see past the ZIP wrapper: it lists docx/pptx/xlsx against
+    the bare ``504b0304`` header at equal confidence and maps the longer
+    ``504b030414000600`` header (what Office actually writes, forced in here)
+    to the docx type. Every one of these fixtures therefore sniffs as docx,
+    which is the point -- only the filename can tell them apart.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr(part, "<a/>")
+    raw = bytearray(buf.getvalue())
+    raw[0:8] = bytes.fromhex("504b030414000600")
+    return bytes(raw)
+
+
+PPTX_BYTES = ooxml_bytes("ppt/presentation.xml")
+XLSX_BYTES = ooxml_bytes("xl/workbook.xml")
+DOCX_BYTES = ooxml_bytes("word/document.xml")
 
 
 class TestSniffBytes:
@@ -214,3 +245,69 @@ class TestPassesExtensionPrefilter:
 
     def test_disallowed_extension_blocked(self):
         assert mime.passes_extension_prefilter("image.png", ["md", "pdf"]) is False
+
+
+class TestOOXMLContainerDetection:
+    """Regression: a ZIP sniff must never override an OOXML extension.
+
+    puremagic reports every OOXML package as docx, so trusting the sniff
+    renamed .pptx/.xlsx/.ppsx to .docx on the way to disk and dropped them
+    outright wherever the extension allowlist had no ``docx`` entry.
+    """
+
+    def test_sniff_alone_cannot_tell_ooxml_apart(self):
+        # Guards the premise: if puremagic ever learns to discriminate these,
+        # this assertion fails and the override below can be revisited.
+        assert mime.sniff_bytes(PPTX_BYTES) == DOCX_MIME
+        assert mime.sniff_bytes(XLSX_BYTES) == DOCX_MIME
+
+    def test_pptx_extension_beats_docx_sniff(self):
+        assert mime.detect_mime_type("deck.pptx", data=PPTX_BYTES) == PPTX_MIME
+
+    def test_ppsx_extension_beats_docx_sniff(self):
+        assert mime.detect_mime_type("deck.ppsx", data=PPTX_BYTES) == PPSX_MIME
+
+    def test_xlsx_extension_beats_docx_sniff(self):
+        assert mime.detect_mime_type("book.xlsx", data=XLSX_BYTES) == XLSX_MIME
+
+    def test_docx_still_detected(self):
+        assert mime.detect_mime_type("report.docx", data=DOCX_BYTES) == DOCX_MIME
+
+    def test_extension_override_survives_missing_mime_db(self, monkeypatch):
+        # A minimal container has no /etc/mime.types, so guess_type misses and
+        # the _EXTENSION_MIME override has to carry the lookup.
+        monkeypatch.setattr(mime.mimetypes, "guess_type", lambda *a, **k: (None, None))
+        assert mime.detect_mime_type("deck.pptx", data=PPTX_BYTES) == PPTX_MIME
+
+    def test_zip_extension_kept_over_ooxml_sniff(self):
+        # Spelling of the zip type is host-dependent (Windows says
+        # application/x-zip-compressed); either is fine, docx is not.
+        assert mime.detect_mime_type("bundle.zip", data=PPTX_BYTES) in mime._ZIP_TYPES
+
+    def test_extensionless_container_falls_back_to_sniff(self):
+        # Nothing better to go on -- the sniff stands rather than degrading to
+        # application/octet-stream.
+        assert mime.detect_mime_type("mystery", data=PPTX_BYTES) == DOCX_MIME
+
+    def test_non_container_extension_does_not_override_sniff(self):
+        # A .txt holding ZIP bytes is a mislabelled archive, not text: only
+        # container-naming extensions are allowed to win.
+        assert mime.detect_mime_type("notes.txt", data=PPTX_BYTES) == DOCX_MIME
+
+    def test_non_container_sniff_still_wins(self):
+        # The inversion is scoped to containers; a PDF sniff still beats a
+        # wrong extension.
+        assert mime.detect_mime_type("report.pptx", data=PDF_BYTES) == "application/pdf"
+
+    def test_header_still_outranks_everything(self):
+        assert mime.detect_mime_type("deck.pptx", data=PPTX_BYTES, header_type=XLSX_MIME) == XLSX_MIME
+
+    def test_pptx_is_not_renamed_on_write(self):
+        # The end-to-end symptom: ensure_extension used the sniffed docx type
+        # and rewrote deck.pptx -> deck.docx.
+        detected = mime.detect_mime_type("deck.pptx", data=PPTX_BYTES)
+        assert mime.ensure_extension("deck.pptx", detected) == "deck.pptx"
+
+    def test_pptx_allowed_without_docx_in_allowlist(self):
+        detected = mime.detect_mime_type("deck.pptx", data=PPTX_BYTES)
+        assert mime.extension_allowed(detected, ["md", "pdf", "pptx"]) is True

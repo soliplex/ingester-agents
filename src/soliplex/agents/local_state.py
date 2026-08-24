@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from soliplex.agents import local_store
+from soliplex.agents.common import mime
 from soliplex.agents.config import settings
 from soliplex.agents.local_store import sanitize_source
 
@@ -124,11 +125,60 @@ def prune_files(source: str, current_uris: set[str]) -> list[str]:
     return removed
 
 
+def repair_relocated_documents(source: str, download_dir: str | None = None) -> list[str]:
+    """Drop documents whose file sits where a stale MIME guess put it.
+
+    On-disk names come from the MIME type recorded in state, not from the
+    URI, so a document is stored wherever detection said it belonged at the
+    time. Content sniffing cannot tell OOXML formats apart -- every one of
+    them is a ZIP and reads back as docx -- so documents written before that
+    was corrected landed under the wrong extension: ``/team/report.pptx``
+    stored as ``team/report.docx``. Nothing downstream notices, because the
+    state row agrees with the misnamed file: it is not stale, its hash still
+    matches, and the disk sweep in :func:`reconcile_documents` builds its
+    expectations from the same wrong MIME type.
+
+    This clears both sides of that agreement -- the file (with its sidecar)
+    and the state row -- so the next run re-fetches the document and writes
+    it under its real extension. Two runs to fully heal, by design: the
+    repair happens after the current run has already decided what to fetch.
+
+    A row qualifies only when its stored type *and* the type implied by its
+    own URI extension are both container types that disagree. Renames that
+    were deliberate stay untouched (a ``.bin`` sniffed as PDF is stored as
+    ``.pdf`` on purpose), and rows stop matching once rewritten, so this
+    becomes a no-op after everything has been repaired once.
+
+    Args:
+        source: Source identifier.
+        download_dir: Override for ``settings.download_dir``.
+
+    Returns:
+        List of URIs whose stored document was discarded for re-fetching.
+    """
+    repaired = []
+    for uri, entry in load_file_state(source).items():
+        stored_type = entry.get("mime_type")
+        if not mime.is_container_type(stored_type):
+            continue
+        uri_type = mime.detect_mime_type(uri)
+        if not mime.is_container_type(uri_type) or uri_type == stored_type:
+            continue
+        local_store.delete_document(source, uri, mime_type=stored_type, download_dir=download_dir)
+        delete_file(source, uri)
+        repaired.append(uri)
+        logger.info("repairing %s: stored as %s, re-fetching as %s", uri, stored_type, uri_type)
+    return repaired
+
+
 def prune_documents(source: str, current_uris: set[str], download_dir: str | None = None) -> list[str]:
     """Remove stale documents from both the state and the filesystem.
 
     Drops state entries whose URI is absent from *current_uris* and deletes
-    the corresponding document file and ``.meta.json`` sidecar.
+    the corresponding document file and ``.meta.json`` sidecar. Also runs
+    :func:`repair_relocated_documents` first, so documents stored under a
+    stale MIME guess are discarded for re-fetching alongside the genuinely
+    stale ones.
 
     Args:
         source: Source identifier.
@@ -136,14 +186,15 @@ def prune_documents(source: str, current_uris: set[str], download_dir: str | Non
         download_dir: Override for ``settings.download_dir``.
 
     Returns:
-        List of URIs that were pruned.
+        List of URIs that were pruned, including any repaired for re-fetch.
     """
+    repaired = repair_relocated_documents(source, download_dir=download_dir)
     state = load_file_state(source)
     removed = prune_files(source, current_uris)
     for uri in removed:
         mime_type = state.get(uri, {}).get("mime_type")
         local_store.delete_document(source, uri, mime_type=mime_type, download_dir=download_dir)
-    return removed
+    return repaired + removed
 
 
 def reconcile_documents(source: str, current_uris: set[str], download_dir: str | None = None) -> list[str]:
@@ -155,14 +206,21 @@ def reconcile_documents(source: str, current_uris: set[str], download_dir: str |
     catching orphans that have no state row (e.g. files left behind when a
     document disappears from a WebDAV listing).
 
+    Runs :func:`repair_relocated_documents` first. That has to happen before
+    the state is read: the disk sweep derives every expected filename from
+    the MIME type in state, so a document sitting under a stale guess matches
+    its own wrong expectation and would otherwise survive the sweep.
+
     Args:
         source: Source identifier.
         current_uris: Set of URIs currently present in the source.
         download_dir: Override for ``settings.download_dir``.
 
     Returns:
-        List of removed identifiers (stale URIs and orphan relative paths).
+        List of removed identifiers (URIs repaired for re-fetch, stale URIs,
+        and orphan relative paths).
     """
+    repaired = repair_relocated_documents(source, download_dir=download_dir)
     state = load_file_state(source)
 
     # (A) Tracked URIs no longer present: delete file, sidecar, and state row.
@@ -190,7 +248,7 @@ def reconcile_documents(source: str, current_uris: set[str], download_dir: str |
                 path.unlink()
                 removed.append(path.relative_to(base).as_posix())
 
-    return removed
+    return repaired + removed
 
 
 def compute_to_process(inventory: list[dict], source: str) -> list[dict]:
