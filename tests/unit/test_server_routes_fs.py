@@ -164,7 +164,6 @@ def test_build_config_success(client, temp_document_dir):
         data = response.json()
         assert data["status"] == "ok"
         assert data["files_count"] == 2
-        assert "inventory_file" in data
         assert len(data["inventory"]) == 2
 
 

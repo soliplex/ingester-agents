@@ -59,6 +59,7 @@ MIME types are detected from file **content** (via [puremagic](https://pypi.org/
 ## Installation
 
 **Requirements:**
+
 - Python 3.13 or higher
 
 Documents are written to the local filesystem (`DOWNLOAD_DIR`). Indexing
@@ -227,6 +228,7 @@ scm_git_cli_timeout=600
 ## Usage
 
 The CLI tool `si-agent` provides six main modes of operation:
+
 - **`fs`**: Filesystem agent for ingesting local documents
 - **`web`**: Web agent for ingesting HTML pages from URLs
 - **`scm`**: SCM agent for ingesting from Git repositories
@@ -245,69 +247,57 @@ si-agent fs run-inventory /path/to/documents my-source-name
 ```
 
 That's it! The tool automatically:
+
 1. Scans the directory
 2. Builds the configuration
 3. Validates files
 4. Ingests documents
 
-#### Traditional Workflow (with inventory.json)
+#### Inspecting before ingestion
 
-If you want to review or modify the inventory before ingestion:
+Every command takes the document **directory** and builds the inventory by
+scanning it. To review what would happen first:
 
-**1. Build Configuration (Optional)**
-
-Scan a directory and create an inventory file:
+**1. Preview the inventory**
 
 ```bash
 si-agent fs build-config /path/to/documents
 ```
 
-This creates an `inventory.json` file containing metadata for all discovered files. You can edit this file to add custom metadata or exclude specific files.
+Prints the inventory as JSON — paths, hashes, sizes, and detected MIME types —
+without writing anything. Redirect it to a file if you want to keep a copy.
 
-**2. Validate Configuration**
+**2. Validate**
 
-Check if files are supported (accepts file OR directory):
+Check which files are supported:
 
 ```bash
-# Validate existing inventory file
-si-agent fs validate-config /path/to/inventory.json
-
-# Or validate directory directly (builds config on-the-fly)
 si-agent fs validate-config /path/to/documents
 ```
 
-**3. Check Status**
+**3. Check status**
 
-See which files need to be ingested (accepts file OR directory):
+See which files need to be ingested:
 
 ```bash
-# Using inventory file
-si-agent fs check-status /path/to/inventory.json my-source-name
-
-# Or using directory directly
 si-agent fs check-status /path/to/documents my-source-name
 ```
 
-Add `--detail` flag to see the full list of files:
+Add `--detail` to see the full list of files:
 
 ```bash
 si-agent fs check-status /path/to/documents my-source-name --detail
 ```
 
 The status check compares file hashes against the local sync state:
+
 - **new**: File doesn't exist in local state
 - **mismatch**: File exists but content has changed
 - **match**: File is unchanged (will be skipped during the run)
 
-**4. Load Inventory**
-
-Ingest documents (accepts file OR directory):
+**4. Ingest**
 
 ```bash
-# From inventory file
-si-agent fs run-inventory /path/to/inventory.json my-source-name
-
-# Or from directory directly (recommended!)
 si-agent fs run-inventory /path/to/documents my-source-name
 ```
 
@@ -315,8 +305,11 @@ si-agent fs run-inventory /path/to/documents my-source-name
 
 ```bash
 # Process a subset of files (e.g., files 10-50)
-si-agent fs run-inventory inventory.json my-source --start 10 --end 50
+si-agent fs run-inventory /path/to/documents my-source --start 10 --end 50
 ```
+
+To narrow *which* files are considered, set `extensions` in the manifest (or
+`EXTENSIONS`) rather than editing an inventory by hand.
 
 ### SCM Agent
 
@@ -408,6 +401,7 @@ si-agent webdav run-inventory /documents my-source-name
 ```
 
 That's it! The tool automatically:
+
 1. Connects to the WebDAV server
 2. Scans the directory
 3. Builds the configuration
@@ -597,7 +591,7 @@ Top-level fields:
 **Filesystem (`fs`):**
 
 - **name** (required): Component name (must be unique within the manifest).
-- **path** (required): Path to a local directory or inventory file.
+- **path** (required): Path to a local directory.
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
 
@@ -1026,7 +1020,7 @@ As an example, the soliplex [documentation](https://github.com/soliplex/soliplex
 
 ### Example 1: Ingest Local Documents
 
-**Quick version (NEW - no inventory.json needed):**
+**Ingest a checkout's docs directory:**
 
 ```bash
 git clone https://github.com/soliplex/soliplex.git
@@ -1034,35 +1028,23 @@ git clone https://github.com/soliplex/soliplex.git
 # Set up environment
 export DOWNLOAD_DIR=./downloads
 
-# Write directly from directory!
 uv run si-agent fs run-inventory <path-to-checkout>/soliplex/docs soliplex-docs
 
 # Files land under ./downloads/soliplex-docs/, each with a .meta.json sidecar
 ls ./downloads/soliplex-docs
 ```
 
-**Traditional version (with inventory.json):**
+**Reviewing first:**
 
 ```bash
-git clone https://github.com/soliplex/soliplex.git
-
-# Set up environment
-export DOWNLOAD_DIR=./downloads
-
-# Create inventory (optional - only if you want to review/modify it)
+# Preview the inventory as JSON (writes nothing)
 uv run si-agent fs build-config <path-to-checkout>/soliplex/docs
-# You may see messages about ignored files
 
-# If you want to update the inventory.json file, do it here
-
-# Validate configuration
-uv run si-agent fs validate-config <path-to-checkout>/soliplex/docs/inventory.json
+# Check which files are supported
+uv run si-agent fs validate-config <path-to-checkout>/soliplex/docs
 # If there are errors, fix them now
 
-# Write
-uv run si-agent fs run-inventory <path-to-checkout>/soliplex/docs/inventory.json soliplex-docs
-
-ls ./downloads/soliplex-docs
+uv run si-agent fs run-inventory <path-to-checkout>/soliplex/docs soliplex-docs
 ```
 
 ### Example 2: Ingest GitHub Repository
@@ -1167,6 +1149,7 @@ si-agent serve
 ```
 
 The server will trust authentication headers from a reverse proxy (e.g., OAuth2 Proxy):
+
 - `X-Auth-Request-User`
 - `X-Forwarded-User`
 - `X-Forwarded-Email`
@@ -1175,14 +1158,12 @@ The server will trust authentication headers from a reverse proxy (e.g., OAuth2 
 
 #### Filesystem Routes (`/api/v1/fs/`)
 
-**NEW:** All endpoints now accept both file paths (inventory.json) and directory paths!
-
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/v1/fs/build-config` | Build inventory from directory |
-| `POST` | `/api/v1/fs/validate-config` | Validate inventory (file or directory) |
-| `POST` | `/api/v1/fs/check-status` | Check which files need ingestion (file or directory) |
-| `POST` | `/api/v1/fs/run-inventory` | Ingest documents (file or directory) |
+| `POST` | `/api/v1/fs/validate-config` | Validate the inventory built from a directory |
+| `POST` | `/api/v1/fs/check-status` | Check which files need ingestion |
+| `POST` | `/api/v1/fs/run-inventory` | Ingest documents from a directory |
 
 **Examples:**
 
@@ -1191,13 +1172,9 @@ The server will trust authentication headers from a reverse proxy (e.g., OAuth2 
 curl -X POST http://localhost:8001/api/v1/fs/build-config \
   -F "path=/path/to/docs"
 
-# Validate using directory (no inventory.json needed)
+# Validate using a directory
 curl -X POST http://localhost:8001/api/v1/fs/validate-config \
   -F "config_file=/path/to/docs"
-
-# Or validate using existing inventory file
-curl -X POST http://localhost:8001/api/v1/fs/validate-config \
-  -F "config_file=/path/to/docs/inventory.json"
 
 # Ingest directly from directory
 curl -X POST http://localhost:8001/api/v1/fs/run-inventory \
@@ -1327,6 +1304,7 @@ curl http://localhost:8001/health
 ### API Documentation
 
 Interactive API documentation is available at:
+
 - **Swagger UI:** `http://localhost:8001/docs`
 - **ReDoc:** `http://localhost:8001/redoc`
 - **OpenAPI JSON:** `http://localhost:8001/openapi.json`
@@ -1392,6 +1370,7 @@ docker build --target development \
 ```
 
 The Docker image includes:
+
 - Non-root user for security
 - Health checks for orchestration
 - Proper signal handling
@@ -1402,6 +1381,7 @@ The Docker image includes:
 ### Authentication Errors
 
 Ensure your tokens have the required permissions:
+
 - **GitHub**: `repo` scope for private repositories, public access for public repos
 - **Gitea**: Access token with read permissions
 
@@ -1523,15 +1503,18 @@ soliplex.agents/
 ### Key Components
 
 **CLI Layer:**
+
 - `cli.py` - Main entry point with `fs`, `web`, `scm`, `webdav`, `manifest`, and `serve` commands
 - Agent-specific CLI commands in `fs/cli.py`, `webdav/cli.py`, `scm/cli.py`, and `manifest/cli.py`
 
 **Server Layer:**
+
 - `server/` - FastAPI application
 - `server/auth.py` - Flexible authentication (none, API key, OAuth2 proxy)
 - `server/routes/` - REST API endpoints mirroring CLI functionality
 
 **Agent Layer:**
+
 - `fs/app.py` - Filesystem operations (shared by CLI and API)
 - `web/app.py` - Web page fetching and ingestion (shared by CLI and API)
 - `webdav/app.py` - WebDAV operations (shared by CLI and API)
@@ -1541,6 +1524,7 @@ soliplex.agents/
 - `local_state.py` - Local synchronization state (content hashes + SCM commit markers)
 
 **Configuration:**
+
 - `config.py` - Pydantic settings and manifest component models
 - Environment variables or `.env` file for configuration
 - YAML manifest files for declarative multi-source ingestion

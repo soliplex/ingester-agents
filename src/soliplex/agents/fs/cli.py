@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import os
 import sys
 from typing import Annotated
 
@@ -10,7 +9,6 @@ import typer
 from . import app
 
 logger = logging.getLogger(__name__)
-INVENTORY_FILE = "inventory.json"
 
 
 cli = typer.Typer(no_args_is_help=True)
@@ -20,37 +18,29 @@ cli = typer.Typer(no_args_is_help=True)
 def validate(
     config_file: Annotated[
         str,
-        typer.Argument(help="path to inventory file or directory (will build config if directory)"),
+        typer.Argument(help="path to document directory"),
     ],
 ):
     """
     Validate a configuration.
 
-    If a file is provided, it will be treated as an inventory.json config file.
-    If a directory is provided, a config will be built from the directory contents.
+    The inventory is built by scanning the directory's contents.
     """
     asyncio.run(app.validate_config(config_file))
 
 
 @cli.command("build-config")
 def build_config(path: Annotated[str, typer.Argument(help="path to document directory")]):
-    cfg_file = _build_config(path)
-    cfg_data = json.load(open(cfg_file))
-    print(f"created {cfg_file} with {len(cfg_data)} files")
-
-
-def _build_config(path: str):
+    """Scan a directory and print the inventory it would ingest, as JSON."""
     config = asyncio.run(app.build_config(path))
-    cfg_file = os.path.join(path, INVENTORY_FILE)
-    json.dump(config, open(cfg_file, "w"), indent=2)
-    return cfg_file
+    print(json.dumps(config, indent=2))
 
 
 @cli.command("check-status")
 def check_status(
     config_file: Annotated[
         str,
-        typer.Argument(help="path to inventory file or directory (will build config if directory)"),
+        typer.Argument(help="path to document directory"),
     ],
     source: Annotated[str, typer.Argument(help="source name")],
     detail: Annotated[bool, typer.Option(help="include detailed file list")] = False,
@@ -58,8 +48,7 @@ def check_status(
     """
     Check the status of files in an inventory.
 
-    If a file is provided, it will be treated as an inventory.json config file.
-    If a directory is provided, a config will be built from the directory contents.
+    The inventory is built by scanning the directory's contents.
     """
     asyncio.run(app.status_report(config_file, source, detail=detail))
 
@@ -68,7 +57,7 @@ def check_status(
 def run(
     config_file: Annotated[
         str,
-        typer.Argument(help="path to inventory file or directory (will build config if directory)"),
+        typer.Argument(help="path to document directory"),
     ],
     source: Annotated[str, typer.Argument(help="source name")],
     start: Annotated[int, typer.Option(help="start index")] = 0,
@@ -79,8 +68,7 @@ def run(
     """
     Run an inventory ingestion.
 
-    If a file is provided, it will be treated as an inventory.json config file.
-    If a directory is provided, a config will be built from the directory contents.
+    The inventory is built by scanning the directory's contents.
     """
     extra_metadata = json.loads(metadata) if metadata else None
     print(f"loading {config_file} source={source}")
@@ -94,7 +82,7 @@ def run(
                 extra_metadata=extra_metadata,
             )
         )
-    except FileNotFoundError as e:
+    except (FileNotFoundError, NotADirectoryError) as e:
         print(f"Error: {e}", file=sys.stderr)
         raise SystemExit(1) from None
     except ValueError as e:
