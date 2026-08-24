@@ -5,13 +5,14 @@ import json
 import pytest
 
 from soliplex.agents import local_store
+from soliplex.agents import store as agent_store
 
 
 @pytest.fixture
 def dl(tmp_path, monkeypatch):
     """Point download_dir at a temp directory."""
     d = tmp_path / "downloads"
-    monkeypatch.setattr(local_store.settings, "download_dir", str(d))
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(d))
     return d
 
 
@@ -103,8 +104,9 @@ def test_uri_to_relpath_empty_uri_becomes_index():
 # --- write_document / delete_document ---
 
 
-def test_write_document_writes_file_and_sidecar(dl):
-    target = local_store.write_document(
+@pytest.mark.asyncio
+async def test_write_document_writes_file_and_sidecar(dl):
+    target = await local_store.write_document(
         "gitea:admin:r:all",
         "docs/readme.md",
         b"hello",
@@ -127,8 +129,9 @@ def test_write_document_writes_file_and_sidecar(dl):
     assert "source_url" not in meta
 
 
-def test_write_document_records_ingestion_type_and_source_url(dl):
-    target = local_store.write_document(
+@pytest.mark.asyncio
+async def test_write_document_records_ingestion_type_and_source_url(dl):
+    target = await local_store.write_document(
         "webdav:host",
         "docs/readme.md",
         b"hello",
@@ -143,27 +146,31 @@ def test_write_document_records_ingestion_type_and_source_url(dl):
     assert meta["source_url"] == "https://dav.example.com/docs/readme.md"
 
 
-def test_write_document_accepts_str(dl):
-    target = local_store.write_document("s", "a.txt", "hi", "text/plain", {})
+@pytest.mark.asyncio
+async def test_write_document_accepts_str(dl):
+    target = await local_store.write_document("s", "a.txt", "hi", "text/plain", {})
     assert target.read_bytes() == b"hi"
 
 
-def test_write_document_issue_markdown(dl):
-    target = local_store.write_document("s:issues", "/o/r/issues/3", b"# t", "text/markdown", {"state": "open"})
+@pytest.mark.asyncio
+async def test_write_document_issue_markdown(dl):
+    target = await local_store.write_document("s:issues", "/o/r/issues/3", b"# t", "text/markdown", {"state": "open"})
     assert target == dl / "s_issues" / "o" / "r" / "issues" / "3.md"
 
 
-def test_delete_document_removes_file_and_sidecar(dl):
-    target = local_store.write_document("s", "docs/x.md", b"x", "text/markdown", {})
+@pytest.mark.asyncio
+async def test_delete_document_removes_file_and_sidecar(dl):
+    target = await local_store.write_document("s", "docs/x.md", b"x", "text/markdown", {})
     sidecar = target.with_name(target.name + ".meta.json")
     assert target.exists()
     assert sidecar.exists()
 
-    removed = local_store.delete_document("s", "docs/x.md", mime_type="text/markdown")
+    removed = await local_store.delete_document("s", "docs/x.md", mime_type="text/markdown")
     assert removed is True
     assert not target.exists()
     assert not sidecar.exists()
 
 
-def test_delete_document_missing_returns_false(dl):
-    assert local_store.delete_document("s", "nope.md") is False
+@pytest.mark.asyncio
+async def test_delete_document_missing_returns_false(dl):
+    assert await local_store.delete_document("s", "nope.md") is False

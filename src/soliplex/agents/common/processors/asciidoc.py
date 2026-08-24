@@ -24,7 +24,6 @@ This processor removes all of these constructs so docling receives clean input.
 """
 
 import re
-from pathlib import Path
 
 from soliplex.agents.common.processors import FileProcessor
 from soliplex.agents.common.processors import register
@@ -48,8 +47,8 @@ _DIRECTIVE = re.compile(r"^(include|image)::")
 class AsciiDocTableProcessor(FileProcessor):
     """Rewrite AsciiDoc files so docling's backend can parse them."""
 
-    def process(self, path: Path, mime_type: str) -> None:
-        text = path.read_text(encoding="utf-8")
+    def process(self, data: bytes, mime_type: str) -> bytes:
+        text = data.decode("utf-8")
         lines = text.splitlines(keepends=True)
         out: list[str] = []
         in_table = False
@@ -97,5 +96,4 @@ class AsciiDocTableProcessor(FileProcessor):
             i += 1
 
         result = "".join(out)
-        if result != text:
-            path.write_text(result, encoding="utf-8")
+        return data if result == text else result.encode("utf-8")

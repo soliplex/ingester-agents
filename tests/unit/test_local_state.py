@@ -7,13 +7,14 @@ import pytest
 
 from soliplex.agents import local_state
 from soliplex.agents import local_store
+from soliplex.agents import store as agent_store
 
 
 @pytest.fixture
 def state_env(tmp_path, monkeypatch):
     """Point state_dir and download_dir at temp directories."""
     monkeypatch.setattr(local_state.settings, "state_dir", str(tmp_path / "state"))
-    monkeypatch.setattr(local_store.settings, "download_dir", str(tmp_path / "dl"))
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
     return tmp_path
 
 
@@ -108,13 +109,14 @@ def test_get_sync_meta_tolerates_corrupt_fields(state_env):
     assert meta["metadata"] == {}
 
 
-def test_prune_documents_deletes_files_and_state(state_env):
-    local_store.write_document("s", "a.md", b"a", "text/markdown", {})
-    local_store.write_document("s", "b.md", b"b", "text/markdown", {})
+@pytest.mark.asyncio
+async def test_prune_documents_deletes_files_and_state(state_env):
+    await local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+    await local_store.write_document("s", "b.md", b"b", "text/markdown", {})
     local_state.upsert_file("s", "a.md", "1", mime_type="text/markdown")
     local_state.upsert_file("s", "b.md", "2", mime_type="text/markdown")
 
-    removed = local_state.prune_documents("s", {"a.md"})
+    removed = await local_state.prune_documents("s", {"a.md"})
     assert removed == ["b.md"]
     assert (local_store.source_dir("s") / "a.md").exists()
     assert not (local_store.source_dir("s") / "b.md").exists()
@@ -124,15 +126,56 @@ def test_prune_documents_deletes_files_and_state(state_env):
 # --- reconcile_documents ---
 
 
-def test_reconcile_documents_removes_delisted(state_env):
+@pytest.mark.asyncio
+async def test_reconcile_documents_preserves_every_registered_sidecar_kind(state_env):
+    """A registered sidecar kind survives the sweep.
+
+    Regression test: `expected` used to be hard-coded as the document plus
+    `.meta.json`, so any other kind sitting beside a healthy document was
+    deleted on the next reconcile. It is now derived from the registry.
+    """
+    from typing import ClassVar
+
+    from soliplex.agents import sidecar as sidecar_mod
+
+    original = dict(sidecar_mod._REGISTRY)
+    try:
+
+        @sidecar_mod.register
+        class _Extra(sidecar_mod.SidecarKind):
+            kind: ClassVar[str] = "extra"
+            suffix: ClassVar[str] = ".extra.json"
+
+            def build(self, doc):
+                return b'{"extra": true}'
+
+            def parse(self, content):
+                return {}
+
+        await local_store.write_document("s", "a.md", b"body", "text/markdown", {})
+        local_state.upsert_file("s", "a.md", "sha", mime_type="text/markdown")
+        store = agent_store.get_document_store("s")
+        assert "a.md.extra.json" in await store.list()
+
+        removed = await local_state.reconcile_documents("s", {"a.md"})
+
+        assert removed == []
+        assert "a.md.extra.json" in await store.list()
+    finally:
+        sidecar_mod._REGISTRY.clear()
+        sidecar_mod._REGISTRY.update(original)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_documents_removes_delisted(state_env):
     # a.md (top level) and sub/c.md survive; b.md is delisted and removed.
-    local_store.write_document("s", "a.md", b"a", "text/markdown", {})
-    local_store.write_document("s", "sub/c.md", b"c", "text/markdown", {})
-    local_store.write_document("s", "b.md", b"b", "text/markdown", {})
+    await local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+    await local_store.write_document("s", "sub/c.md", b"c", "text/markdown", {})
+    await local_store.write_document("s", "b.md", b"b", "text/markdown", {})
     for uri, sha in (("a.md", "1"), ("sub/c.md", "2"), ("b.md", "3")):
         local_state.upsert_file("s", uri, sha, mime_type="text/markdown")
 
-    removed = local_state.reconcile_documents("s", {"a.md", "sub/c.md"})
+    removed = await local_state.reconcile_documents("s", {"a.md", "sub/c.md"})
 
     assert removed == ["b.md"]
     base = local_store.source_dir("s")
@@ -143,15 +186,16 @@ def test_reconcile_documents_removes_delisted(state_env):
     assert set(local_state.load_file_state("s")) == {"a.md", "sub/c.md"}
 
 
-def test_reconcile_documents_sweeps_disk_orphan(state_env):
+@pytest.mark.asyncio
+async def test_reconcile_documents_sweeps_disk_orphan(state_env):
     # A file present on disk with no state row is swept even though the state
     # comparison alone would never touch it.
-    local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+    await local_store.write_document("s", "a.md", b"a", "text/markdown", {})
     local_state.upsert_file("s", "a.md", "1", mime_type="text/markdown")
     base = local_store.source_dir("s")
     (base / "orphan.bin").write_bytes(b"x")
 
-    removed = local_state.reconcile_documents("s", {"a.md"})
+    removed = await local_state.reconcile_documents("s", {"a.md"})
 
     assert removed == ["orphan.bin"]
     assert (base / "a.md").exists()
@@ -159,20 +203,22 @@ def test_reconcile_documents_sweeps_disk_orphan(state_env):
     assert not (base / "orphan.bin").exists()
 
 
-def test_reconcile_documents_keeps_current(state_env):
-    local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+@pytest.mark.asyncio
+async def test_reconcile_documents_keeps_current(state_env):
+    await local_store.write_document("s", "a.md", b"a", "text/markdown", {})
     local_state.upsert_file("s", "a.md", "1", mime_type="text/markdown")
 
-    removed = local_state.reconcile_documents("s", {"a.md"})
+    removed = await local_state.reconcile_documents("s", {"a.md"})
 
     assert removed == []
     assert (local_store.source_dir("s") / "a.md").exists()
 
 
-def test_reconcile_documents_no_download_dir(state_env):
+@pytest.mark.asyncio
+async def test_reconcile_documents_no_download_dir(state_env):
     # No files ever written: the source folder doesn't exist, so the disk
     # sweep is skipped and nothing is removed.
-    removed = local_state.reconcile_documents("s", set())
+    removed = await local_state.reconcile_documents("s", set())
     assert removed == []
 
 

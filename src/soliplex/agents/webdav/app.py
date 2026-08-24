@@ -616,7 +616,7 @@ async def load_inventory(
     delete_stale_result = None
     if delete_stale and len(errors) == 0:
         current = {r["path"] for r in config} - set(not_found)
-        delete_stale_result = local_state.reconcile_documents(source, current)
+        delete_stale_result = await local_state.reconcile_documents(source, current)
     ret["delete_stale_result"] = delete_stale_result
     return ret
 
@@ -712,7 +712,7 @@ async def do_ingest(
         return {"skipped": reason, "uri": uri}
 
     sha256_hash = hashlib.sha256(doc_body, usedforsecurity=False).hexdigest()
-    local_store.write_document(source, uri, doc_body, mime_type, meta, ingestion_type="webdav", source_url=source_url)
+    await local_store.write_document(source, uri, doc_body, mime_type, meta, ingestion_type="webdav", source_url=source_url)
     if etag:
         logger.debug("recording %s in local state (validator=%s)", uri, etag)
     else:

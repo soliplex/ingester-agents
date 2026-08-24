@@ -1,9 +1,13 @@
-"""Post-copy file processors for ingested documents.
+"""Content fixups applied to documents before they are stored.
 
-Processors rewrite files on disk after they are copied to the download
-directory. Each processor targets one or more MIME types and is registered
-via the :func:`register` decorator. Calling :func:`run_processors` runs
-every registered processor for a given MIME type in registration order.
+Processors transform a document's bytes on the way to the download store.
+Each processor targets one or more MIME types and is registered via the
+:func:`register` decorator. Calling :func:`run_processors` runs every
+registered processor for a given MIME type in registration order, threading
+the bytes through each.
+
+Processors run *before* the write, so a rejected document is never stored and
+there is nothing to clean up.
 
 Adding a new processor:
 
@@ -11,14 +15,13 @@ Adding a new processor:
 
     @register("text/mytype")
     class MyProcessor(FileProcessor):
-        def process(self, path: Path, mime_type: str) -> None:
+        def process(self, data: bytes, mime_type: str) -> bytes:
             ...
 """
 
 import logging
 from abc import ABC
 from abc import abstractmethod
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -26,19 +29,19 @@ _REGISTRY: dict[str, list[type["FileProcessor"]]] = {}
 
 
 class ProcessorRejected(Exception):
-    """Raised by a processor to signal the file should be discarded.
+    """Raised by a processor to signal the document should be discarded.
 
-    The caller is responsible for removing the file and its sidecar from
-    the download directory and omitting the URI from local state.
+    Raised before anything is written, so the caller only has to omit the URI
+    from local state and record the rejection.
     """
 
 
 class FileProcessor(ABC):
-    """Base class for post-copy file processors."""
+    """Base class for content fixups."""
 
     @abstractmethod
-    def process(self, path: Path, mime_type: str) -> None:
-        """Rewrite *path* in place if corrections are needed."""
+    def process(self, data: bytes, mime_type: str) -> bytes:
+        """Return corrected bytes, or *data* unchanged."""
 
 
 def register(*mime_types: str):
@@ -52,20 +55,32 @@ def register(*mime_types: str):
     return decorator
 
 
-def run_processors(path: Path, mime_type: str) -> None:
-    """Run all processors registered for *mime_type* against *path*.
+def run_processors(data: bytes, mime_type: str) -> bytes:
+    """Run every processor registered for *mime_type* over *data*.
+
+    Each processor's output feeds the next. A processor that raises anything
+    other than :class:`ProcessorRejected` is logged and skipped, leaving the
+    bytes it was given untouched.
+
+    Args:
+        data: The document's bytes.
+        mime_type: Resolved MIME type selecting which processors run.
+
+    Returns:
+        The bytes to store.
 
     Raises:
-        ProcessorRejected: if a processor rejects the file. The caller is
-            responsible for removing the file from the download directory.
+        ProcessorRejected: if a processor rejects the document. Nothing has
+            been written at this point.
     """
     for cls in _REGISTRY.get(mime_type, []):
         try:
-            cls().process(path, mime_type)
+            data = cls().process(data, mime_type)
         except ProcessorRejected:
             raise
         except Exception:
-            logger.exception("Processor %s failed on %s", cls.__name__, path)
+            logger.exception("Processor %s failed on %s content", cls.__name__, mime_type)
+    return data
 
 
 # Register built-in processors (side-effect imports).

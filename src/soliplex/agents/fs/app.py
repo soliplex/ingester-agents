@@ -169,7 +169,7 @@ async def load_inventory(
 
     delete_stale_result = None
     if delete_stale and len(errors) == 0:
-        delete_stale_result = local_state.prune_documents(source, {r["path"] for r in config})
+        delete_stale_result = await local_state.prune_documents(source, {r["path"] for r in config})
     ret["delete_stale_result"] = delete_stale_result
     return ret
 
@@ -190,7 +190,7 @@ async def _write_local(
     # it from the bytes, defaulting extension-less text to text/plain.
     if not mime_type or mime_type == "application/octet-stream":
         mime_type = detect_mime_type(uri, data=doc_body, text_fallback=True)
-    local_store.write_document(source, uri, doc_body, mime_type, meta, ingestion_type="fs")
+    await local_store.write_document(source, uri, doc_body, mime_type, meta, ingestion_type="fs")
     local_state.upsert_file(source, uri, sha256, size=len(doc_body), mime_type=mime_type)
 
 

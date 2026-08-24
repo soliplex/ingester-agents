@@ -414,7 +414,7 @@ async def run_manifest(manifest: Manifest) -> dict:
             )
         else:
             current_uris = {item["uri"] for item in all_uri_hashes} - all_not_found
-            delete_stale_result = local_state.reconcile_documents(manifest.source, current_uris)
+            delete_stale_result = await local_state.reconcile_documents(manifest.source, current_uris)
 
     error_count = sum(1 for r in results if "error" in r)
     deleted_count = len(delete_stale_result or [])

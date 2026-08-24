@@ -11,6 +11,10 @@ Two conveniences:
   accepts one (an explicit ``config`` parameter or ``**kwargs``), the manifest's
   resolved haiku config path is passed so the callback opens the store with the
   same config the load used;
+* **context auto-inject** -- likewise for ``context``, which receives the
+  :class:`~soliplex.agents.manifest.context.LoadContext` for the source: the
+  resolved download target, store, and sidecar facade. A callback that needs
+  storage does not have to rediscover it from the environment;
 * **log-and-continue** -- a failing step is logged and recorded, and the
   remaining steps still run.
 
@@ -26,8 +30,7 @@ from contextlib import contextmanager
 from inspect import Parameter
 
 from soliplex.agents.config import Manifest
-from soliplex.agents.config import settings
-from soliplex.agents.local_store import sanitize_source
+from soliplex.agents.manifest.context import LoadContext
 from soliplex.agents.manifest.haiku_loader import resolve_haiku_cfg
 
 logger = logging.getLogger(__name__)
@@ -58,7 +61,7 @@ def _accepts_kwarg(method: Callable, name: str) -> bool:
 
 
 @contextmanager
-def _load_env(manifest: Manifest):
+def _load_env(manifest: Manifest, context: LoadContext):
     """Temporarily expose the env vars ``run_load`` injects into the load
     subprocess (``SOURCE`` / ``DOWNLOAD_DIR``).
 
@@ -70,10 +73,7 @@ def _load_env(manifest: Manifest):
     inherited environment, exactly as they are for the subprocess. Loads are
     serialized, so the temporary global mutation does not race.
     """
-    overrides = {
-        "SOURCE": sanitize_source(manifest.source),
-        "DOWNLOAD_DIR": settings.download_dir,
-    }
+    overrides = {key: context.env({})[key] for key in ("SOURCE", "DOWNLOAD_DIR", "DOWNLOAD_URI")}
     previous = {key: os.environ.get(key) for key in overrides}
     os.environ.update(overrides)
     try:
@@ -107,7 +107,8 @@ async def run_post_process(
         return []
 
     results: list[dict] = []
-    with _load_env(manifest):
+    context = LoadContext.for_source(manifest.source)
+    with _load_env(manifest, context):
         for step in manifest.config.post_process:
             logger.info(
                 "Running post-process '%s' for source '%s'",
@@ -121,6 +122,8 @@ async def run_post_process(
                     kwargs["config"] = resolve_haiku_cfg(manifest)
                 if "ingester_exit_code" not in kwargs and _accepts_kwarg(method, "ingester_exit_code"):
                     kwargs["ingester_exit_code"] = ingester_exit_code
+                if "context" not in kwargs and _accepts_kwarg(method, "context"):
+                    kwargs["context"] = context
                 value = method(manifest.source, **kwargs)
                 if inspect.isawaitable(value):
                     await value

@@ -14,7 +14,6 @@ explicit ``SOURCE`` (the sanitized download-folder name) and
 
 import asyncio
 import logging
-import os
 import re
 import shlex
 import signal
@@ -22,7 +21,7 @@ from pathlib import Path
 
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import settings
-from soliplex.agents.local_store import sanitize_source
+from soliplex.agents.manifest.context import LoadContext
 
 logger = logging.getLogger(__name__)
 
@@ -170,9 +169,7 @@ async def run_load(manifest: Manifest) -> dict:
     db = resolve_db_path(source)
     argv = build_load_argv(haiku_cfg, db, source)
 
-    env = os.environ.copy()
-    env["SOURCE"] = sanitize_source(source)
-    env["DOWNLOAD_DIR"] = settings.download_dir
+    env = LoadContext.for_source(source).env()
     env["OTEL_SERVICE_NAME"] = env.get("OTEL_SERVICE_NAME", "ingester-agent") + f".haiku-ingester.{source}"
     # Force the (Python) child to flush stdout so we can stream it live.
     env["PYTHONUNBUFFERED"] = "1"

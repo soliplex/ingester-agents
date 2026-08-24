@@ -9,6 +9,7 @@ import pytest
 
 from soliplex.agents import local_state
 from soliplex.agents import local_store
+from soliplex.agents import store as agent_store
 from soliplex.agents.config import SCM
 from soliplex.agents.config import ContentFilter
 from soliplex.agents.scm import app as scm_app
@@ -26,7 +27,7 @@ def create_async_context_manager(return_value):
 def local_env(tmp_path, monkeypatch):
     """Point download_dir and state_dir at temp directories."""
     monkeypatch.setattr(local_state.settings, "state_dir", str(tmp_path / "state"))
-    monkeypatch.setattr(local_store.settings, "download_dir", str(tmp_path / "dl"))
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
     return tmp_path
 
 
@@ -117,7 +118,7 @@ async def test_incremental_sync_with_removed_files(local_env):
     """Incremental sync should delete locally files removed in the source."""
     source = "gitea:admin:test:all"
     # Seed a stale file + state entry.
-    local_store.write_document(source, "old_file.md", b"old", "text/markdown", {})
+    await local_store.write_document(source, "old_file.md", b"old", "text/markdown", {})
     local_state.upsert_file(source, "old_file.md", "oldsha", mime_type="text/markdown")
     local_state.set_sync_meta(source, "abc123", branch="main")
 
@@ -144,7 +145,7 @@ async def test_incremental_sync_issues_reconciliation(local_env):
     """ISSUES-only sync should prune issues no longer present in the source."""
     source = "gitea:admin:test:issues"
     # Seed a stale issue locally.
-    local_store.write_document(source, "/admin/test/issues/9", b"# old", "text/markdown", {})
+    await local_store.write_document(source, "/admin/test/issues/9", b"# old", "text/markdown", {})
     local_state.upsert_file(source, "/admin/test/issues/9", "s9", mime_type="text/markdown")
     local_state.set_sync_meta(source, "abc123", last_sync_date=datetime.datetime(2026, 1, 1))
 
@@ -447,13 +448,13 @@ async def test_incremental_sync_calls_run_processors(local_env):
         mock_provider.list_issues = AsyncMock(return_value=[])
         mock_get_scm.return_value = mock_provider
 
-        with patch("soliplex.agents.scm.app.processors.run_processors") as mock_run:
+        with patch(
+            "soliplex.agents.scm.app.processors.run_processors",
+            side_effect=lambda data, mime_type: data,
+        ) as mock_run:
             result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin")
 
     assert result["status"] == "synced"
     assert mock_run.call_count == 1
-    call_args = mock_run.call_args
-    # first positional arg is the written Path
-    assert call_args.args[0].name == "file1.md"
-    # second positional arg is the MIME type
-    assert call_args.args[1] == "text/markdown"
+    # Processors now run on the bytes, before anything is written.
+    assert mock_run.call_args.args == (b"content", "text/markdown")

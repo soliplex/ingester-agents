@@ -105,15 +105,13 @@ async def load_inventory(
         try:
             mime_type = _resolve_mime(row)
             meta = _doc_meta(row, extra_metadata)
-            doc_bytes = row["file_bytes"]
+            doc_bytes = processors.run_processors(row["file_bytes"], mime_type)
             logger.info(f"writing {uri}")
-            target = local_store.write_document(source, uri, doc_bytes, mime_type, meta, ingestion_type="scm")
-            processors.run_processors(target, mime_type)
+            await local_store.write_document(source, uri, doc_bytes, mime_type, meta, ingestion_type="scm")
             local_state.upsert_file(source, uri, row.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
             ingested.append(uri)
         except processors.ProcessorRejected as e:
             logger.warning("Processor rejected %s: %s", uri, e)
-            local_store.delete_document(source, uri, mime_type=mime_type)
             errors.append({"uri": uri, "error": str(e)})
         except Exception as e:
             logger.exception("Failed to write %s", uri)
@@ -121,7 +119,7 @@ async def load_inventory(
 
     delete_stale_result = None
     if delete_stale and len(errors) == 0:
-        delete_stale_result = local_state.prune_documents(source, {r["uri"] for r in data})
+        delete_stale_result = await local_state.prune_documents(source, {r["uri"] for r in data})
     ret["delete_stale_result"] = delete_stale_result
     return ret
 
@@ -317,7 +315,7 @@ async def incremental_sync(
         if content_filter == ContentFilter.ISSUES:
             all_issues = await get_issues(scm, repo_name, owner)
             logger.info(f"Reconciling issue inventory ({len(all_issues)} total issues)")
-            local_state.prune_documents(source, {i["uri"] for i in all_issues})
+            await local_state.prune_documents(source, {i["uri"] for i in all_issues})
     # Fetch commits since last sync
     logger.info(f"Last sync was at commit {last_commit_sha}")
 
@@ -375,7 +373,7 @@ async def incremental_sync(
         for removed_path in removed_files:
             logger.info(f"Deleting removed file: {removed_path}")
             removed_mime = removed_state.get(removed_path, {}).get("mime_type")
-            local_store.delete_document(source, removed_path, mime_type=removed_mime)
+            await local_store.delete_document(source, removed_path, mime_type=removed_mime)
             local_state.delete_file(source, removed_path)
 
         # Fetch changed files. Use a coarse extension pre-filter (allowed
@@ -420,15 +418,13 @@ async def incremental_sync(
         try:
             mime_type = _resolve_mime(file)
             meta = _doc_meta(file, extra_metadata)
-            doc_bytes = file["file_bytes"]
-            target = local_store.write_document(source, uri, doc_bytes, mime_type, meta, ingestion_type="scm")
-            processors.run_processors(target, mime_type)
+            doc_bytes = processors.run_processors(file["file_bytes"], mime_type)
+            await local_store.write_document(source, uri, doc_bytes, mime_type, meta, ingestion_type="scm")
             local_state.upsert_file(source, uri, file.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
             ingested.append(uri)
             logger.info(f"wrote {uri}")
         except processors.ProcessorRejected as e:
             logger.warning("Processor rejected %s: %s", uri, e)
-            local_store.delete_document(source, uri, mime_type=mime_type)
             errors.append({"uri": uri, "error": str(e)})
         except Exception as e:
             logger.exception(f"Failed to write {file.get('uri', 'unknown')}")
@@ -470,7 +466,7 @@ async def incremental_sync(
             branch=branch,
             content_filter=content_filter,
         )
-        delete_stale_result = local_state.prune_documents(source, {u["uri"] for u in all_uris})
+        delete_stale_result = await local_state.prune_documents(source, {u["uri"] for u in all_uris})
 
     return {
         "status": "synced",

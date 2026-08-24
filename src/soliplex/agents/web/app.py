@@ -138,7 +138,9 @@ async def load_inventory(
         if extra_metadata:
             meta.update(extra_metadata)
         try:
-            local_store.write_document(source, url, content_bytes, content_type, meta, ingestion_type="web", source_url=url)
+            await local_store.write_document(
+                source, url, content_bytes, content_type, meta, ingestion_type="web", source_url=url
+            )
             local_state.upsert_file(source, url, row.get("sha256"), size=len(content_bytes), mime_type=content_type)
             ingested.append(url)
         except Exception as e:
@@ -147,6 +149,6 @@ async def load_inventory(
 
     delete_stale_result = None
     if delete_stale and len(errors) == 0:
-        delete_stale_result = local_state.prune_documents(source, {r["path"] for r in file_info})
+        delete_stale_result = await local_state.prune_documents(source, {r["path"] for r in file_info})
     ret["delete_stale_result"] = delete_stale_result
     return ret

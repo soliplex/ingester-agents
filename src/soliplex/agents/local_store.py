@@ -7,8 +7,6 @@ accompanied by a ``<filename>.meta.json`` sidecar carrying its MIME
 type and any other available metadata.
 """
 
-import hashlib
-import json
 import logging
 import re
 from pathlib import Path
@@ -17,12 +15,14 @@ from urllib.parse import urlsplit
 
 from soliplex.agents.common.mime import ensure_extension
 from soliplex.agents.common.mime import guess_extension
-from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Suffix appended to a document's filename to form its metadata sidecar.
-META_SUFFIX = ".meta.json"
+# Re-exported for callers that still import it from here; the suffix itself is
+# owned by the sidecar kind that uses it.
+from soliplex.agents.sidecar import META_SUFFIX  # noqa: E402, F401
+
+__all__ = ["META_SUFFIX"]
 
 # Characters illegal in Windows path segments (superset of POSIX concerns).
 _ILLEGAL_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -116,12 +116,18 @@ def uri_to_relpath(uri: str, *, mime_type: str | None = None) -> Path:
 
 
 def source_dir(source: str, download_dir: str | None = None) -> Path:
-    """Return the directory that holds all documents for *source*."""
-    base = Path(download_dir if download_dir is not None else settings.download_dir)
-    return base / sanitize_source(source)
+    """Return the directory that holds all documents for *source*.
+
+    Thin wrapper over :class:`~soliplex.agents.store.DownloadTarget` so the
+    layout has one definition; kept because callers and tests read better with
+    a path than with a target.
+    """
+    from soliplex.agents.store import get_document_store
+
+    return get_document_store(source, download_dir).target.root
 
 
-def write_document(
+async def write_document(
     source: str,
     uri: str,
     content: bytes | str,
@@ -149,31 +155,34 @@ def write_document(
     Returns:
         The path of the written document.
     """
+    from soliplex.agents.sidecar import DocumentWrite
+    from soliplex.agents.sidecar import Sidecars
+    from soliplex.agents.store import get_document_store
+
+    store = get_document_store(source, download_dir)
     rel = uri_to_relpath(uri, mime_type=mime_type)
-    target = source_dir(source, download_dir) / rel
-    target.parent.mkdir(parents=True, exist_ok=True)
+    key = rel.as_posix()
+    target = store.target.root / rel
 
     data = content.encode("utf-8") if isinstance(content, str) else content
-    target.write_bytes(data)
-
-    sidecar = target.with_name(target.name + META_SUFFIX)
-    payload = {
-        "mime_type": mime_type,
-        "source": source,
-        "source_uri": uri,
-        "ingestion_type": ingestion_type,
-        "sha256": hashlib.sha256(data, usedforsecurity=False).hexdigest(),
-        "size": len(data),
-        "metadata": metadata or {},
-    }
-    if source_url is not None:
-        payload["source_url"] = source_url
-    sidecar.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    await store.write(key, data)
+    await Sidecars(store).write_all(
+        key,
+        DocumentWrite(
+            source=source,
+            uri=uri,
+            content=data,
+            mime_type=mime_type,
+            metadata=metadata or {},
+            ingestion_type=ingestion_type,
+            source_url=source_url,
+        ),
+    )
     logger.info("wrote %s (%d bytes)", target, len(data))
     return target
 
 
-def delete_document(
+async def delete_document(
     source: str,
     uri: str,
     *,
@@ -191,15 +200,14 @@ def delete_document(
     Returns:
         True if the document or its sidecar existed and was removed.
     """
-    rel = uri_to_relpath(uri, mime_type=mime_type)
-    target = source_dir(source, download_dir) / rel
-    removed = False
-    for path in (target, target.with_name(target.name + META_SUFFIX)):
-        try:
-            path.unlink()
-            removed = True
-        except FileNotFoundError:
-            pass
+    from soliplex.agents.sidecar import Sidecars
+    from soliplex.agents.store import get_document_store
+
+    store = get_document_store(source, download_dir)
+    key = uri_to_relpath(uri, mime_type=mime_type).as_posix()
+    removed = await store.delete(key)
+    if await Sidecars(store).delete_all(key):
+        removed = True
     if removed:
-        logger.info("deleted stale document %s", target)
+        logger.info("deleted stale document %s", store.uri(key))
     return removed

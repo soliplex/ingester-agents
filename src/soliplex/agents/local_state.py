@@ -21,6 +21,8 @@ from pathlib import Path
 from soliplex.agents import local_store
 from soliplex.agents.config import settings
 from soliplex.agents.local_store import sanitize_source
+from soliplex.agents.sidecar import Sidecars
+from soliplex.agents.store import get_document_store
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +126,7 @@ def prune_files(source: str, current_uris: set[str]) -> list[str]:
     return removed
 
 
-def prune_documents(source: str, current_uris: set[str], download_dir: str | None = None) -> list[str]:
+async def prune_documents(source: str, current_uris: set[str], download_dir: str | None = None) -> list[str]:
     """Remove stale documents from both the state and the filesystem.
 
     Drops state entries whose URI is absent from *current_uris* and deletes
@@ -142,11 +144,11 @@ def prune_documents(source: str, current_uris: set[str], download_dir: str | Non
     removed = prune_files(source, current_uris)
     for uri in removed:
         mime_type = state.get(uri, {}).get("mime_type")
-        local_store.delete_document(source, uri, mime_type=mime_type, download_dir=download_dir)
+        await local_store.delete_document(source, uri, mime_type=mime_type, download_dir=download_dir)
     return removed
 
 
-def reconcile_documents(source: str, current_uris: set[str], download_dir: str | None = None) -> list[str]:
+async def reconcile_documents(source: str, current_uris: set[str], download_dir: str | None = None) -> list[str]:
     """Reconcile the on-disk download folder against *current_uris*.
 
     Stricter than :func:`prune_documents`: in addition to dropping tracked
@@ -169,26 +171,26 @@ def reconcile_documents(source: str, current_uris: set[str], download_dir: str |
     removed = [uri for uri in state if uri not in current_uris]
     for uri in removed:
         mime_type = state.get(uri, {}).get("mime_type")
-        local_store.delete_document(source, uri, mime_type=mime_type, download_dir=download_dir)
+        await local_store.delete_document(source, uri, mime_type=mime_type, download_dir=download_dir)
     prune_files(source, current_uris)
 
     # (B) Disk sweep: delete any file not backing a surviving URI. On-disk
     # names use the resolved MIME type recorded in state, so recomputing the
     # relative path from (uri, stored mime) reproduces the exact file written
     # and cannot false-positive against a file we just stored.
+    sidecars = Sidecars(get_document_store(source, download_dir))
     expected: set[str] = set()
     for uri, entry in state.items():
         if uri in current_uris:
             rel = local_store.uri_to_relpath(uri, mime_type=entry.get("mime_type")).as_posix()
             expected.add(rel)
-            expected.add(rel + local_store.META_SUFFIX)
+            expected |= sidecars.expected_keys(rel)
 
-    base = local_store.source_dir(source, download_dir)
-    if base.is_dir():
-        for path in base.rglob("*"):
-            if path.is_file() and path.relative_to(base).as_posix() not in expected:
-                path.unlink()
-                removed.append(path.relative_to(base).as_posix())
+    store = get_document_store(source, download_dir)
+    for key in await store.list():
+        if key not in expected:
+            await store.delete(key)
+            removed.append(key)
 
     return removed
 
