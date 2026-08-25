@@ -372,3 +372,51 @@ def test_reset_state(state_env):
 
 def test_reset_state_missing(state_env):
     assert local_state.reset_state("never") is False
+
+
+# --- get_state_path -------------------------------------------------------
+
+
+def test_state_path_unqualified_for_the_default_local_target(state_env, tmp_path):
+    """The historical filename survives, so an upgrade is a no-op.
+
+    Suffixing unconditionally would orphan every existing `<source>.db` and
+    re-fetch every corpus on deploy.
+    """
+    assert local_state.get_state_path("s").name == "s.db"
+
+
+def test_state_path_is_qualified_for_a_different_target(state_env):
+    """A store swap opens fresh state, so everything re-fetches into it."""
+    from soliplex.agents.store import DownloadTarget
+
+    remote = DownloadTarget(dir="dl", source="s", bucket="b")
+    qualified = local_state.get_state_path("s", remote)
+    assert qualified.name != "s.db"
+    assert qualified.name.endswith(".db")
+    assert remote.digest() in qualified.name
+
+
+def test_state_path_differs_per_target(state_env):
+    """Two targets never share a state file."""
+    from soliplex.agents.store import DownloadTarget
+
+    a = local_state.get_state_path("s", DownloadTarget(dir="dl", source="s", bucket="one"))
+    b = local_state.get_state_path("s", DownloadTarget(dir="dl", source="s", bucket="two"))
+    assert a != b
+
+
+def test_state_path_is_stable_for_the_same_target(state_env):
+    """The digest is derived from the canonical base URI, not from object identity."""
+    from soliplex.agents.store import DownloadTarget
+
+    make = lambda: DownloadTarget(dir="dl", source="s", bucket="b")  # noqa: E731
+    assert local_state.get_state_path("s", make()) == local_state.get_state_path("s", make())
+
+
+def test_state_path_qualified_for_a_local_dir_override(state_env):
+    """A local target pointed somewhere else is still a different location."""
+    from soliplex.agents.store import DownloadTarget
+
+    other = DownloadTarget(dir="/somewhere/else", source="s")
+    assert local_state.get_state_path("s", other).name != "s.db"

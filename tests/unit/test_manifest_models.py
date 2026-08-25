@@ -6,8 +6,10 @@ from unittest.mock import patch
 import pytest
 
 from soliplex.agents import ValidationError
+from soliplex.agents import store as agent_store
 from soliplex.agents.config import SCM
 from soliplex.agents.config import ContentFilter
+from soliplex.agents.config import DownloadStoreConfig
 from soliplex.agents.config import FSComponent
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import ManifestConfig
@@ -365,3 +367,74 @@ class TestManifest:
     def test_get_metadata_empty(self):
         m = Manifest(id="t", name="test", source="src", components=[{"type": "fs", "name": "a", "path": "/a"}])
         assert m.get_metadata(m.components[0]) == {}
+
+
+# --- get_download_target --------------------------------------------------
+
+
+def _manifest(source="src", store=None):
+    config = ManifestConfig(download_store=store) if store is not None else None
+    return Manifest(
+        id="m",
+        name="M",
+        source=source,
+        config=config,
+        components=[{"type": "fs", "name": "c", "path": "/data"}],
+    )
+
+
+def test_download_target_inherits_the_installation(monkeypatch, tmp_path):
+    """No override block -> whatever the settings say."""
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
+    agent_store.reset_store_cache()
+    target = _manifest().get_download_target()
+    assert target.is_local is True
+    assert target.root == tmp_path / "dl" / "src"
+
+
+def test_download_target_inherits_an_s3_installation(monkeypatch):
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", "inherited")
+    monkeypatch.setattr(agent_store.settings, "download_dir", "dl")
+    monkeypatch.setattr(agent_store, "_make_s3_store", lambda bucket, options: None)
+    agent_store.reset_store_cache()
+    assert _manifest().get_download_target().base_uri == "s3://inherited/dl/src"
+
+
+def test_download_target_override_forces_s3(monkeypatch):
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
+    target = _manifest(store=DownloadStoreConfig(target="s3", bucket="b", dir="over")).get_download_target()
+    assert target.base_uri == "s3://b/over/src"
+
+
+def test_download_target_override_forces_local(monkeypatch, tmp_path):
+    """The third state: pin a source local while the installation is S3.
+
+    This is what a rollback needs, and what `bucket: null` could not express.
+    """
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", "installation-wide")
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
+    target = _manifest(store=DownloadStoreConfig(target="fs")).get_download_target()
+    assert target.is_local is True
+    assert target.root == tmp_path / "dl" / "src"
+
+
+def test_download_target_override_falls_back_to_settings_bucket(monkeypatch):
+    """An override may name only the target, taking the bucket from settings."""
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", "from-settings")
+    monkeypatch.setattr(agent_store.settings, "download_dir", "dl")
+    target = _manifest(store=DownloadStoreConfig(target="s3")).get_download_target()
+    assert target.base_uri == "s3://from-settings/dl/src"
+
+
+def test_download_target_s3_without_a_bucket_raises(monkeypatch):
+    """Failing loudly beats silently writing to local disk."""
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
+    with pytest.raises(ValueError, match="no bucket is configured"):
+        _manifest(store=DownloadStoreConfig(target="s3")).get_download_target()
+
+
+def test_download_target_dir_override_wins(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
+    target = _manifest(store=DownloadStoreConfig(target="fs")).get_download_target(download_dir=str(tmp_path / "explicit"))
+    assert target.root == tmp_path / "explicit" / "src"

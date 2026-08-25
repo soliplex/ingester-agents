@@ -42,9 +42,37 @@ STATUS_UNCHANGED = "unchanged"
 PROCESSABLE_STATUSES = frozenset({STATUS_NEW, STATUS_MISMATCH})
 
 
-def get_state_path(source: str) -> Path:
-    """Return the SQLite state file path for *source*."""
-    return Path(settings.state_dir) / f"{sanitize_source(source)}.db"
+def get_state_path(source: str, target=None) -> Path:
+    """Return the SQLite state file path for *source* under *target*.
+
+    Change detection compares each URI's upstream hash against this state, and
+    a store swap changes neither the URIs nor the hashes -- so a source pointed
+    at a new target would report every document ``unchanged`` and write nothing
+    to the new location. Qualifying the filename by the target makes the swap
+    open a fresh, empty state instead, so everything re-fetches.
+
+    A **local default** target keeps the historical unqualified name. That is
+    deliberate: suffixing unconditionally would orphan every existing
+    ``<source>.db`` on upgrade and re-fetch every corpus, which is a
+    self-inflicted outage from a filename change.
+
+    Rolling a source back is then free -- the original state file is still
+    there, still describing the documents at the old location.
+
+    Args:
+        source: Source identifier.
+        target: Resolved :class:`~soliplex.agents.store.DownloadTarget`.
+            Defaults to whatever the installation settings resolve to.
+
+    Returns:
+        Path to this source-and-target's SQLite file.
+    """
+    if target is None:
+        from soliplex.agents.store import get_document_store
+
+        target = get_document_store(source).target
+    suffix = "" if target.is_local and target.dir == settings.download_dir else f".{target.digest()}"
+    return Path(settings.state_dir) / f"{sanitize_source(source)}{suffix}.db"
 
 
 @contextmanager

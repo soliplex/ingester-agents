@@ -12,6 +12,7 @@ Two backends: the local filesystem, and S3-compatible object storage via
 knows the difference.
 """
 
+import hashlib
 import logging
 import shutil
 from collections.abc import Mapping
@@ -65,8 +66,14 @@ class DownloadTarget:
 
     @property
     def prefix(self) -> str:
-        """The key prefix holding this source's objects (object targets only)."""
-        return "/".join(part for part in (self.dir.strip("/"), self.folder) if part)
+        """The key prefix holding this source's objects (object targets only).
+
+        Backslashes are normalized to ``/``: a Windows-style ``download_dir``
+        is legal in an S3 key but would make the same configuration produce
+        different keys per platform.
+        """
+        base = self.dir.replace("\\", "/").strip("/")
+        return "/".join(part for part in (base, self.folder) if part)
 
     @property
     def base_uri(self) -> str:
@@ -79,6 +86,17 @@ class DownloadTarget:
         if self.is_local:
             return self.root.resolve().as_uri()
         return f"s3://{self.bucket}/{self.prefix}" if self.prefix else f"s3://{self.bucket}"
+
+    def digest(self) -> str:
+        """Short stable digest of this target's identity.
+
+        Used to qualify per-target filenames (see
+        :func:`~soliplex.agents.local_state.get_state_path`). Derived from the
+        canonical base URI so the same configuration always produces the same
+        value, across processes and platforms.
+        """
+        material = self.base_uri.encode("utf-8")
+        return hashlib.sha256(material, usedforsecurity=False).hexdigest()[:12]
 
     def uri(self, key: str) -> str:
         """Absolute URI for the document at *key*."""

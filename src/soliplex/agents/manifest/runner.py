@@ -361,7 +361,50 @@ async def run_manifest(manifest: Manifest) -> dict:
         Dict with manifest id/name, per-component results list,
         and optional delete_stale result.
     """
-    logger.info("Starting manifest '%s' (%s) with %d components", manifest.id, manifest.name, len(manifest.components))
+    target = manifest.get_download_target()
+    logger.info(
+        "Starting manifest '%s' (%s) with %d components -> %s",
+        manifest.id,
+        manifest.name,
+        len(manifest.components),
+        target.base_uri,
+    )
+    with _download_target(target):
+        result = await _run_components(manifest, target)
+    return result
+
+
+@contextmanager
+def _download_target(target):
+    """Make *target* the store every agent in this manifest resolves.
+
+    The agents read `settings.download_dir` / `settings.download_s3_bucket`
+    rather than taking a target, so a per-manifest override is applied by
+    overriding those for the duration. This relies on manifest execution being
+    serialized, which the global semaphore in `server.locks` enforces -- the
+    same assumption `override_settings` already makes for `extensions`.
+
+    Threading the resolved target through `write_document` and the four agents
+    instead would remove that assumption; it is a wider change than the
+    override is worth until something actually runs manifests concurrently.
+    """
+    from soliplex.agents.store import reset_store_cache
+
+    reset_store_cache()
+    try:
+        with override_settings(
+            download_dir=target.dir,
+            download_s3_bucket=target.bucket,
+        ):
+            yield
+    finally:
+        # Stores are cached per resolved target; drop them so the next manifest
+        # does not inherit this one's.
+        reset_store_cache()
+
+
+async def _run_components(manifest: Manifest, target) -> dict:
+    """Execute a manifest's components and reconcile, under a resolved target."""
     results: list[dict[str, Any]] = []
     all_uri_hashes: list[dict[str, str]] = []
     all_not_found: set[str] = set()
@@ -434,6 +477,97 @@ async def run_manifest(manifest: Manifest) -> dict:
         "results": results,
         "delete_stale_result": delete_stale_result,
     }
+
+
+def installation_target(source: str):
+    """The target *source* resolves to with no manifest override applied.
+
+    This is what a manifest is migrating *away from*: the override in the
+    manifest names the destination, so the installation default is the origin.
+    """
+    from soliplex.agents.store import DownloadTarget
+    from soliplex.agents.store import storage_options
+
+    return DownloadTarget(
+        dir=settings.download_dir,
+        source=source,
+        bucket=settings.download_s3_bucket,
+        storage_options=storage_options() if settings.download_s3_bucket else {},
+    )
+
+
+async def migrate_store(manifest: Manifest, dry_run: bool = False) -> dict:
+    """Copy a source's documents from its installation target to its override.
+
+    Without this, flipping a manifest's ``download_store`` still works -- the
+    target-qualified state file means everything re-fetches from upstream (see
+    :func:`~soliplex.agents.local_state.get_state_path`). This exists to avoid
+    that re-fetch, which is slow and re-hits rate limits on SCM and WebDAV
+    sources.
+
+    Copies rather than moves, in both halves: the documents *and* the state
+    file are left in place at the origin, which is the whole rollback story --
+    setting ``target: fs`` back then costs nothing.
+
+    Args:
+        manifest: The manifest whose override names the destination.
+        dry_run: Report what would be copied without writing anything.
+
+    Returns:
+        Dict with ``source``, ``from``, ``to``, ``keys``, ``copied``,
+        ``state_copied``, and ``dry_run``.
+    """
+    import shutil
+
+    from soliplex.agents.local_state import get_state_path
+    from soliplex.agents.store import LocalDocumentStore
+    from soliplex.agents.store import S3DocumentStore
+
+    def _store(target):
+        return LocalDocumentStore(target) if target.is_local else S3DocumentStore(target)
+
+    origin = installation_target(manifest.source)
+    destination = manifest.get_download_target()
+    result = {
+        "source": manifest.source,
+        "from": origin.base_uri,
+        "to": destination.base_uri,
+        "keys": 0,
+        "copied": 0,
+        "state_copied": False,
+        "dry_run": dry_run,
+    }
+    if origin.base_uri == destination.base_uri:
+        logger.info("Source '%s' already targets %s; nothing to migrate", manifest.source, destination.base_uri)
+        return result
+
+    src, dst = _store(origin), _store(destination)
+    keys = await src.list()
+    result["keys"] = len(keys)
+    logger.info(
+        "Migrating source '%s': %d object(s) %s -> %s%s",
+        manifest.source,
+        len(keys),
+        origin.base_uri,
+        destination.base_uri,
+        " (dry run)" if dry_run else "",
+    )
+    if dry_run:
+        return result
+
+    for key in keys:
+        await dst.write(key, await src.read(key))
+        result["copied"] += 1
+
+    # The state file too, so the next run sees the documents as already present
+    # instead of re-fetching them.
+    old_state = get_state_path(manifest.source, origin)
+    new_state = get_state_path(manifest.source, destination)
+    if old_state.is_file() and old_state != new_state:
+        new_state.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(old_state, new_state)
+        result["state_copied"] = True
+    return result
 
 
 async def run_manifests(path: str, load: bool = False) -> list[dict]:

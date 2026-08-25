@@ -411,8 +411,28 @@ class PostProcessStep(BaseModel):
     kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
+class DownloadStoreConfig(BaseModel):
+    """Per-manifest override of where this source's documents are written.
+
+    ``target`` is explicit rather than inferred from ``bucket``'s presence,
+    because an override needs three states, not two: inherit the installation
+    default (omit the whole block), force object storage, or force the local
+    filesystem. The third is how a source is pinned while it is not ready, or
+    rolled back after a bad migration, when the installation default is
+    already S3 -- and ``bucket: null`` cannot express it, since pydantic
+    cannot tell an absent key from an explicit null without inspecting
+    ``model_fields_set``.
+    """
+
+    target: Literal["fs", "s3"]
+    bucket: str | None = None  # Defaults to settings.download_s3_bucket
+    dir: str | None = None  # Defaults to settings.download_dir
+
+
 class ManifestConfig(BaseModel):
     """Shared configuration applied to all components in a manifest."""
+
+    download_store: DownloadStoreConfig | None = None
 
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
@@ -458,6 +478,41 @@ class Manifest(BaseModel):
         if self.config and self.config.extensions is not None:
             return self.config.extensions
         return None
+
+    def get_download_target(self, download_dir: str | None = None):
+        """Resolve where this manifest's documents are written.
+
+        The manifest's ``config.download_store`` wins; absent it, the
+        installation settings decide. Returns a
+        :class:`~soliplex.agents.store.DownloadTarget`.
+
+        Args:
+            download_dir: Override for the resolved directory (mainly tests).
+
+        Raises:
+            ValueError: if the override asks for ``s3`` but no bucket is
+                configured, here or in the settings. Failing loudly beats
+                silently writing to local disk.
+        """
+        from soliplex.agents.store import DownloadTarget
+        from soliplex.agents.store import storage_options
+
+        override = self.config.download_store if self.config else None
+        if override is None:
+            from soliplex.agents.store import get_document_store
+
+            return get_document_store(self.source, download_dir).target
+
+        base = download_dir if download_dir is not None else (override.dir or settings.download_dir)
+        if override.target == "fs":
+            return DownloadTarget(dir=base, source=self.source)
+        bucket = override.bucket or settings.download_s3_bucket
+        if not bucket:
+            raise ValueError(
+                f"Manifest '{self.id}' sets download_store.target='s3' but no bucket is "
+                f"configured; set download_store.bucket or DOWNLOAD_S3_BUCKET"
+            )
+        return DownloadTarget(dir=base, source=self.source, bucket=bucket, storage_options=storage_options())
 
     def get_metadata(self, component: FSComponent | SCMComponent | WebDAVComponent | WebComponent) -> dict[str, str]:
         """Resolve metadata for a component (config metadata merged with component metadata on top)."""

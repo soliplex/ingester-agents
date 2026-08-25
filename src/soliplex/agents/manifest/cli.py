@@ -126,6 +126,38 @@ def _maintenance(verb: str, path: str, do_json: bool, timeout: float | None, dry
         raise SystemExit(1)
 
 
+@cli.command("migrate-store")
+def migrate_store(
+    path: str = typer.Argument(runner.ALL_MANIFESTS, help="Manifest file, directory, or 'all'"),
+    do_json: bool = typer.Option(False, "--json", help="Output results as JSON"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be copied, writing nothing"),
+) -> None:
+    """Copy a source's documents to the target its manifest overrides to.
+
+    Flipping a manifest's ``download_store`` already works without this: the
+    state file is qualified by target, so everything re-fetches from upstream.
+    This copies the objects sideways instead, which avoids re-downloading and
+    re-hitting SCM / WebDAV rate limits.
+
+    Copies rather than moves -- the documents and the old state file stay put,
+    so rolling back is a config edit.
+    """
+    manifests = runner.resolve_manifests(path)
+    results = [asyncio.run(runner.migrate_store(m, dry_run=dry_run)) for m in manifests]
+    if do_json:
+        print(json.dumps(results, indent=2))
+    else:
+        for res in results:
+            if res["from"] == res["to"]:
+                print(f"{res['source']}: already at {res['to']}")
+                continue
+            verb = "would copy" if res["dry_run"] else "copied"
+            state = "" if res["dry_run"] else f", state {'copied' if res['state_copied'] else 'absent'}"
+            print(f"{res['source']}: {verb} {res['keys']} object(s) {res['from']} -> {res['to']}{state}")
+    if any(r["keys"] and not r["dry_run"] and r["copied"] != r["keys"] for r in results):
+        raise typer.Exit(1)
+
+
 @cli.command("migrate")
 def migrate(
     path: str = typer.Argument(runner.ALL_MANIFESTS, help=_PATH_HELP),
