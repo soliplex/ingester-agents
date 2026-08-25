@@ -173,6 +173,15 @@ async def repair_relocated_documents(source: str, download_dir: str | None = Non
     it under its real extension. Two runs to fully heal, by design: the
     repair happens after the current run has already decided what to fetch.
 
+    Dropping the state row is enough to force that re-fetch only for sources
+    that decide what to fetch by comparing against state. An incremental SCM
+    sync does not: it fetches the files touched by commits it has not seen
+    yet, so a document no commit has touched since would never come back --
+    the repair would delete it permanently instead of relocating it. So a
+    repair also clears the incremental cursor (see :func:`clear_sync_cursor`),
+    which costs one full listing on the next run and is self-limiting,
+    because a repaired row no longer matches.
+
     A row qualifies only when its stored type *and* the type implied by its
     own URI extension are both container types that disagree. Renames that
     were deliberate stay untouched (a ``.bin`` sniffed as PDF is stored as
@@ -198,6 +207,8 @@ async def repair_relocated_documents(source: str, download_dir: str | None = Non
         delete_file(source, uri)
         repaired.append(uri)
         logger.info("repairing %s: stored as %s, re-fetching as %s", uri, stored_type, uri_type)
+    if repaired:
+        clear_sync_cursor(source)
     return repaired
 
 
@@ -375,6 +386,24 @@ def set_sync_meta(
                 "INSERT OR REPLACE INTO sync (id, last_commit_sha, branch, last_sync_date, metadata) VALUES (1, ?, ?, ?, ?)",
                 (commit_sha, branch, date_str, meta_str),
             )
+
+
+def clear_sync_cursor(source: str) -> None:
+    """Forget how far an incremental SCM sync has read, keeping everything else.
+
+    Only ``last_commit_sha`` is cleared, so the next run falls back to a full
+    listing while ``last_sync_date`` still scopes the issue fetch and the
+    per-file hashes in ``files`` still suppress rewrites. The result is one
+    extra listing, not a re-ingest.
+
+    A no-op for sources that never wrote a marker.
+
+    Args:
+        source: Source identifier.
+    """
+    with _get_connection(source) as conn:
+        with conn:
+            conn.execute("UPDATE sync SET last_commit_sha = NULL WHERE id = 1")
 
 
 def reset_state(source: str) -> bool:

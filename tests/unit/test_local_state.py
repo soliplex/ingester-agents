@@ -127,6 +127,7 @@ async def test_prune_documents_deletes_files_and_state(state_env):
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+NOW = datetime.datetime(2026, 8, 25, 12, 0, tzinfo=datetime.UTC)
 
 
 async def _write_mangled(uri="deck.pptx"):
@@ -206,6 +207,42 @@ async def test_repair_is_idempotent_after_rewrite(state_env):
 
     assert await local_state.repair_relocated_documents("s") == []
     assert (local_store.source_dir("s") / "deck.pptx").exists()
+
+
+@pytest.mark.asyncio
+async def test_repair_clears_incremental_cursor(state_env):
+    # An incremental SCM sync fetches what new commits touched, not what state
+    # is missing, so dropping the row alone would never bring the document
+    # back. Clearing the cursor makes the next run list the repo in full.
+    await _write_mangled()
+    local_state.set_sync_meta("s", "sha-1", branch="trunk", last_sync_date=NOW)
+
+    assert await local_state.repair_relocated_documents("s") == ["deck.pptx"]
+
+    meta = local_state.get_sync_meta("s")
+    assert meta["last_commit_sha"] is None
+    # Only the commit cursor is forgotten: the issue window and branch stay,
+    # so a full listing is the whole cost.
+    assert meta["last_sync_date"] == NOW
+    assert meta["branch"] == "trunk"
+
+
+@pytest.mark.asyncio
+async def test_repair_leaves_cursor_alone_when_nothing_repaired(state_env):
+    await local_store.write_document("s", "report.docx", b"docx-bytes", DOCX_MIME, {})
+    local_state.upsert_file("s", "report.docx", "1", mime_type=DOCX_MIME)
+    local_state.set_sync_meta("s", "sha-1")
+
+    assert await local_state.repair_relocated_documents("s") == []
+
+    assert local_state.get_sync_meta("s")["last_commit_sha"] == "sha-1"
+
+
+def test_clear_sync_cursor_without_marker_row(state_env):
+    # A source that has never synced has no row to update.
+    local_state.clear_sync_cursor("s")
+
+    assert local_state.get_sync_meta("s")["last_commit_sha"] is None
 
 
 @pytest.mark.asyncio
