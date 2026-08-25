@@ -33,11 +33,17 @@ dependencies = [
     "typer>=0.21.1",
     "uvicorn[standard]>=0.34.0",
     "pyyaml>=6.0",
-    "haiku-rag[ingester]>=0.55.1",
+    "haiku-rag[ingester]>=0.72.1",
     "pypdfium2>=4.0",
     "puremagic>=2.2.0",
 ]
 
+
+[project.optional-dependencies]
+# Only needed when DOWNLOAD_S3_BUCKET is set. Pinned to the range haiku-rag
+# uses, since both consume the same obstore API and a wider range risks an
+# unsolvable resolution.
+s3 = ["obstore>=0.9,<0.10"]
 
 [dependency-groups]
 dev = [

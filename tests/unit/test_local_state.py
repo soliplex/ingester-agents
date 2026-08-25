@@ -123,6 +123,115 @@ async def test_prune_documents_deletes_files_and_state(state_env):
     assert set(local_state.load_file_state("s")) == {"a.md"}
 
 
+# --- repair_relocated_documents ---
+
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+
+async def _write_mangled(uri="deck.pptx"):
+    """Store *uri* the way the pre-fix docx guess did: under a .docx name."""
+    await local_store.write_document("s", uri, b"pptx-bytes", DOCX_MIME, {})
+    local_state.upsert_file("s", uri, "1", mime_type=DOCX_MIME)
+
+
+@pytest.mark.asyncio
+async def test_repair_discards_document_stored_under_wrong_extension(state_env):
+    await _write_mangled()
+    base = local_store.source_dir("s")
+    assert (base / "deck.docx").exists()
+
+    repaired = await local_state.repair_relocated_documents("s")
+
+    assert repaired == ["deck.pptx"]
+    assert not (base / "deck.docx").exists()
+    assert not (base / "deck.docx.meta.json").exists()
+    # State row gone, so the next run treats the URI as new and re-fetches it.
+    assert local_state.load_file_state("s") == {}
+
+
+@pytest.mark.asyncio
+async def test_repair_leaves_correctly_stored_ooxml_alone(state_env):
+    await local_store.write_document("s", "report.docx", b"docx-bytes", DOCX_MIME, {})
+    local_state.upsert_file("s", "report.docx", "1", mime_type=DOCX_MIME)
+
+    assert await local_state.repair_relocated_documents("s") == []
+    assert (local_store.source_dir("s") / "report.docx").exists()
+    assert set(local_state.load_file_state("s")) == {"report.docx"}
+
+
+@pytest.mark.asyncio
+async def test_repair_leaves_deliberate_renames_alone(state_env):
+    # A .bin sniffed as PDF is stored as .pdf on purpose -- not a container
+    # type, so the repair must not touch it.
+    await local_store.write_document("s", "blob.bin", b"%PDF-1.4", "application/pdf", {})
+    local_state.upsert_file("s", "blob.bin", "1", mime_type="application/pdf")
+
+    assert await local_state.repair_relocated_documents("s") == []
+    assert (local_store.source_dir("s") / "blob.pdf").exists()
+
+
+@pytest.mark.asyncio
+async def test_repair_ignores_container_uri_with_non_container_state(state_env):
+    # Stored type isn't a container, so nothing is assumed about the name.
+    local_state.upsert_file("s", "deck.pptx", "1", mime_type="text/plain")
+    assert await local_state.repair_relocated_documents("s") == []
+    assert set(local_state.load_file_state("s")) == {"deck.pptx"}
+
+
+@pytest.mark.asyncio
+async def test_repair_ignores_untyped_rows(state_env):
+    local_state.upsert_file("s", "deck.pptx", "1")
+    assert await local_state.repair_relocated_documents("s") == []
+
+
+@pytest.mark.asyncio
+async def test_repair_ignores_extensionless_uri(state_env):
+    # Nothing to compare the stored type against -- the guess stands.
+    await local_store.write_document("s", "mystery", b"x", DOCX_MIME, {})
+    local_state.upsert_file("s", "mystery", "1", mime_type=DOCX_MIME)
+
+    assert await local_state.repair_relocated_documents("s") == []
+
+
+@pytest.mark.asyncio
+async def test_repair_is_idempotent_after_rewrite(state_env):
+    # Once the document has been rewritten under its real type the row stops
+    # matching, so the pass is a no-op from then on.
+    await _write_mangled()
+    await local_state.repair_relocated_documents("s")
+
+    await local_store.write_document("s", "deck.pptx", b"pptx-bytes", PPTX_MIME, {})
+    local_state.upsert_file("s", "deck.pptx", "1", mime_type=PPTX_MIME)
+
+    assert await local_state.repair_relocated_documents("s") == []
+    assert (local_store.source_dir("s") / "deck.pptx").exists()
+
+
+@pytest.mark.asyncio
+async def test_prune_documents_repairs_relocated(state_env):
+    # delete_stale reports the repair even though the URI is still current.
+    await _write_mangled()
+
+    removed = await local_state.prune_documents("s", {"deck.pptx"})
+
+    assert removed == ["deck.pptx"]
+    assert not (local_store.source_dir("s") / "deck.docx").exists()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_documents_repairs_relocated(state_env):
+    # Without the repair the disk sweep keeps deck.docx: the expected-path set
+    # is built from the same wrong MIME type, so the file matches itself.
+    await _write_mangled()
+
+    removed = await local_state.reconcile_documents("s", {"deck.pptx"})
+
+    assert removed == ["deck.pptx"]
+    assert not (local_store.source_dir("s") / "deck.docx").exists()
+    assert local_state.load_file_state("s") == {}
+
+
 # --- reconcile_documents ---
 
 

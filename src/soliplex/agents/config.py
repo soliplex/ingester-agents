@@ -137,8 +137,20 @@ class Settings(BaseSettings):
     logfire_token: SecretStr | None = None
     logfire_service_name: str = "ingester-agents"
 
-    # S3 settings
+    # S3 settings. `s3_endpoint_url` is shared with the urls_file reader; the
+    # rest are the writer's credentials. All optional -- unset means fall
+    # through to the AWS default credential chain.
     s3_endpoint_url: str | None = None  # Custom S3 endpoint (for MinIO, etc.)
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: SecretStr | None = None
+    s3_region: str | None = None
+    s3_allow_http: bool = False  # Required for an http:// endpoint
+
+    # Download store: setting a bucket moves DOWNLOAD_DIR into object storage,
+    # where it becomes the key prefix rather than a local directory. Named
+    # DOWNLOAD_S3_BUCKET rather than S3_BUCKET so an unrelated variable in the
+    # environment cannot silently redirect every download.
+    download_s3_bucket: str | None = None
 
     # Git CLI settings
     scm_use_git_cli: bool = False  # Use git CLI instead of API for file operations
