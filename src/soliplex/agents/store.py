@@ -88,15 +88,20 @@ class DownloadTarget:
         return f"s3://{self.bucket}/{self.prefix}" if self.prefix else f"s3://{self.bucket}"
 
     def digest(self) -> str:
-        """Short stable digest of this target's identity.
+        """Short stable digest of this target's *configuration*.
 
         Used to qualify per-target filenames (see
-        :func:`~soliplex.agents.local_state.get_state_path`). Derived from the
-        canonical base URI so the same configuration always produces the same
-        value, across processes and platforms.
+        :func:`~soliplex.agents.local_state.get_state_path`).
+
+        Deliberately derived from the configured values rather than from
+        :attr:`base_uri`: a local base URI is resolved against the process's
+        working directory, so a relative ``DOWNLOAD_DIR`` would give the same
+        configuration a different digest -- and therefore a different state
+        file, and therefore a full re-fetch -- when the process runs from
+        somewhere else.
         """
-        material = self.base_uri.encode("utf-8")
-        return hashlib.sha256(material, usedforsecurity=False).hexdigest()[:12]
+        material = repr((self.bucket or "", self.dir.replace(chr(92), "/").strip("/"), self.folder))
+        return hashlib.sha256(material.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
     def uri(self, key: str) -> str:
         """Absolute URI for the document at *key*."""

@@ -327,3 +327,36 @@ def test_factory_download_dir_override_wins(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
     store = get_document_store("src", download_dir=str(tmp_path / "override"))
     assert store.target.root == tmp_path / "override" / "src"
+
+
+# --- digest ---------------------------------------------------------------
+
+
+def test_digest_is_stable_across_working_directories(tmp_path, monkeypatch):
+    """A relative DOWNLOAD_DIR must not make the digest depend on the CWD.
+
+    The digest names the state file. If it moved with the working directory,
+    running from somewhere else would open empty state and silently re-fetch
+    every document -- so it is derived from the configured values, not from the
+    resolved base URI.
+    """
+    target = DownloadTarget(dir="downloads", source="medic")
+    monkeypatch.chdir(tmp_path)
+    first = target.digest()
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    assert target.digest() == first
+
+
+def test_digest_distinguishes_targets():
+    base = DownloadTarget(dir="downloads", source="medic")
+    assert DownloadTarget(dir="downloads", source="medic", bucket="b").digest() != base.digest()
+    assert DownloadTarget(dir="other", source="medic").digest() != base.digest()
+    assert DownloadTarget(dir="downloads", source="other").digest() != base.digest()
+
+
+def test_digest_is_platform_stable():
+    """The same configuration must not differ between Windows and POSIX."""
+    backslash = chr(92)
+    assert DownloadTarget(dir="a" + backslash + "b", source="s").digest() == DownloadTarget(dir="a/b", source="s").digest()
