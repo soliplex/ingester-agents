@@ -97,7 +97,14 @@ async def load_inventory(
     to_process = local_state.compute_to_process(data, source)
     ingested = []
     errors = []
-    ret = {"inventory": data, "to_process": to_process, "ingested": ingested, "errors": errors}
+    rejected = []
+    ret = {
+        "inventory": data,
+        "to_process": to_process,
+        "ingested": ingested,
+        "errors": errors,
+        "rejected": rejected,
+    }
     logger.info(f"found {len(to_process)} to process")
 
     for row in to_process:
@@ -111,8 +118,12 @@ async def load_inventory(
             local_state.upsert_file(source, uri, row.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
             ingested.append(uri)
         except processors.ProcessorRejected as e:
+            # A rejection is a decision about the content, not a failure to
+            # reach it: replaying it cannot change the outcome. Kept out of
+            # `errors` so one undesirable document does not indefinitely
+            # suppress the reconcile (and with it the relocation repair).
             logger.warning("Processor rejected %s: %s", uri, e)
-            errors.append({"uri": uri, "error": str(e)})
+            rejected.append({"uri": uri, "reason": str(e)})
         except Exception as e:
             logger.exception("Failed to write %s", uri)
             errors.append({"uri": uri, "error": str(e)})
@@ -336,6 +347,7 @@ async def incremental_sync(
                 "files_changed": 0,
                 "ingested": [],
                 "errors": [],
+                "rejected": [],
             }
 
         logger.info(f"Found {len(new_commits)} new commits to process")
@@ -405,10 +417,12 @@ async def incremental_sync(
             "files_changed": 0,
             "ingested": [],
             "errors": [],
+            "rejected": [],
         }
 
     # Write changed files and issues locally
     errors = []
+    rejected = []
     ingested = []
 
     file_data.extend(issues)
@@ -424,8 +438,11 @@ async def incremental_sync(
             ingested.append(uri)
             logger.info(f"wrote {uri}")
         except processors.ProcessorRejected as e:
+            # Not an error: see the note in `load_inventory`. Recorded apart
+            # from `errors` so it neither pins the sync cursor nor blocks the
+            # reconcile, both of which would replay it on every run forever.
             logger.warning("Processor rejected %s: %s", uri, e)
-            errors.append({"uri": uri, "error": str(e)})
+            rejected.append({"uri": uri, "reason": str(e)})
         except Exception as e:
             logger.exception(f"Failed to write {file.get('uri', 'unknown')}")
             errors.append({"uri": uri, "error": str(e)})
@@ -475,6 +492,7 @@ async def incremental_sync(
         "files_removed": len(removed_files),
         "ingested": ingested,
         "errors": errors,
+        "rejected": rejected,
         "new_commit_sha": latest_commit_sha,
         "delete_stale_result": delete_stale_result,
     }

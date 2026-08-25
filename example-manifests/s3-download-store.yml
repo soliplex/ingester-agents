@@ -18,11 +18,14 @@ config:
     # installation default is S3, which is how a source is pinned or rolled
     # back. Omit the whole block to inherit the default.
     target: s3
-    bucket: my-documents        # optional; defaults to DOWNLOAD_S3_BUCKET
-    dir: ingester/downloads     # optional; defaults to DOWNLOAD_DIR
+    # A bare name or a full s3://bucket/prefix URI; a prefix here nests `dir`
+    # beneath it, so this is the same target as bucket: my-documents with
+    # dir: ingester/downloads.
+    bucket: s3://my-documents/ingester   # optional; defaults to DOWNLOAD_S3_BUCKET
+    dir: downloads                       # optional; defaults to DOWNLOAD_DIR
 
   # A source on object storage needs a haiku-rag config whose source stanza is
-  # `type: s3` with `uri: ${DOWNLOAD_URI}/${SOURCE}`. DOWNLOAD_URI is injected
+  # `type: s3` with `uri: ${DOWNLOAD_URI}`. DOWNLOAD_URI is injected
   # for every load and holds the resolved base URI in both modes, so one config
   # form works either way.
   haiku_config: haiku.rag.s3.yaml

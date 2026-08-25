@@ -17,6 +17,7 @@ from soliplex.agents.store import DownloadTarget
 from soliplex.agents.store import LocalDocumentStore
 from soliplex.agents.store import S3DocumentStore
 from soliplex.agents.store import get_document_store
+from soliplex.agents.store import split_bucket
 from soliplex.agents.store import storage_options
 
 SOURCE = "gitea:admin:r:all"
@@ -287,6 +288,74 @@ def test_storage_options_unwraps_the_secret(monkeypatch):
         "endpoint": "http://minio:9000",
         "allow_http": "true",
     }
+
+
+# --- bucket spelling ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "configured,expected",
+    [
+        ("my-bucket", ("my-bucket", "")),
+        ("s3://my-bucket", ("my-bucket", "")),
+        ("s3://my-bucket/", ("my-bucket", "")),
+        ("S3://my-bucket", ("my-bucket", "")),
+        ("s3://my-bucket/ingester", ("my-bucket", "ingester")),
+        ("my-bucket/ingester", ("my-bucket", "ingester")),
+        ("s3://my-bucket/a/b/c", ("my-bucket", "a/b/c")),
+        ("  s3://my-bucket/p  ", ("my-bucket", "p")),
+    ],
+)
+def test_split_bucket_accepts_uri_and_bare_forms(configured, expected):
+    """One value has to satisfy both the reader and the writer (see S3_BUCKET)."""
+    assert split_bucket(configured) == expected
+
+
+@pytest.mark.parametrize("configured", ["https://b/p", "file://b"])
+def test_split_bucket_rejects_other_schemes(configured):
+    with pytest.raises(ValueError, match="s3:// URI or a bare bucket name"):
+        split_bucket(configured)
+
+
+@pytest.mark.parametrize("configured", ["s3://", "", "/", "   "])
+def test_split_bucket_rejects_a_missing_bucket(configured):
+    with pytest.raises(ValueError, match="names no bucket"):
+        split_bucket(configured)
+
+
+def test_bucket_prefix_nests_the_download_dir_beneath_it():
+    """`s3://bucket/ingester` + `downloads` addresses bucket/ingester/downloads."""
+    target = DownloadTarget(dir="downloads", source="src", bucket="s3://bucket/ingester")
+
+    assert target.bucket_name == "bucket"
+    assert target.base_prefix == "ingester"
+    assert target.prefix == "ingester/downloads/src"
+    assert target.base_uri == "s3://bucket/ingester/downloads/src"
+    assert target.uri("a/b.pdf") == "s3://bucket/ingester/downloads/src/a/b.pdf"
+    assert target.key_for_uri(target.uri("a/b.pdf")) == "a/b.pdf"
+
+
+def test_bucket_uri_reaches_the_same_place_as_a_bare_bucket():
+    uri_form = DownloadTarget(dir="downloads", source="src", bucket="s3://bucket/ingester")
+    bare_form = DownloadTarget(dir="ingester/downloads", source="src", bucket="bucket")
+
+    assert uri_form.base_uri == bare_form.base_uri
+    # ...and therefore share one state file rather than re-fetching everything
+    # because the prefix moved between two variables.
+    assert uri_form.digest() == bare_form.digest()
+
+
+def test_client_is_built_from_the_bucket_name_alone(monkeypatch, memory_store):
+    """The scheme and prefix are addressing, not part of the bucket's name."""
+    seen = []
+    monkeypatch.setattr(
+        agent_store,
+        "_make_s3_store",
+        lambda bucket, options: seen.append(bucket) or memory_store,
+    )
+    S3DocumentStore(DownloadTarget(dir="d", source="src", bucket="s3://bucket/ingester"))
+
+    assert seen == ["bucket"]
 
 
 # --- factory dispatch -----------------------------------------------------

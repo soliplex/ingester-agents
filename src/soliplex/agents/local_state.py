@@ -196,19 +196,50 @@ async def repair_relocated_documents(source: str, download_dir: str | None = Non
         List of URIs whose stored document was discarded for re-fetching.
     """
     repaired = []
-    for uri, entry in load_file_state(source).items():
+    state = load_file_state(source)
+    untyped = 0
+    for uri, entry in state.items():
         stored_type = entry.get("mime_type")
+        if not stored_type:
+            # No recorded type means no way to tell where the file was put,
+            # so the row is skipped. Counted, because a corpus full of these
+            # is a state file older than the mime_type column and explains a
+            # repair pass that finds nothing.
+            untyped += 1
+            continue
         if not mime.is_container_type(stored_type):
             continue
         uri_type = mime.detect_mime_type(uri)
         if not mime.is_container_type(uri_type) or uri_type == stored_type:
             continue
-        await local_store.delete_document(source, uri, mime_type=stored_type, download_dir=download_dir)
+        key = local_store.uri_to_relpath(uri, mime_type=stored_type).as_posix()
+        removed = await local_store.delete_document(source, uri, mime_type=stored_type, download_dir=download_dir)
         delete_file(source, uri)
         repaired.append(uri)
-        logger.info("repairing %s: stored as %s, re-fetching as %s", uri, stored_type, uri_type)
+        logger.info(
+            "repairing %s: stored as %s under %s, re-fetching as %s",
+            uri,
+            stored_type,
+            key,
+            uri_type,
+        )
+        if not removed:
+            # The row said the document was there and it was not. Harmless
+            # here -- the row is dropped either way -- but it means state and
+            # storage had drifted, which is worth knowing about.
+            logger.warning("repairing %s: no document found at %s to remove", uri, key)
+    if untyped:
+        logger.info("relocation repair for %s skipped %d row(s) with no recorded mime_type", source, untyped)
     if repaired:
+        logger.info(
+            "relocation repair for %s: %d of %d row(s) discarded for re-fetch; clearing incremental cursor",
+            source,
+            len(repaired),
+            len(state),
+        )
         clear_sync_cursor(source)
+    else:
+        logger.debug("relocation repair for %s: nothing to repair in %d row(s)", source, len(state))
     return repaired
 
 
@@ -286,6 +317,7 @@ async def reconcile_documents(source: str, current_uris: set[str], download_dir:
     store = get_document_store(source, download_dir)
     for key in await store.list():
         if key not in expected:
+            logger.info("deleting orphan %s: no current URI accounts for it", store.uri(key))
             await store.delete(key)
             removed.append(key)
 

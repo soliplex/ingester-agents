@@ -198,8 +198,8 @@ S3_ENDPOINT_URL=https://minio.example.com:9000
 # default credential chain (environment, instance role, profile).
 # S3_ALLOW_HTTP=true                  # required for an http:// endpoint
 
-# Setting a bucket moves the download store into object storage. See
-# Object Storage below.
+# Setting a bucket moves the download store into object storage. Accepts a
+# bare name or an s3://bucket/prefix URI. See Object Storage below.
 # DOWNLOAD_S3_BUCKET=my-documents
 ```
 
@@ -234,6 +234,26 @@ inferred from its presence, so a generic variable that some other service in
 the same environment happens to export must not be able to silently redirect
 every download.
 
+#### Bucket spelling
+
+The bucket accepts a full `s3://` URI as well as a bare name, matching the
+`S3_BUCKET` value the haiku-rag configs interpolate, so one deployment
+variable can feed both the reader and the writer:
+
+| `DOWNLOAD_S3_BUCKET` | `DOWNLOAD_DIR` | Documents land at |
+|---|---|---|
+| `my-documents` | `ingester/downloads` | `s3://my-documents/ingester/downloads/<source>/` |
+| `s3://my-documents` | `ingester/downloads` | `s3://my-documents/ingester/downloads/<source>/` |
+| `s3://my-documents/ingester` | `downloads` | `s3://my-documents/ingester/downloads/<source>/` |
+
+A prefix on the bucket nests `DOWNLOAD_DIR` beneath it, so all three
+spellings above address the same objects -- and are treated as the same
+target, sharing one state file rather than re-fetching everything because a
+prefix moved between two variables. A non-`s3` scheme is rejected when
+configuration is read rather than at the first write, and an empty value
+reads as unset (local disk), so a compose file interpolating a variable that
+happens to be unset does not leave the store pointed at nothing.
+
 **`STATE_DIR` stays local.** The per-source SQLite files hold the content
 hashes that drive incremental ingestion, and SQLite cannot live on object
 storage. Moving documents to S3 does not by itself make the agent stateless: a
@@ -249,6 +269,7 @@ config:
   download_store:
     target: s3              # "fs" | "s3"
     bucket: my-documents    # optional; defaults to DOWNLOAD_S3_BUCKET
+                            # (an s3://bucket/prefix URI works here too)
     dir: ingester/downloads # optional; defaults to DOWNLOAD_DIR
 ```
 
@@ -293,7 +314,7 @@ Two things happen on the indexing side that this command cannot do for you:
   self-cleaning — or drop and rebuild that source's `.lancedb`.
 
 Point the manifest's `haiku_config` at a variant whose source stanza reads
-`type: s3` with `uri: ${DOWNLOAD_URI}/${SOURCE}`. `DOWNLOAD_URI` is injected
+`type: s3` with `uri: ${DOWNLOAD_URI}`. `DOWNLOAD_URI` is injected
 for every load and holds the resolved base URI in both modes, so one config
 form works either way.
 

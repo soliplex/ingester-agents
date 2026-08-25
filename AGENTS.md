@@ -274,6 +274,11 @@ whatever a manifest's `config.download_store` overrides it to. Nothing outside
 `store.py` branches on the backend -- callers pass source-relative keys and the
 target owns every layer of prefixing.
 
+A configured bucket may be a bare name or an `s3://bucket/prefix` URI; both
+go through `split_bucket()`, and a prefix there becomes the outermost layer,
+ahead of `DOWNLOAD_DIR`. `DownloadTarget.bucket` therefore holds whatever was
+configured -- use `bucket_name` when an API wants the bucket itself.
+
 Two consequences worth knowing before changing anything here:
 
 - The state filename is qualified by target (a digest suffix; a local default

@@ -115,6 +115,36 @@ def uri_to_relpath(uri: str, *, mime_type: str | None = None) -> Path:
     return Path(*rel_segs)
 
 
+def log_extension_choice(uri: str, rel: Path, mime_type: str | None) -> None:
+    """Log when the on-disk name does not match the name in *uri*.
+
+    On-disk names come from the detected MIME type, so a document can land
+    under an extension its URI never mentioned. That is usually intended (a
+    ``.bin`` that really is a PDF), but it is also how OOXML documents ended
+    up misfiled -- every one of them is a ZIP, and content sniffing reads
+    them all back as docx. Either way the divergence is worth a line in the
+    log, because nothing else records that the name changed.
+
+    A *replacement* is logged at WARNING: the URI stated an extension and
+    detection overruled it, which is the case that has been wrong before.
+    Supplying a missing extension is routine and logged at INFO.
+    """
+    stated = uri_to_relpath(uri).suffix
+    chosen = rel.suffix
+    if stated == chosen:
+        return
+    if stated:
+        logger.warning(
+            "renaming %s to %s: detected type %s overrides the URI extension %s",
+            uri,
+            rel.as_posix(),
+            mime_type,
+            stated,
+        )
+    else:
+        logger.info("naming %s as %s: extension %s derived from %s", uri, rel.as_posix(), chosen, mime_type)
+
+
 def source_dir(source: str, download_dir: str | None = None) -> Path:
     """Return the directory that holds all documents for *source*.
 
@@ -162,6 +192,7 @@ async def write_document(
     store = get_document_store(source, download_dir)
     rel = uri_to_relpath(uri, mime_type=mime_type)
     key = rel.as_posix()
+    log_extension_choice(uri, rel, mime_type)
     target = store.target.root / rel
 
     data = content.encode("utf-8") if isinstance(content, str) else content

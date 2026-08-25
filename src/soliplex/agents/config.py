@@ -14,6 +14,7 @@ from typing import Literal
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import SecretStr
+from pydantic import field_validator
 from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
@@ -44,6 +45,26 @@ class ComponentType(enum.StrEnum):
 # exist" UserWarning. In the container the dir is present and secrets load.
 _SECRETS_DIR = "/run/secrets"
 _secrets_kwargs: dict = {"secrets_dir": _SECRETS_DIR} if Path(_SECRETS_DIR).is_dir() else {}  # pragma: no branch
+
+
+def _checked_bucket(value: str | None) -> str | None:
+    """Normalize and validate a configured download bucket.
+
+    Shared by the installation setting and the per-manifest override so both
+    accept the same spellings -- a bare name or a full ``s3://bucket/prefix``
+    URI -- and both reject an unusable one while configuration is being read
+    rather than at the first write.
+
+    An empty string becomes ``None``: a compose file interpolating an unset
+    variable leaves the key present and empty, and an empty bucket would
+    otherwise read as "object storage, nowhere".
+    """
+    if not value:
+        return None
+    from soliplex.agents.store import split_bucket
+
+    split_bucket(value)
+    return value
 
 
 class Settings(BaseSettings):
@@ -151,6 +172,8 @@ class Settings(BaseSettings):
     # DOWNLOAD_S3_BUCKET rather than S3_BUCKET so an unrelated variable in the
     # environment cannot silently redirect every download.
     download_s3_bucket: str | None = None
+
+    _validate_bucket = field_validator("download_s3_bucket", mode="after")(_checked_bucket)
 
     # Git CLI settings
     scm_use_git_cli: bool = False  # Use git CLI instead of API for file operations
@@ -427,6 +450,8 @@ class DownloadStoreConfig(BaseModel):
     target: Literal["fs", "s3"]
     bucket: str | None = None  # Defaults to settings.download_s3_bucket
     dir: str | None = None  # Defaults to settings.download_dir
+
+    _validate_bucket = field_validator("bucket", mode="after")(_checked_bucket)
 
 
 class ManifestConfig(BaseModel):

@@ -458,3 +458,91 @@ async def test_incremental_sync_calls_run_processors(local_env):
     assert mock_run.call_count == 1
     # Processors now run on the bytes, before anything is written.
     assert mock_run.call_args.args == (b"content", "text/markdown")
+
+
+# ---------------------------------------------------------------------------
+# ProcessorRejected is a content decision, not a failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rejection_does_not_pin_the_sync_cursor(local_env):
+    """A rejected document must not make the run replay itself forever.
+
+    The cursor only advances when the run had no errors. Counting a rejection
+    as one leaves the cursor where it was, so the next run fetches the same
+    commit, rejects the same file, and never advances -- and the reconcile
+    (with it, the relocation repair) is skipped every time.
+    """
+    source = "gitea:admin:test:all"
+    local_state.set_sync_meta(source, "abc123", branch="main")
+
+    with patch("soliplex.agents.scm.app.get_scm") as mock_get_scm:
+        mock_provider = MagicMock()
+        mock_provider.list_commits_since = AsyncMock(return_value=[{"sha": "def456", "message": "Add locked.pdf"}])
+        mock_provider.get_commit_details = AsyncMock(
+            return_value={"sha": "def456", "files": [{"filename": "locked.pdf", "status": "modified"}]}
+        )
+        mock_provider.get_single_file = AsyncMock(
+            return_value={
+                "uri": "locked.pdf",
+                "file_bytes": b"%PDF-",
+                "content-type": "application/pdf",
+                "sha256": "aabbcc",
+                "metadata": {},
+            }
+        )
+        mock_provider.list_issues = AsyncMock(return_value=[])
+        mock_provider.list_all_files = AsyncMock(return_value=[])
+        mock_get_scm.return_value = mock_provider
+
+        with patch(
+            "soliplex.agents.scm.app.processors.run_processors",
+            side_effect=scm_app.processors.ProcessorRejected("password required"),
+        ):
+            result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin", delete_stale=False)
+
+    assert result["errors"] == []
+    assert result["rejected"] == [{"uri": "locked.pdf", "reason": "password required"}]
+    # Advanced past the commit, so the rejection is not replayed next run.
+    assert result["new_commit_sha"] == "def456"
+    assert local_state.get_sync_meta(source)["last_commit_sha"] == "def456"
+
+
+@pytest.mark.asyncio
+async def test_rejection_does_not_block_delete_stale(local_env):
+    """Stale cleanup still runs, so the relocation repair still runs with it."""
+    source = "gitea:admin:test:all"
+    local_state.set_sync_meta(source, "abc123", branch="main")
+
+    with patch("soliplex.agents.scm.app.get_scm") as mock_get_scm:
+        mock_provider = MagicMock()
+        mock_provider.list_commits_since = AsyncMock(return_value=[{"sha": "def456", "message": "Add locked.pdf"}])
+        mock_provider.get_commit_details = AsyncMock(
+            return_value={"sha": "def456", "files": [{"filename": "locked.pdf", "status": "modified"}]}
+        )
+        mock_provider.get_single_file = AsyncMock(
+            return_value={
+                "uri": "locked.pdf",
+                "file_bytes": b"%PDF-",
+                "content-type": "application/pdf",
+                "sha256": "aabbcc",
+                "metadata": {},
+            }
+        )
+        mock_provider.list_issues = AsyncMock(return_value=[])
+        mock_get_scm.return_value = mock_provider
+
+        with (
+            patch(
+                "soliplex.agents.scm.app.processors.run_processors",
+                side_effect=scm_app.processors.ProcessorRejected("password required"),
+            ),
+            patch("soliplex.agents.scm.app.list_all_uris", AsyncMock(return_value=[])) as mock_list,
+            patch("soliplex.agents.local_state.prune_documents", AsyncMock(return_value=[])) as mock_prune,
+        ):
+            result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin", delete_stale=True)
+
+    assert result["rejected"]
+    assert mock_list.called
+    assert mock_prune.called

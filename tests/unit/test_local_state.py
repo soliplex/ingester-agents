@@ -1,6 +1,7 @@
 """Tests for soliplex.agents.local_state (per-source SQLite sync state)."""
 
 import datetime
+import logging
 import sqlite3
 
 import pytest
@@ -207,6 +208,19 @@ async def test_repair_is_idempotent_after_rewrite(state_env):
 
     assert await local_state.repair_relocated_documents("s") == []
     assert (local_store.source_dir("s") / "deck.pptx").exists()
+
+
+@pytest.mark.asyncio
+async def test_repair_reports_a_row_whose_document_is_missing(state_env, caplog):
+    # State claimed a document that is not in storage. The row still goes, but
+    # the drift is logged rather than passing silently.
+    local_state.upsert_file("s", "deck.pptx", "1", mime_type=DOCX_MIME)
+
+    with caplog.at_level(logging.WARNING, logger="soliplex.agents.local_state"):
+        assert await local_state.repair_relocated_documents("s") == ["deck.pptx"]
+
+    assert "no document found at deck.docx" in caplog.text
+    assert local_state.load_file_state("s") == {}
 
 
 @pytest.mark.asyncio

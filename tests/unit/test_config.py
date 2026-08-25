@@ -3,8 +3,13 @@ import logging
 import logging.handlers
 from unittest.mock import patch
 
+import pytest
+from pydantic import ValidationError
+
+from soliplex.agents.config import DownloadStoreConfig
 from soliplex.agents.config import JsonFormatter
 from soliplex.agents.config import ManifestConfig
+from soliplex.agents.config import Settings
 from soliplex.agents.config import _add_smtp_handler
 from soliplex.agents.config import _ThrottledSMTPHandler
 from soliplex.agents.config import configure_logging
@@ -274,3 +279,37 @@ class TestManifestConfig:
     def test_delete_stale_disabled(self):
         config = ManifestConfig(delete_stale=False)
         assert config.delete_stale is False
+
+
+class TestDownloadBucketSpelling:
+    """DOWNLOAD_S3_BUCKET takes the same forms as the S3_BUCKET the readers use."""
+
+    def test_accepts_a_bare_bucket_name(self):
+        assert Settings(download_s3_bucket="my-bucket").download_s3_bucket == "my-bucket"
+
+    def test_accepts_an_s3_uri_with_a_prefix(self):
+        value = "s3://org-lancedb-test-123123123/ingester"
+        assert Settings(download_s3_bucket=value).download_s3_bucket == value
+
+    def test_blank_reads_as_unset(self):
+        # An unset variable interpolated by compose leaves the key present
+        # and empty; that must mean local disk, not "S3, nowhere".
+        assert Settings(download_s3_bucket="").download_s3_bucket is None
+
+    def test_unset_stays_unset(self):
+        assert Settings().download_s3_bucket is None
+
+    def test_rejects_a_non_s3_scheme(self):
+        with pytest.raises(ValidationError, match="s3:// URI or a bare bucket name"):
+            Settings(download_s3_bucket="https://bucket/p")
+
+    def test_override_accepts_an_s3_uri(self):
+        override = DownloadStoreConfig(target="s3", bucket="s3://bucket/ingester")
+        assert override.bucket == "s3://bucket/ingester"
+
+    def test_override_rejects_a_non_s3_scheme(self):
+        with pytest.raises(ValidationError, match="s3:// URI or a bare bucket name"):
+            DownloadStoreConfig(target="s3", bucket="ftp://bucket")
+
+    def test_override_bucket_may_be_omitted(self):
+        assert DownloadStoreConfig(target="s3").bucket is None

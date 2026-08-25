@@ -1,6 +1,7 @@
 """Tests for soliplex.agents.local_store (filesystem document writer)."""
 
 import json
+import logging
 
 import pytest
 
@@ -174,3 +175,38 @@ async def test_delete_document_removes_file_and_sidecar(dl):
 @pytest.mark.asyncio
 async def test_delete_document_missing_returns_false(dl):
     assert await local_store.delete_document("s", "nope.md") is False
+
+
+# --- rename logging -------------------------------------------------------
+
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@pytest.mark.asyncio
+async def test_write_warns_when_detection_overrides_the_uri_extension(dl, caplog):
+    """The OOXML misfiling was invisible in the log; now it is not."""
+    with caplog.at_level(logging.WARNING, logger="soliplex.agents.local_store"):
+        await local_store.write_document("s", "/team/report.pptx", b"PK", DOCX, {})
+
+    assert "renaming /team/report.pptx to team/report.docx" in caplog.text
+    assert ".pptx" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_write_logs_a_derived_extension_at_info(dl, caplog):
+    """Supplying a missing extension is routine, not a warning."""
+    with caplog.at_level(logging.DEBUG, logger="soliplex.agents.local_store"):
+        await local_store.write_document("s", "/team/handout", b"%PDF-", "application/pdf", {})
+
+    records = [r for r in caplog.records if "handout" in r.message and "naming" in r.message]
+    assert records
+    assert records[0].levelno == logging.INFO
+
+
+@pytest.mark.asyncio
+async def test_write_says_nothing_when_the_name_already_agrees(dl, caplog):
+    with caplog.at_level(logging.DEBUG, logger="soliplex.agents.local_store"):
+        await local_store.write_document("s", "/team/notes.pdf", b"%PDF-", "application/pdf", {})
+
+    assert "renaming" not in caplog.text
+    assert "naming" not in caplog.text

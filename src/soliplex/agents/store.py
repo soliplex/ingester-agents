@@ -31,6 +31,39 @@ from soliplex.agents.config import settings
 logger = logging.getLogger(__name__)
 
 
+def split_bucket(configured: str) -> tuple[str, str]:
+    """Split a configured bucket into its name and an optional base prefix.
+
+    Accepts the same spelling as the ``S3_BUCKET`` variable the haiku-rag
+    configs interpolate -- a full ``s3://bucket/prefix`` URI -- as well as a
+    bare bucket name, so one value can be shared between the reader and the
+    writer without either having to know which form the other wants.
+
+    ``s3://bucket/ingester`` puts every download under ``ingester/``, with
+    ``download_dir`` nested inside it. That is what makes the writer's keys
+    line up with a reader pointed at ``${S3_BUCKET}/ingester/...``.
+
+    Args:
+        configured: Bucket name, ``s3://bucket``, or ``s3://bucket/prefix``.
+
+    Returns:
+        ``(bucket, base_prefix)``; the prefix is ``""`` when none was given.
+
+    Raises:
+        ValueError: if a non-``s3`` scheme is given, or no bucket is named.
+            Both are silent misroutes otherwise.
+    """
+    value = configured.strip()
+    if "://" in value:
+        scheme, _, value = value.partition("://")
+        if scheme.lower() != "s3":
+            raise ValueError(f"download bucket must be an s3:// URI or a bare bucket name, got '{configured}'")
+    bucket, _, prefix = value.strip("/").partition("/")
+    if not bucket:
+        raise ValueError(f"download bucket names no bucket: '{configured}'")
+    return bucket, prefix.strip("/")
+
+
 @dataclass(frozen=True)
 class DownloadTarget:
     """Resolved location for one source's documents.
@@ -53,6 +86,16 @@ class DownloadTarget:
         return self.bucket is None
 
     @property
+    def bucket_name(self) -> str:
+        """The bucket alone, with any scheme and base prefix stripped."""
+        return split_bucket(self.bucket)[0]
+
+    @property
+    def base_prefix(self) -> str:
+        """The key prefix carried by the configured bucket, if any."""
+        return split_bucket(self.bucket)[1]
+
+    @property
     def folder(self) -> str:
         """The single path segment naming this source."""
         from soliplex.agents.local_store import sanitize_source
@@ -73,7 +116,7 @@ class DownloadTarget:
         different keys per platform.
         """
         base = self.dir.replace("\\", "/").strip("/")
-        return "/".join(part for part in (base, self.folder) if part)
+        return "/".join(part for part in (self.base_prefix, base, self.folder) if part)
 
     @property
     def base_uri(self) -> str:
@@ -85,7 +128,7 @@ class DownloadTarget:
         """
         if self.is_local:
             return self.root.resolve().as_uri()
-        return f"s3://{self.bucket}/{self.prefix}" if self.prefix else f"s3://{self.bucket}"
+        return f"s3://{self.bucket_name}/{self.prefix}" if self.prefix else f"s3://{self.bucket_name}"
 
     def digest(self) -> str:
         """Short stable digest of this target's *configuration*.
@@ -99,8 +142,16 @@ class DownloadTarget:
         configuration a different digest -- and therefore a different state
         file, and therefore a full re-fetch -- when the process runs from
         somewhere else.
+
+        Object targets digest the resolved key prefix, so the digest tracks
+        *where the documents are* rather than how the operator chose to spell
+        it: moving a prefix between ``DOWNLOAD_S3_BUCKET`` and ``DOWNLOAD_DIR``
+        addresses the same objects and keeps the same state.
         """
-        material = repr((self.bucket or "", self.dir.replace(chr(92), "/").strip("/"), self.folder))
+        if self.is_local:
+            material = repr(("fs", self.dir.replace(chr(92), "/").strip("/"), self.folder))
+        else:
+            material = repr(("s3", self.bucket_name, self.prefix))
         return hashlib.sha256(material.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
     def uri(self, key: str) -> str:
@@ -221,7 +272,7 @@ class S3DocumentStore:
 
     def __init__(self, target: DownloadTarget) -> None:
         self.target = target
-        self._store = _make_s3_store(target.bucket, dict(target.storage_options))
+        self._store = _make_s3_store(target.bucket_name, dict(target.storage_options))
 
     def _key(self, key: str) -> str:
         prefix = self.target.prefix
@@ -340,7 +391,11 @@ def get_document_store(source: str, download_dir: str | None = None) -> Document
         bucket=settings.download_s3_bucket,
         storage_options=storage_options() if settings.download_s3_bucket else {},
     )
-    cache_key = (target.dir, target.source, target.bucket, tuple(sorted(target.storage_options.items())))
+    # Canonicalized, so a bucket respelled as an s3:// URI reuses one client
+    # rather than opening a second to the same place. Deliberately not keyed on
+    # `base_uri`: resolving a local root is a syscall, and this runs per write.
+    located = None if target.is_local else split_bucket(target.bucket)
+    cache_key = (target.dir, target.source, located, tuple(sorted(target.storage_options.items())))
     store = _STORES.get(cache_key)
     if store is None:
         store = LocalDocumentStore(target) if target.is_local else S3DocumentStore(target)
