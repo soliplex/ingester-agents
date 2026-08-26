@@ -219,11 +219,9 @@ S3_ALLOW_HTTP=true                     # required for an http:// endpoint
 ```
 
 Documents then land at `s3://my-documents/ingester/downloads/<source>/<path>`,
-with the same `.meta.json` sidecar beside each one. Requires the `s3` extra:
-
-```bash
-uv sync --extra s3
-```
+with the same `.meta.json` sidecar beside each one. No extra install step:
+`obstore` is a plain dependency, so object storage is available in every
+install and only the configuration decides whether it is used.
 
 Credentials come from `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` /
 `S3_REGION`, or are omitted entirely to use the AWS default chain (environment,

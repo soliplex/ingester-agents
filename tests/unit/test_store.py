@@ -259,7 +259,9 @@ def test_make_s3_store_delegates_to_haiku(monkeypatch):
         seen["args"] = (bucket, options)
         return MemoryStore()
 
-    monkeypatch.setattr("haiku.rag.s3.make_s3_store", fake)
+    # Patched where it is looked up: `store` binds the name at import, so
+    # patching haiku's module would not reach it.
+    monkeypatch.setattr(agent_store, "make_s3_store", fake)
     agent_store._make_s3_store("b", {"region": "xx"})
     assert seen["args"] == ("b", {"region": "xx"})
 

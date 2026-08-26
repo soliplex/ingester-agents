@@ -4305,6 +4305,7 @@ dependencies = [
     { name = "haiku-rag", extra = ["ingester"] },
     { name = "jinja2" },
     { name = "logfire", extra = ["fastapi"] },
+    { name = "obstore" },
     { name = "puremagic" },
     { name = "pydantic-settings" },
     { name = "pypdfium2" },
@@ -4313,11 +4314,6 @@ dependencies = [
     { name = "tenacity" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.optional-dependencies]
-s3 = [
-    { name = "obstore" },
 ]
 
 [package.dev-dependencies]
@@ -4344,7 +4340,7 @@ requires-dist = [
     { name = "haiku-rag", extras = ["ingester"], specifier = ">=0.72.1" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "logfire", extras = ["fastapi"] },
-    { name = "obstore", marker = "extra == 's3'", specifier = ">=0.9,<0.10" },
+    { name = "obstore", specifier = ">=0.9.5" },
     { name = "puremagic", specifier = ">=2.2.0" },
     { name = "pydantic-settings", specifier = ">=2.12.0" },
     { name = "pypdfium2", specifier = ">=4.0" },
@@ -4354,7 +4350,6 @@ requires-dist = [
     { name = "typer", specifier = ">=0.21.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
-provides-extras = ["s3"]
 
 [package.metadata.requires-dev]
 dev = [

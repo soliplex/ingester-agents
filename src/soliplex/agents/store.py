@@ -7,7 +7,7 @@ there. Callers pass source-relative keys, exactly as
 of prefixing is the target's business.
 
 Two backends: the local filesystem, and S3-compatible object storage via
-``obstore`` (the ``s3`` extra). Which one a source gets is decided in
+``obstore``, a required dependency. Which one a source gets is decided in
 :func:`get_document_store` by whether a bucket is configured; no call site
 knows the difference.
 """
@@ -25,6 +25,8 @@ from urllib.parse import unquote
 
 import aiofiles
 import aiofiles.os as aos
+import obstore
+from haiku.rag.s3 import make_s3_store
 
 from soliplex.agents.common.s3 import split_bucket
 from soliplex.agents.config import settings
@@ -247,19 +249,13 @@ class S3DocumentStore:
         return f"{prefix}/{key}" if prefix else key
 
     async def write(self, key: str, data: bytes) -> None:
-        import obstore
-
         await obstore.put_async(self._store, self._key(key), data)
 
     async def read(self, key: str) -> bytes:
-        import obstore
-
         result = await obstore.get_async(self._store, self._key(key))
         return bytes(await result.bytes_async())
 
     async def exists(self, key: str) -> bool:
-        import obstore
-
         try:
             await obstore.head_async(self._store, self._key(key))
         except FileNotFoundError:
@@ -267,8 +263,6 @@ class S3DocumentStore:
         return True
 
     async def delete(self, key: str) -> bool:
-        import obstore
-
         # obstore's delete is a silent no-op on a missing key, so the bool
         # contract costs a HEAD. Only the stale-cleanup path calls this.
         if not await self.exists(key):
@@ -277,8 +271,6 @@ class S3DocumentStore:
         return True
 
     async def list(self) -> list[str]:
-        import obstore
-
         prefix = self.target.prefix
         keys: list[str] = []
         async for batch in obstore.list(self._store, prefix=prefix or None):
@@ -292,8 +284,6 @@ class S3DocumentStore:
 
     async def destroy(self) -> None:
         """Remove every object under this source's prefix."""
-        import obstore
-
         for key in await self.list():
             await obstore.delete_async(self._store, self._key(key))
 
@@ -304,9 +294,10 @@ def _make_s3_store(bucket: str, storage_options: dict[str, str]):
     Delegates to haiku.rag's helper so the endpoint / path-style handling that
     non-AWS deployments (MinIO, SeaweedFS) need is decided in one place, and so
     the writer cannot drift from the source that reads what it wrote.
-    """
-    from haiku.rag.s3 import make_s3_store
 
+    Kept as a named wrapper rather than calling through: tests replace this to
+    hand the store an in-memory backend.
+    """
     return make_s3_store(bucket, storage_options)
 
 
