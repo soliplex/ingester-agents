@@ -250,9 +250,28 @@ A prefix on the bucket nests `DOWNLOAD_DIR` beneath it, so all three
 spellings above address the same objects -- and are treated as the same
 target, sharing one state file rather than re-fetching everything because a
 prefix moved between two variables. A non-`s3` scheme is rejected when
-configuration is read rather than at the first write, and an empty value
-reads as unset (local disk), so a compose file interpolating a variable that
-happens to be unset does not leave the store pointed at nothing.
+configuration is read rather than at the first write.
+
+#### Turning it off
+
+A **blank** `DOWNLOAD_S3_BUCKET` means the same thing as an absent one: local
+disk. Clearing the value is therefore how object storage is disabled from a
+compose `.env`, where a key is always present once the compose file
+references it:
+
+```bash
+DOWNLOAD_S3_BUCKET=              # object storage off, downloads go to disk
+```
+
+Whitespace counts as blank, so a stray trailing space disables the store
+rather than failing the boot. Leading and trailing space is stripped from a
+real value for the same reason.
+
+A manifest that explicitly sets `download_store.target: s3` is the exception:
+that is a direct request for object storage, so it raises rather than quietly
+falling back to disk when no bucket is configured anywhere. Blanking the
+variable disables the installation default; pinning a manifest to `s3`
+overrides that and must be edited too.
 
 **`STATE_DIR` stays local.** The per-source SQLite files hold the content
 hashes that drive incremental ingestion, and SQLite cannot live on object

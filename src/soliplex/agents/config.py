@@ -55,10 +55,14 @@ def _checked_bucket(value: str | None) -> str | None:
     URI -- and both reject an unusable one while configuration is being read
     rather than at the first write.
 
-    An empty string becomes ``None``: a compose file interpolating an unset
-    variable leaves the key present and empty, and an empty bucket would
-    otherwise read as "object storage, nowhere".
+    A blank value becomes ``None``, so object storage is disabled by clearing
+    the variable rather than by deleting the line. That is the only way to turn
+    it off from a compose ``.env``, where a key is always present once it is
+    referenced -- and an empty bucket would otherwise read as "object storage,
+    nowhere". Whitespace counts as blank: ``DOWNLOAD_S3_BUCKET= `` with a
+    stray trailing space is a disabled store, not a configuration error.
     """
+    value = value.strip() if value else value
     if not value:
         return None
     from soliplex.agents.store import split_bucket

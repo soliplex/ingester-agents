@@ -369,6 +369,17 @@ def test_factory_is_local_without_a_bucket(monkeypatch, tmp_path):
     assert store.target.root == tmp_path / "cfg" / "src"
 
 
+def test_factory_is_local_when_the_bucket_is_blank(monkeypatch, tmp_path):
+    """A cleared DOWNLOAD_S3_BUCKET means local disk, not a broken S3 target."""
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path))
+
+    store = get_document_store("src")
+
+    assert isinstance(store, LocalDocumentStore)
+    assert store.target.is_local
+
+
 def test_factory_is_s3_with_a_bucket(monkeypatch, memory_store):
     monkeypatch.setattr(agent_store.settings, "download_s3_bucket", "b")
     monkeypatch.setattr(agent_store.settings, "download_dir", "downloads")

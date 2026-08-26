@@ -296,6 +296,27 @@ class TestDownloadBucketSpelling:
         # and empty; that must mean local disk, not "S3, nowhere".
         assert Settings(download_s3_bucket="").download_s3_bucket is None
 
+    @pytest.mark.parametrize("blank", ["", "   ", "	"])
+    def test_blank_env_var_disables_object_storage(self, monkeypatch, blank):
+        """Clearing the variable in a compose .env turns the store off.
+
+        A referenced key is always present in that file, so emptying it is the
+        only way to disable object storage without editing the compose itself.
+        Whitespace counts as blank: a stray trailing space is a disabled store,
+        not a configuration error.
+        """
+        monkeypatch.setenv("DOWNLOAD_S3_BUCKET", blank)
+
+        assert Settings().download_s3_bucket is None
+
+    def test_env_var_value_is_stripped(self, monkeypatch):
+        monkeypatch.setenv("DOWNLOAD_S3_BUCKET", "  s3://my-bucket/ingester  ")
+
+        assert Settings().download_s3_bucket == "s3://my-bucket/ingester"
+
+    def test_blank_override_bucket_falls_back_to_the_setting(self):
+        assert DownloadStoreConfig(target="s3", bucket="").bucket is None
+
     def test_unset_stays_unset(self):
         assert Settings().download_s3_bucket is None
 
