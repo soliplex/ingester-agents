@@ -12,12 +12,12 @@ from obstore.store import MemoryStore
 from pydantic import SecretStr
 
 from soliplex.agents import store as agent_store
+from soliplex.agents.common.s3 import split_bucket
 from soliplex.agents.store import DocumentStore
 from soliplex.agents.store import DownloadTarget
 from soliplex.agents.store import LocalDocumentStore
 from soliplex.agents.store import S3DocumentStore
 from soliplex.agents.store import get_document_store
-from soliplex.agents.store import split_bucket
 from soliplex.agents.store import storage_options
 
 SOURCE = "gitea:admin:r:all"

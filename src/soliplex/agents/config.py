@@ -19,6 +19,8 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
 
+from soliplex.agents.common.s3 import split_bucket
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,8 +67,6 @@ def _checked_bucket(value: str | None) -> str | None:
     value = value.strip() if value else value
     if not value:
         return None
-    from soliplex.agents.store import split_bucket
-
     split_bucket(value)
     return value
 

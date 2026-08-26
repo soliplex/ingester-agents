@@ -26,42 +26,10 @@ from urllib.parse import unquote
 import aiofiles
 import aiofiles.os as aos
 
+from soliplex.agents.common.s3 import split_bucket
 from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
-
-
-def split_bucket(configured: str) -> tuple[str, str]:
-    """Split a configured bucket into its name and an optional base prefix.
-
-    Accepts the same spelling as the ``S3_BUCKET`` variable the haiku-rag
-    configs interpolate -- a full ``s3://bucket/prefix`` URI -- as well as a
-    bare bucket name, so one value can be shared between the reader and the
-    writer without either having to know which form the other wants.
-
-    ``s3://bucket/ingester`` puts every download under ``ingester/``, with
-    ``download_dir`` nested inside it. That is what makes the writer's keys
-    line up with a reader pointed at ``${S3_BUCKET}/ingester/...``.
-
-    Args:
-        configured: Bucket name, ``s3://bucket``, or ``s3://bucket/prefix``.
-
-    Returns:
-        ``(bucket, base_prefix)``; the prefix is ``""`` when none was given.
-
-    Raises:
-        ValueError: if a non-``s3`` scheme is given, or no bucket is named.
-            Both are silent misroutes otherwise.
-    """
-    value = configured.strip()
-    if "://" in value:
-        scheme, _, value = value.partition("://")
-        if scheme.lower() != "s3":
-            raise ValueError(f"download bucket must be an s3:// URI or a bare bucket name, got '{configured}'")
-    bucket, _, prefix = value.strip("/").partition("/")
-    if not bucket:
-        raise ValueError(f"download bucket names no bucket: '{configured}'")
-    return bucket, prefix.strip("/")
 
 
 @dataclass(frozen=True)

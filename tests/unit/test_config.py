@@ -1,6 +1,9 @@
 import json
 import logging
 import logging.handlers
+import os
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -331,6 +334,26 @@ class TestDownloadBucketSpelling:
     def test_override_rejects_a_non_s3_scheme(self):
         with pytest.raises(ValidationError, match="s3:// URI or a bare bucket name"):
             DownloadStoreConfig(target="s3", bucket="ftp://bucket")
+
+    @pytest.mark.parametrize("value", ["s3://my-bucket/ingester", "my-bucket", "", "   "])
+    def test_package_imports_with_the_variable_set(self, value):
+        """`settings = Settings()` runs at import time, so the validator does too.
+
+        Pydantic skips validators for fields left at their default, so an
+        in-process test that sets the bucket after import never exercises the
+        import-time path. This one does, in a fresh interpreter, which is the
+        only way to catch a cycle between the settings and whatever the
+        validator reaches for.
+        """
+        env = {**os.environ, "DOWNLOAD_S3_BUCKET": value}
+        result = subprocess.run(
+            [sys.executable, "-c", "from soliplex.agents.cli import cli"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
 
     def test_override_bucket_may_be_omitted(self):
         assert DownloadStoreConfig(target="s3").bucket is None
