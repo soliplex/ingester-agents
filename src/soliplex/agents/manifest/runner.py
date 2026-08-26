@@ -369,13 +369,13 @@ async def run_manifest(manifest: Manifest) -> dict:
         len(manifest.components),
         target.base_uri,
     )
-    with _download_target(target):
+    with download_target(target):
         result = await _run_components(manifest, target)
     return result
 
 
 @contextmanager
-def _download_target(target):
+def download_target(target):
     """Make *target* the store every agent in this manifest resolves.
 
     The agents read `settings.download_dir` / `settings.download_s3_bucket`

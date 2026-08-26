@@ -174,8 +174,16 @@ class DocumentStore(Protocol):
         """Whether anything is stored at *key*."""
         ...
 
-    async def delete(self, key: str) -> bool:
-        """Remove *key*; return False if it was not there."""
+    async def delete(self, key: str) -> None:
+        """Remove *key*. Absence is not an error, and is not reported.
+
+        Deliberately no existence result. The local backend gets one free from
+        the unlink it performs anyway, but object storage cannot: its delete is
+        a silent no-op on a missing key, so a truthful bool would cost a HEAD
+        on every call -- doubling the round trips of the reconcile sweep, whose
+        callers all discard the answer. A caller that genuinely needs to know
+        asks :meth:`exists` first and pays for it there.
+        """
         ...
 
     async def list(self) -> list[str]:
@@ -209,12 +217,11 @@ class LocalDocumentStore:
     async def exists(self, key: str) -> bool:
         return await aos.path.isfile(self._path(key))
 
-    async def delete(self, key: str) -> bool:
+    async def delete(self, key: str) -> None:
         try:
             await aos.remove(self._path(key))
         except FileNotFoundError:
-            return False
-        return True
+            pass
 
     async def list(self) -> list[str]:
         root = self.target.root
@@ -262,13 +269,9 @@ class S3DocumentStore:
             return False
         return True
 
-    async def delete(self, key: str) -> bool:
-        # obstore's delete is a silent no-op on a missing key, so the bool
-        # contract costs a HEAD. Only the stale-cleanup path calls this.
-        if not await self.exists(key):
-            return False
+    async def delete(self, key: str) -> None:
+        # A missing key is already a no-op here, which is exactly the contract.
         await obstore.delete_async(self._store, self._key(key))
-        return True
 
     async def list(self) -> list[str]:
         prefix = self.target.prefix

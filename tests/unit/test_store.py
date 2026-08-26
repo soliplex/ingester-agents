@@ -178,10 +178,12 @@ async def test_exists(store):
 
 
 @pytest.mark.asyncio
-async def test_delete_reports_whether_it_existed(store):
+async def test_delete_is_idempotent_and_silent(store):
     await store.write("doc.md", b"x")
-    assert await store.delete("doc.md") is True
-    assert await store.delete("doc.md") is False
+    assert await store.delete("doc.md") is None
+    assert await store.exists("doc.md") is False
+    # Idempotent: deleting again is a no-op, not an error and not a report.
+    assert await store.delete("doc.md") is None
 
 
 @pytest.mark.asyncio

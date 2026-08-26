@@ -1,5 +1,6 @@
 """Tests for soliplex.agents.local_store (filesystem document writer)."""
 
+import asyncio
 import json
 import logging
 
@@ -166,15 +167,16 @@ async def test_delete_document_removes_file_and_sidecar(dl):
     assert target.exists()
     assert sidecar.exists()
 
-    removed = await local_store.delete_document("s", "docs/x.md", mime_type="text/markdown")
-    assert removed is True
+    await local_store.delete_document("s", "docs/x.md", mime_type="text/markdown")
+
     assert not target.exists()
     assert not sidecar.exists()
 
 
 @pytest.mark.asyncio
-async def test_delete_document_missing_returns_false(dl):
-    assert await local_store.delete_document("s", "nope.md") is False
+async def test_delete_document_tolerates_a_missing_document(dl):
+    """Idempotent: absence is not an error, and is not reported."""
+    assert await local_store.delete_document("s", "nope.md") is None
 
 
 # --- rename logging -------------------------------------------------------
@@ -210,3 +212,53 @@ async def test_write_says_nothing_when_the_name_already_agrees(dl, caplog):
 
     assert "renaming" not in caplog.text
     assert "naming" not in caplog.text
+
+
+# --- batching -------------------------------------------------------------
+
+
+def _watch(store, name):
+    """Replace store.<name> with a wrapper recording peak concurrency."""
+    state = {"peak": 0, "in_flight": 0}
+    method = getattr(store, name)
+
+    async def inner(*args):
+        state["in_flight"] += 1
+        state["peak"] = max(state["peak"], state["in_flight"])
+        # Yield, so a serialized caller cannot look concurrent.
+        await asyncio.sleep(0)
+        try:
+            return await method(*args)
+        finally:
+            state["in_flight"] -= 1
+
+    setattr(store, name, inner)
+    return state
+
+
+@pytest.mark.asyncio
+async def test_write_document_writes_document_and_sidecar_together(dl, monkeypatch):
+    """A document costs one round trip against object storage, not one per object."""
+    store = agent_store.get_document_store("s")
+    monkeypatch.setattr(agent_store, "get_document_store", lambda *a, **k: store)
+    seen = _watch(store, "write")
+
+    await local_store.write_document("s", "a/b.pdf", b"%PDF-", "application/pdf", {})
+
+    assert seen["peak"] == 2
+    assert (store.target.root / "a/b.pdf").exists()
+    assert (store.target.root / "a/b.pdf.meta.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_document_deletes_document_and_sidecar_together(dl, monkeypatch):
+    store = agent_store.get_document_store("s")
+    monkeypatch.setattr(agent_store, "get_document_store", lambda *a, **k: store)
+    await local_store.write_document("s", "a/b.pdf", b"%PDF-", "application/pdf", {})
+    seen = _watch(store, "delete")
+
+    await local_store.delete_document("s", "a/b.pdf", mime_type="application/pdf")
+
+    assert seen["peak"] == 2
+    assert not (store.target.root / "a/b.pdf").exists()
+    assert not (store.target.root / "a/b.pdf.meta.json").exists()

@@ -7,6 +7,7 @@ accompanied by a ``<filename>.meta.json`` sidecar carrying its MIME
 type and any other available metadata.
 """
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -196,17 +197,26 @@ async def write_document(
     target = store.target.root / rel
 
     data = content.encode("utf-8") if isinstance(content, str) else content
-    await store.write(key, data)
-    await Sidecars(store).write_all(
-        key,
-        DocumentWrite(
-            source=source,
-            uri=uri,
-            content=data,
-            mime_type=mime_type,
-            metadata=metadata or {},
-            ingestion_type=ingestion_type,
-            source_url=source_url,
+    # The document and its sidecars occupy distinct keys, so they go together:
+    # against object storage each is a round trip, and a document costs one
+    # instead of one-per-object. The consequence is that a failed document
+    # write can leave a sidecar behind, because both were already in flight.
+    # That is safe -- no state row is recorded for a failed write, so the
+    # sidecar has nothing claiming it and the reconcile sweep removes it as an
+    # orphan on the next clean run.
+    await asyncio.gather(
+        store.write(key, data),
+        Sidecars(store).write_all(
+            key,
+            DocumentWrite(
+                source=source,
+                uri=uri,
+                content=data,
+                mime_type=mime_type,
+                metadata=metadata or {},
+                ingestion_type=ingestion_type,
+                source_url=source_url,
+            ),
         ),
     )
     logger.info("wrote %s (%d bytes)", target, len(data))
@@ -219,26 +229,26 @@ async def delete_document(
     *,
     mime_type: str | None = None,
     download_dir: str | None = None,
-) -> bool:
+) -> None:
     """Remove a document and its sidecar (used for stale-file cleanup).
+
+    Idempotent, and silent about what was actually there: see
+    :meth:`~soliplex.agents.store.DocumentStore.delete` for why no existence
+    result is returned. A caller that needs one checks first.
 
     Args:
         source: Source identifier.
         uri: Source URI of the document to remove.
         mime_type: MIME type (only needed to reproduce a synthesized extension).
         download_dir: Override for ``settings.download_dir``.
-
-    Returns:
-        True if the document or its sidecar existed and was removed.
     """
     from soliplex.agents.sidecar import Sidecars
     from soliplex.agents.store import get_document_store
 
     store = get_document_store(source, download_dir)
     key = uri_to_relpath(uri, mime_type=mime_type).as_posix()
-    removed = await store.delete(key)
-    if await Sidecars(store).delete_all(key):
-        removed = True
-    if removed:
-        logger.info("deleted stale document %s", store.uri(key))
-    return removed
+    await asyncio.gather(
+        store.delete(key),
+        Sidecars(store).delete_all(key),
+    )
+    logger.info("deleted document %s", store.uri(key))

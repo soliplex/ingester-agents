@@ -213,7 +213,12 @@ async def repair_relocated_documents(source: str, download_dir: str | None = Non
         if not mime.is_container_type(uri_type) or uri_type == stored_type:
             continue
         key = local_store.uri_to_relpath(uri, mime_type=stored_type).as_posix()
-        removed = await local_store.delete_document(source, uri, mime_type=stored_type, download_dir=download_dir)
+        # Checked explicitly, and only here: `delete_document` reports nothing
+        # about what was present (see `DocumentStore.delete`), and this is the
+        # one path that wants to know. A repair is rare and one-time, so the
+        # extra lookup costs nothing the sweep would have to pay per object.
+        existed = await get_document_store(source, download_dir).exists(key)
+        await local_store.delete_document(source, uri, mime_type=stored_type, download_dir=download_dir)
         delete_file(source, uri)
         repaired.append(uri)
         logger.info(
@@ -223,7 +228,7 @@ async def repair_relocated_documents(source: str, download_dir: str | None = Non
             key,
             uri_type,
         )
-        if not removed:
+        if not existed:
             # The row said the document was there and it was not. Harmless
             # here -- the row is dropped either way -- but it means state and
             # storage had drifted, which is worth knowing about.

@@ -274,13 +274,19 @@ async def run_maintenance(
         manifest = entry["manifest"]
         base = {"manifest_id": manifest.id, "source": manifest.source, "verb": verb}
         try:
-            result = await run_verb(
-                manifest.source,
-                verb,
-                haiku_cfg=entry["haiku_cfg"],
-                timeout=timeout,
-                dry_run=dry_run,
-            )
+            # Resolved under the manifest's own download target, exactly as
+            # `run_manifest` does. Without this a manifest that overrides
+            # `download_store` gets a DOWNLOAD_URI from the installation
+            # default instead -- a `file://` URI handed to a config whose
+            # source stanza is `type: s3`.
+            with runner.download_target(manifest.get_download_target()):
+                result = await run_verb(
+                    manifest.source,
+                    verb,
+                    haiku_cfg=entry["haiku_cfg"],
+                    timeout=timeout,
+                    dry_run=dry_run,
+                )
         except Exception as e:
             # e.g. the haiku-rag executable is missing; keep going so the
             # remaining databases are still processed.

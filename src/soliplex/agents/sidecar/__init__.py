@@ -18,6 +18,7 @@ destroyed on the next run. Deriving ``expected`` from the registry
 (:meth:`Sidecars.expected_keys`) removes that by construction.
 """
 
+import asyncio
 import logging
 from abc import ABC
 from abc import abstractmethod
@@ -126,23 +127,32 @@ class Sidecars:
         return {document_key + cls.suffix for cls in _REGISTRY.values()}
 
     async def write_all(self, document_key: str, doc: DocumentWrite) -> None:
-        """Build and store every registered kind that wants one for *doc*."""
+        """Build and store every registered kind that wants one for *doc*.
+
+        Every kind writes to its own key, so the puts are issued together: a
+        remote store charges a round trip each, and serializing them makes the
+        per-document cost grow with the number of kinds for no reason. Building
+        is synchronous and happens first, so a kind that raises does so before
+        anything is written.
+        """
+        pending = []
         for name, cls in _REGISTRY.items():
             content = cls().build(doc)
             if content is not None:
-                await self.store.write(self.key_of(document_key, name), content)
+                pending.append((self.key_of(document_key, name), content))
+        await asyncio.gather(*(self.store.write(key, content) for key, content in pending))
 
     async def write(self, document_key: str, kind: str, content: bytes) -> None:
         """Store *content* as *kind*'s sidecar, for a caller that built it itself."""
         await self.store.write(self.key_of(document_key, kind), content)
 
-    async def delete_all(self, document_key: str) -> bool:
-        """Remove every kind's sidecar for a document; True if any existed."""
-        removed = False
-        for name in _REGISTRY:
-            if await self.store.delete(self.key_of(document_key, name)):
-                removed = True
-        return removed
+    async def delete_all(self, document_key: str) -> None:
+        """Remove every kind's sidecar for a document.
+
+        Issued together, for the same reason as :meth:`write_all`, and silent
+        about what was there -- see :meth:`DocumentStore.delete`.
+        """
+        await asyncio.gather(*(self.store.delete(self.key_of(document_key, name)) for name in _REGISTRY))
 
     async def read_for_uri(self, uri: str, kind: str = "meta") -> bytes | None:
         """Read *kind*'s sidecar for the document stored at *uri*.

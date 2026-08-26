@@ -1,5 +1,6 @@
 """Unit tests for soliplex.agents.sidecar."""
 
+import asyncio
 import json
 from typing import ClassVar
 
@@ -155,13 +156,13 @@ async def test_write_stores_caller_supplied_content(sidecars, store):
 @pytest.mark.asyncio
 async def test_delete_all_removes_every_kind(sidecars, store):
     await sidecars.write_all("a.md", _doc())
-    assert await sidecars.delete_all("a.md") is True
+    assert await sidecars.delete_all("a.md") is None
     assert await store.exists("a.md.meta.json") is False
 
 
 @pytest.mark.asyncio
-async def test_delete_all_reports_nothing_removed(sidecars):
-    assert await sidecars.delete_all("absent.md") is False
+async def test_delete_all_tolerates_absence(sidecars):
+    assert await sidecars.delete_all("absent.md") is None
 
 
 # --- read_for_uri ---------------------------------------------------------
@@ -274,3 +275,89 @@ def test_meta_invalid_json_is_empty():
 
 def test_meta_non_object_top_level_is_empty():
     assert MetaSidecar().parse(b"[1, 2, 3]") == {}
+
+
+# --- batching -------------------------------------------------------------
+
+
+class _Watched:
+    """Wrap a store's write/delete to record how many ran at once."""
+
+    def __init__(self, store):
+        self.store = store
+        self.peak = 0
+        self._in_flight = 0
+
+    def _wrap(self, method):
+        async def inner(*args):
+            self._in_flight += 1
+            self.peak = max(self.peak, self._in_flight)
+            # Yield, so a serialized caller cannot look concurrent.
+            await asyncio.sleep(0)
+            try:
+                return await method(*args)
+            finally:
+                self._in_flight -= 1
+
+        return inner
+
+    def install(self):
+        self.store.write = self._wrap(self.store.write)
+        self.store.delete = self._wrap(self.store.delete)
+        return self
+
+
+@pytest.mark.asyncio
+async def test_write_all_issues_every_kind_together(store, clean_registry):
+    """Each kind costs a round trip, so serializing them scales with kinds."""
+
+    @register
+    class _Second(SidecarKind):
+        kind: ClassVar[str] = "second"
+        suffix: ClassVar[str] = ".second.json"
+
+        def build(self, doc):
+            return b"{}"
+
+        def parse(self, content):
+            return {}
+
+    watched = _Watched(store).install()
+
+    await Sidecars(store).write_all("a/b.pdf", _doc())
+
+    assert watched.peak == 2
+    assert (store.target.root / "a/b.pdf.meta.json").exists()
+    assert (store.target.root / "a/b.pdf.second.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_all_issues_every_kind_together(store, clean_registry):
+    @register
+    class _Second(SidecarKind):
+        kind: ClassVar[str] = "second"
+        suffix: ClassVar[str] = ".second.json"
+
+        def build(self, doc):
+            return b"{}"
+
+        def parse(self, content):
+            return {}
+
+    sidecars = Sidecars(store)
+    await sidecars.write_all("a/b.pdf", _doc())
+    watched = _Watched(store).install()
+
+    await sidecars.delete_all("a/b.pdf")
+
+    assert watched.peak == 2
+
+
+@pytest.mark.asyncio
+async def test_write_all_with_no_kinds_writes_nothing(store, clean_registry):
+    _REGISTRY.clear()
+
+    await Sidecars(store).write_all("a/b.pdf", _doc())
+
+    assert list(store.target.root.rglob("*")) == []
+    await Sidecars(store).delete_all("a/b.pdf")

@@ -1461,7 +1461,7 @@ async def test_migrate_store_copies_objects_and_state(migration):
     assert result["from"].startswith("file://")
     assert result["to"] == "s3://b/dl/src"
 
-    destination = runner._download_target
+    destination = runner.download_target
     with destination(manifest.get_download_target()):
         assert sorted(await agent_store.get_document_store("src").list()) == ["a.md", "a.md.meta.json"]
 
