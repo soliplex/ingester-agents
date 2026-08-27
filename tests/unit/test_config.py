@@ -1,10 +1,18 @@
 import json
 import logging
 import logging.handlers
+import os
+import subprocess
+import sys
 from unittest.mock import patch
 
+import pytest
+from pydantic import ValidationError
+
+from soliplex.agents.config import DownloadStoreConfig
 from soliplex.agents.config import JsonFormatter
 from soliplex.agents.config import ManifestConfig
+from soliplex.agents.config import Settings
 from soliplex.agents.config import _add_smtp_handler
 from soliplex.agents.config import _ThrottledSMTPHandler
 from soliplex.agents.config import configure_logging
@@ -274,3 +282,78 @@ class TestManifestConfig:
     def test_delete_stale_disabled(self):
         config = ManifestConfig(delete_stale=False)
         assert config.delete_stale is False
+
+
+class TestDownloadBucketSpelling:
+    """DOWNLOAD_S3_BUCKET takes the same forms as the S3_BUCKET the readers use."""
+
+    def test_accepts_a_bare_bucket_name(self):
+        assert Settings(download_s3_bucket="my-bucket").download_s3_bucket == "my-bucket"
+
+    def test_accepts_an_s3_uri_with_a_prefix(self):
+        value = "s3://org-lancedb-test-123123123/ingester"
+        assert Settings(download_s3_bucket=value).download_s3_bucket == value
+
+    def test_blank_reads_as_unset(self):
+        # An unset variable interpolated by compose leaves the key present
+        # and empty; that must mean local disk, not "S3, nowhere".
+        assert Settings(download_s3_bucket="").download_s3_bucket is None
+
+    @pytest.mark.parametrize("blank", ["", "   ", "	"])
+    def test_blank_env_var_disables_object_storage(self, monkeypatch, blank):
+        """Clearing the variable in a compose .env turns the store off.
+
+        A referenced key is always present in that file, so emptying it is the
+        only way to disable object storage without editing the compose itself.
+        Whitespace counts as blank: a stray trailing space is a disabled store,
+        not a configuration error.
+        """
+        monkeypatch.setenv("DOWNLOAD_S3_BUCKET", blank)
+
+        assert Settings().download_s3_bucket is None
+
+    def test_env_var_value_is_stripped(self, monkeypatch):
+        monkeypatch.setenv("DOWNLOAD_S3_BUCKET", "  s3://my-bucket/ingester  ")
+
+        assert Settings().download_s3_bucket == "s3://my-bucket/ingester"
+
+    def test_blank_override_bucket_falls_back_to_the_setting(self):
+        assert DownloadStoreConfig(target="s3", bucket="").bucket is None
+
+    def test_unset_stays_unset(self):
+        assert Settings().download_s3_bucket is None
+
+    def test_rejects_a_non_s3_scheme(self):
+        with pytest.raises(ValidationError, match="s3:// URI or a bare bucket name"):
+            Settings(download_s3_bucket="https://bucket/p")
+
+    def test_override_accepts_an_s3_uri(self):
+        override = DownloadStoreConfig(target="s3", bucket="s3://bucket/ingester")
+        assert override.bucket == "s3://bucket/ingester"
+
+    def test_override_rejects_a_non_s3_scheme(self):
+        with pytest.raises(ValidationError, match="s3:// URI or a bare bucket name"):
+            DownloadStoreConfig(target="s3", bucket="ftp://bucket")
+
+    @pytest.mark.parametrize("value", ["s3://my-bucket/ingester", "my-bucket", "", "   "])
+    def test_package_imports_with_the_variable_set(self, value):
+        """`settings = Settings()` runs at import time, so the validator does too.
+
+        Pydantic skips validators for fields left at their default, so an
+        in-process test that sets the bucket after import never exercises the
+        import-time path. This one does, in a fresh interpreter, which is the
+        only way to catch a cycle between the settings and whatever the
+        validator reaches for.
+        """
+        env = {**os.environ, "DOWNLOAD_S3_BUCKET": value}
+        result = subprocess.run(
+            [sys.executable, "-c", "from soliplex.agents.cli import cli"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+
+    def test_override_bucket_may_be_omitted(self):
+        assert DownloadStoreConfig(target="s3").bucket is None

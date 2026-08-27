@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from soliplex.agents.config import FSComponent
 from soliplex.agents.config import Manifest
+from soliplex.agents.config import ManifestConfig
 from soliplex.agents.config import SCMComponent
 from soliplex.agents.config import WebComponent
 from soliplex.agents.config import WebDAVComponent
@@ -1335,3 +1336,194 @@ class TestListSCMAllUris:
             mock.assert_called_once()
         # Settings restored
         assert settings.extensions == original_ext
+
+
+# --- per-manifest download target -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_manifest_honours_a_per_manifest_target(tmp_path, monkeypatch):
+    """Two manifests, two targets, in one process.
+
+    This is the case the override exists for: migrating one source at a time
+    means two manifests writing to different backends in the same run. Nothing
+    else covers it, because with a single installation-wide switch there is
+    only ever one target in play.
+    """
+    from obstore.store import MemoryStore
+
+    from soliplex.agents import store as agent_store
+    from soliplex.agents.config import DownloadStoreConfig
+
+    shared = MemoryStore()
+    monkeypatch.setattr(agent_store, "_make_s3_store", lambda bucket, options: shared)
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
+
+    seen: list[str] = []
+
+    async def fake_component(component, manifest, metadata):
+        # Resolve the store the way an agent would: from the live settings.
+        store = agent_store.get_document_store(manifest.source)
+        await store.write("doc.md", b"x")
+        seen.append(store.target.base_uri)
+        return {"ingested": [], "inventory": []}
+
+    monkeypatch.setitem(runner._DISPATCH, FSComponent, fake_component)
+
+    local = Manifest(
+        id="local-one",
+        name="local",
+        source="stays-local",
+        components=[{"type": "fs", "name": "c", "path": "/data"}],
+    )
+    remote = Manifest(
+        id="remote-one",
+        name="remote",
+        source="moved",
+        config=ManifestConfig(download_store=DownloadStoreConfig(target="s3", bucket="b", dir="ingested")),
+        components=[{"type": "fs", "name": "c", "path": "/data"}],
+    )
+
+    await runner.run_manifest(local)
+    await runner.run_manifest(remote)
+
+    assert seen[0].startswith("file://")
+    assert seen[0].endswith("/stays-local")
+    assert seen[1] == "s3://b/ingested/moved"
+    # The settings are restored, so the next manifest is unaffected.
+    assert agent_store.settings.download_s3_bucket is None
+
+
+@pytest.mark.asyncio
+async def test_run_manifest_restores_settings_after_an_error(tmp_path, monkeypatch):
+    """A failing component must not leave the override in place."""
+    from soliplex.agents import store as agent_store
+
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
+
+    async def boom(component, manifest, metadata):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(runner, "_DISPATCH", {FSComponent: boom})
+    manifest = Manifest(
+        id="m",
+        name="M",
+        source="src",
+        components=[{"type": "fs", "name": "c", "path": "/data"}],
+    )
+    await runner.run_manifest(manifest)
+    assert agent_store.settings.download_dir == str(tmp_path / "dl")
+
+
+# --- migrate_store --------------------------------------------------------
+
+
+@pytest.fixture
+def migration(tmp_path, monkeypatch):
+    """A local source with two documents, and a manifest overriding it to S3."""
+    from obstore.store import MemoryStore
+
+    from soliplex.agents import local_state
+    from soliplex.agents import store as agent_store
+    from soliplex.agents.config import DownloadStoreConfig
+
+    shared = MemoryStore()  # one bucket, as a real deployment has
+    monkeypatch.setattr(agent_store, "_make_s3_store", lambda bucket, options: shared)
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
+    monkeypatch.setattr(local_state.settings, "state_dir", str(tmp_path / "state"))
+    agent_store.reset_store_cache()
+
+    manifest = Manifest(
+        id="m",
+        name="M",
+        source="src",
+        config=ManifestConfig(download_store=DownloadStoreConfig(target="s3", bucket="b", dir="dl")),
+        components=[{"type": "fs", "name": "c", "path": "/data"}],
+    )
+    return manifest, agent_store, local_state
+
+
+@pytest.mark.asyncio
+async def test_migrate_store_copies_objects_and_state(migration):
+    from soliplex.agents import local_store
+
+    manifest, agent_store, local_state = migration
+    await local_store.write_document("src", "a.md", b"a", "text/markdown", {})
+    local_state.upsert_file("src", "a.md", "h", mime_type="text/markdown")
+
+    result = await runner.migrate_store(manifest)
+
+    assert result["keys"] == result["copied"] == 2  # document + sidecar
+    assert result["state_copied"] is True
+    assert result["from"].startswith("file://")
+    assert result["to"] == "s3://b/dl/src"
+
+    destination = runner.download_target
+    with destination(manifest.get_download_target()):
+        assert sorted(await agent_store.get_document_store("src").list()) == ["a.md", "a.md.meta.json"]
+
+
+@pytest.mark.asyncio
+async def test_migrate_store_copies_rather_than_moves(migration):
+    """The origin keeps its documents -- that is the whole rollback story."""
+    from soliplex.agents import local_store
+
+    manifest, agent_store, _ = migration
+    await local_store.write_document("src", "a.md", b"a", "text/markdown", {})
+
+    await runner.migrate_store(manifest)
+
+    origin = runner.installation_target("src")
+    from soliplex.agents.store import LocalDocumentStore
+
+    assert await LocalDocumentStore(origin).list() == ["a.md", "a.md.meta.json"]
+
+
+@pytest.mark.asyncio
+async def test_migrate_store_dry_run_writes_nothing(migration):
+    from soliplex.agents import local_store
+    from soliplex.agents.store import S3DocumentStore
+
+    manifest, _, _ = migration
+    await local_store.write_document("src", "a.md", b"a", "text/markdown", {})
+
+    result = await runner.migrate_store(manifest, dry_run=True)
+
+    assert result["keys"] == 2
+    assert result["copied"] == 0
+    assert result["state_copied"] is False
+    assert await S3DocumentStore(manifest.get_download_target()).list() == []
+
+
+@pytest.mark.asyncio
+async def test_migrate_store_is_a_noop_when_already_there(tmp_path, monkeypatch):
+    """No override means origin and destination are the same place."""
+    from soliplex.agents import store as agent_store
+
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
+    agent_store.reset_store_cache()
+    manifest = Manifest(
+        id="m",
+        name="M",
+        source="src",
+        components=[{"type": "fs", "name": "c", "path": "/data"}],
+    )
+    result = await runner.migrate_store(manifest)
+    assert result["from"] == result["to"]
+    assert result["keys"] == 0
+
+
+@pytest.mark.asyncio
+async def test_migrate_store_without_state_reports_it(migration):
+    """A source with documents but no state file still migrates."""
+    from soliplex.agents import local_store
+
+    manifest, _, _ = migration
+    await local_store.write_document("src", "a.md", b"a", "text/markdown", {})
+    result = await runner.migrate_store(manifest)
+    assert result["copied"] == 2
+    assert result["state_copied"] is False

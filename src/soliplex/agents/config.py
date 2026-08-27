@@ -14,9 +14,12 @@ from typing import Literal
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import SecretStr
+from pydantic import field_validator
 from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
+
+from soliplex.agents.common.s3 import split_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,28 @@ class ComponentType(enum.StrEnum):
 # exist" UserWarning. In the container the dir is present and secrets load.
 _SECRETS_DIR = "/run/secrets"
 _secrets_kwargs: dict = {"secrets_dir": _SECRETS_DIR} if Path(_SECRETS_DIR).is_dir() else {}  # pragma: no branch
+
+
+def _checked_bucket(value: str | None) -> str | None:
+    """Normalize and validate a configured download bucket.
+
+    Shared by the installation setting and the per-manifest override so both
+    accept the same spellings -- a bare name or a full ``s3://bucket/prefix``
+    URI -- and both reject an unusable one while configuration is being read
+    rather than at the first write.
+
+    A blank value becomes ``None``, so object storage is disabled by clearing
+    the variable rather than by deleting the line. That is the only way to turn
+    it off from a compose ``.env``, where a key is always present once it is
+    referenced -- and an empty bucket would otherwise read as "object storage,
+    nowhere". Whitespace counts as blank: ``DOWNLOAD_S3_BUCKET= `` with a
+    stray trailing space is a disabled store, not a configuration error.
+    """
+    value = value.strip() if value else value
+    if not value:
+        return None
+    split_bucket(value)
+    return value
 
 
 class Settings(BaseSettings):
@@ -137,8 +162,22 @@ class Settings(BaseSettings):
     logfire_token: SecretStr | None = None
     logfire_service_name: str = "ingester-agents"
 
-    # S3 settings
+    # S3 settings. `s3_endpoint_url` is shared with the urls_file reader; the
+    # rest are the writer's credentials. All optional -- unset means fall
+    # through to the AWS default credential chain.
     s3_endpoint_url: str | None = None  # Custom S3 endpoint (for MinIO, etc.)
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: SecretStr | None = None
+    s3_region: str | None = None
+    s3_allow_http: bool = False  # Required for an http:// endpoint
+
+    # Download store: setting a bucket moves DOWNLOAD_DIR into object storage,
+    # where it becomes the key prefix rather than a local directory. Named
+    # DOWNLOAD_S3_BUCKET rather than S3_BUCKET so an unrelated variable in the
+    # environment cannot silently redirect every download.
+    download_s3_bucket: str | None = None
+
+    _validate_bucket = field_validator("download_s3_bucket", mode="after")(_checked_bucket)
 
     # Git CLI settings
     scm_use_git_cli: bool = False  # Use git CLI instead of API for file operations
@@ -399,8 +438,30 @@ class PostProcessStep(BaseModel):
     kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
+class DownloadStoreConfig(BaseModel):
+    """Per-manifest override of where this source's documents are written.
+
+    ``target`` is explicit rather than inferred from ``bucket``'s presence,
+    because an override needs three states, not two: inherit the installation
+    default (omit the whole block), force object storage, or force the local
+    filesystem. The third is how a source is pinned while it is not ready, or
+    rolled back after a bad migration, when the installation default is
+    already S3 -- and ``bucket: null`` cannot express it, since pydantic
+    cannot tell an absent key from an explicit null without inspecting
+    ``model_fields_set``.
+    """
+
+    target: Literal["fs", "s3"]
+    bucket: str | None = None  # Defaults to settings.download_s3_bucket
+    dir: str | None = None  # Defaults to settings.download_dir
+
+    _validate_bucket = field_validator("bucket", mode="after")(_checked_bucket)
+
+
 class ManifestConfig(BaseModel):
     """Shared configuration applied to all components in a manifest."""
+
+    download_store: DownloadStoreConfig | None = None
 
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
@@ -446,6 +507,41 @@ class Manifest(BaseModel):
         if self.config and self.config.extensions is not None:
             return self.config.extensions
         return None
+
+    def get_download_target(self, download_dir: str | None = None):
+        """Resolve where this manifest's documents are written.
+
+        The manifest's ``config.download_store`` wins; absent it, the
+        installation settings decide. Returns a
+        :class:`~soliplex.agents.store.DownloadTarget`.
+
+        Args:
+            download_dir: Override for the resolved directory (mainly tests).
+
+        Raises:
+            ValueError: if the override asks for ``s3`` but no bucket is
+                configured, here or in the settings. Failing loudly beats
+                silently writing to local disk.
+        """
+        from soliplex.agents.store import DownloadTarget
+        from soliplex.agents.store import storage_options
+
+        override = self.config.download_store if self.config else None
+        if override is None:
+            from soliplex.agents.store import get_document_store
+
+            return get_document_store(self.source, download_dir).target
+
+        base = download_dir if download_dir is not None else (override.dir or settings.download_dir)
+        if override.target == "fs":
+            return DownloadTarget(dir=base, source=self.source)
+        bucket = override.bucket or settings.download_s3_bucket
+        if not bucket:
+            raise ValueError(
+                f"Manifest '{self.id}' sets download_store.target='s3' but no bucket is "
+                f"configured; set download_store.bucket or DOWNLOAD_S3_BUCKET"
+            )
+        return DownloadTarget(dir=base, source=self.source, bucket=bucket, storage_options=storage_options())
 
     def get_metadata(self, component: FSComponent | SCMComponent | WebDAVComponent | WebComponent) -> dict[str, str]:
         """Resolve metadata for a component (config metadata merged with component metadata on top)."""

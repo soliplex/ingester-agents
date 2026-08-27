@@ -93,7 +93,9 @@ The agents use environment variables for configuration. Create a `.env` file or 
 
 ### Required Configuration
 
-Agents write fetched documents to the local filesystem.
+Agents write fetched documents to the download store -- the local filesystem
+by default, or S3-compatible object storage (see
+[Object Storage](#object-storage)).
 
 ```bash
 # Directory where downloaded documents are written. Each run stores files
@@ -103,7 +105,8 @@ Agents write fetched documents to the local filesystem.
 DOWNLOAD_DIR=downloads
 
 # Directory for local synchronization state (content hashes + SCM commit
-# markers), one SQLite file per source.
+# markers), one SQLite file per source. Stays on local disk even when documents
+# are written to object storage -- SQLite cannot live on S3.
 STATE_DIR=sync_state
 ```
 
@@ -188,11 +191,149 @@ HAIKU_PATH=/etc/haiku                  # base dir for haiku-rag config files
 # HAIKU_MAINTENANCE_COMMAND=haiku-rag --config={haiku_cfg} {verb} --db={db}
 # HAIKU_MAINTENANCE_TIMEOUT=3600
 
-# S3-compatible storage (for urls_file references using s3:// URLs)
+# S3-compatible storage. S3_ENDPOINT_URL is shared between urls_file reads
+# and the download store; the rest are the download store's credentials.
 S3_ENDPOINT_URL=https://minio.example.com:9000
+# S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY / S3_REGION -- omit to use the AWS
+# default credential chain (environment, instance role, profile).
+# S3_ALLOW_HTTP=true                  # required for an http:// endpoint
+
+# Setting a bucket moves the download store into object storage. Accepts a
+# bare name or an s3://bucket/prefix URI. See Object Storage below.
+# DOWNLOAD_S3_BUCKET=my-documents
 ```
 
 See [haiku-rag Loading](#haiku-rag-loading) for what these settings do.
+
+### Object Storage
+
+The download store defaults to the local filesystem. Setting a bucket moves it
+to S3-compatible object storage, where `DOWNLOAD_DIR` becomes the key prefix
+rather than a directory:
+
+```bash
+DOWNLOAD_S3_BUCKET=my-documents
+DOWNLOAD_DIR=ingester/downloads        # now a key prefix
+S3_ENDPOINT_URL=http://minio:9000      # omit for AWS
+S3_ALLOW_HTTP=true                     # required for an http:// endpoint
+```
+
+Documents then land at `s3://my-documents/ingester/downloads/<source>/<path>`,
+with the same `.meta.json` sidecar beside each one. No extra install step:
+`obstore` is a plain dependency, so object storage is available in every
+install and only the configuration decides whether it is used.
+
+Credentials come from `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` /
+`S3_REGION`, or are omitted entirely to use the AWS default chain (environment,
+instance role, profile).
+
+`DOWNLOAD_S3_BUCKET` is named deliberately rather than `S3_BUCKET`: the mode is
+inferred from its presence, so a generic variable that some other service in
+the same environment happens to export must not be able to silently redirect
+every download.
+
+#### Bucket spelling
+
+The bucket accepts a full `s3://` URI as well as a bare name, matching the
+`S3_BUCKET` value the haiku-rag configs interpolate, so one deployment
+variable can feed both the reader and the writer:
+
+| `DOWNLOAD_S3_BUCKET` | `DOWNLOAD_DIR` | Documents land at |
+|---|---|---|
+| `my-documents` | `ingester/downloads` | `s3://my-documents/ingester/downloads/<source>/` |
+| `s3://my-documents` | `ingester/downloads` | `s3://my-documents/ingester/downloads/<source>/` |
+| `s3://my-documents/ingester` | `downloads` | `s3://my-documents/ingester/downloads/<source>/` |
+
+A prefix on the bucket nests `DOWNLOAD_DIR` beneath it, so all three
+spellings above address the same objects -- and are treated as the same
+target, sharing one state file rather than re-fetching everything because a
+prefix moved between two variables. A non-`s3` scheme is rejected when
+configuration is read rather than at the first write.
+
+#### Turning it off
+
+A **blank** `DOWNLOAD_S3_BUCKET` means the same thing as an absent one: local
+disk. Clearing the value is therefore how object storage is disabled from a
+compose `.env`, where a key is always present once the compose file
+references it:
+
+```bash
+DOWNLOAD_S3_BUCKET=              # object storage off, downloads go to disk
+```
+
+Whitespace counts as blank, so a stray trailing space disables the store
+rather than failing the boot. Leading and trailing space is stripped from a
+real value for the same reason.
+
+A manifest that explicitly sets `download_store.target: s3` is the exception:
+that is a direct request for object storage, so it raises rather than quietly
+falling back to disk when no bucket is configured anywhere. Blanking the
+variable disables the installation default; pinning a manifest to `s3`
+overrides that and must be edited too.
+
+**`STATE_DIR` stays local.** The per-source SQLite files hold the content
+hashes that drive incremental ingestion, and SQLite cannot live on object
+storage. Moving documents to S3 does not by itself make the agent stateless: a
+persistent volume is still required for state.
+
+#### Per-manifest override
+
+A manifest can choose its own store, so sources migrate one at a time rather
+than all at once:
+
+```yaml
+config:
+  download_store:
+    target: s3              # "fs" | "s3"
+    bucket: my-documents    # optional; defaults to DOWNLOAD_S3_BUCKET
+                            # (an s3://bucket/prefix URI works here too)
+    dir: ingester/downloads # optional; defaults to DOWNLOAD_DIR
+```
+
+`target` is required because there are three states, not two:
+
+| Configuration | Effect |
+|---|---|
+| no `download_store` block | inherit the installation default |
+| `target: s3` | force object storage for this source |
+| `target: fs` | force local disk, *even when the installation default is S3* |
+
+The third is how a source is pinned while it is not ready, and how one is
+rolled back after a bad migration. `target: s3` with no bucket configured
+anywhere raises rather than silently writing to local disk.
+
+#### Migrating a source
+
+A source's SQLite state file is qualified by its target, so flipping
+`download_store` opens fresh state and every document re-fetches from upstream
+into the new location. That is correct but slow, and it re-hits SCM and WebDAV
+rate limits. `migrate-store` copies the objects sideways instead:
+
+```bash
+si-agent manifest migrate-store path/to/manifest.yaml --dry-run
+si-agent manifest migrate-store path/to/manifest.yaml
+```
+
+It copies both the documents and the state file, so the next run sees
+everything as already present and fetches nothing. It **copies rather than
+moves** — the originals stay put, which is what makes rolling back a config
+edit rather than a recovery operation.
+
+Two things happen on the indexing side that this command cannot do for you:
+
+- The document URIs change (`file://…` becomes `s3://…`), and the indexer keys
+  its own state by URI, so every document in that source is re-converted and
+  re-embedded. This is the real cost of a migration, and the reason to do one
+  source at a time.
+- If the haiku-rag source stanza omits `id:`, its identity is derived from the
+  target, so switching *replaces* one source with a different one and the old
+  documents are never cleaned up. Set `id:` explicitly — then a switch is
+  self-cleaning — or drop and rebuild that source's `.lancedb`.
+
+Point the manifest's `haiku_config` at a variant whose source stanza reads
+`type: s3` with `uri: ${DOWNLOAD_URI}`. `DOWNLOAD_URI` is injected
+for every load and holds the resolved base URI in both modes, so one config
+form works either way.
 
 ### Git CLI Mode
 

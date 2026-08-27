@@ -1,19 +1,21 @@
 """Tests for soliplex.agents.local_state (per-source SQLite sync state)."""
 
 import datetime
+import logging
 import sqlite3
 
 import pytest
 
 from soliplex.agents import local_state
 from soliplex.agents import local_store
+from soliplex.agents import store as agent_store
 
 
 @pytest.fixture
 def state_env(tmp_path, monkeypatch):
     """Point state_dir and download_dir at temp directories."""
     monkeypatch.setattr(local_state.settings, "state_dir", str(tmp_path / "state"))
-    monkeypatch.setattr(local_store.settings, "download_dir", str(tmp_path / "dl"))
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
     return tmp_path
 
 
@@ -108,13 +110,14 @@ def test_get_sync_meta_tolerates_corrupt_fields(state_env):
     assert meta["metadata"] == {}
 
 
-def test_prune_documents_deletes_files_and_state(state_env):
-    local_store.write_document("s", "a.md", b"a", "text/markdown", {})
-    local_store.write_document("s", "b.md", b"b", "text/markdown", {})
+@pytest.mark.asyncio
+async def test_prune_documents_deletes_files_and_state(state_env):
+    await local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+    await local_store.write_document("s", "b.md", b"b", "text/markdown", {})
     local_state.upsert_file("s", "a.md", "1", mime_type="text/markdown")
     local_state.upsert_file("s", "b.md", "2", mime_type="text/markdown")
 
-    removed = local_state.prune_documents("s", {"a.md"})
+    removed = await local_state.prune_documents("s", {"a.md"})
     assert removed == ["b.md"]
     assert (local_store.source_dir("s") / "a.md").exists()
     assert not (local_store.source_dir("s") / "b.md").exists()
@@ -125,20 +128,22 @@ def test_prune_documents_deletes_files_and_state(state_env):
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+NOW = datetime.datetime(2026, 8, 25, 12, 0, tzinfo=datetime.UTC)
 
 
-def _write_mangled(uri="deck.pptx"):
+async def _write_mangled(uri="deck.pptx"):
     """Store *uri* the way the pre-fix docx guess did: under a .docx name."""
-    local_store.write_document("s", uri, b"pptx-bytes", DOCX_MIME, {})
+    await local_store.write_document("s", uri, b"pptx-bytes", DOCX_MIME, {})
     local_state.upsert_file("s", uri, "1", mime_type=DOCX_MIME)
 
 
-def test_repair_discards_document_stored_under_wrong_extension(state_env):
-    _write_mangled()
+@pytest.mark.asyncio
+async def test_repair_discards_document_stored_under_wrong_extension(state_env):
+    await _write_mangled()
     base = local_store.source_dir("s")
     assert (base / "deck.docx").exists()
 
-    repaired = local_state.repair_relocated_documents("s")
+    repaired = await local_state.repair_relocated_documents("s")
 
     assert repaired == ["deck.pptx"]
     assert not (base / "deck.docx").exists()
@@ -147,74 +152,131 @@ def test_repair_discards_document_stored_under_wrong_extension(state_env):
     assert local_state.load_file_state("s") == {}
 
 
-def test_repair_leaves_correctly_stored_ooxml_alone(state_env):
-    local_store.write_document("s", "report.docx", b"docx-bytes", DOCX_MIME, {})
+@pytest.mark.asyncio
+async def test_repair_leaves_correctly_stored_ooxml_alone(state_env):
+    await local_store.write_document("s", "report.docx", b"docx-bytes", DOCX_MIME, {})
     local_state.upsert_file("s", "report.docx", "1", mime_type=DOCX_MIME)
 
-    assert local_state.repair_relocated_documents("s") == []
+    assert await local_state.repair_relocated_documents("s") == []
     assert (local_store.source_dir("s") / "report.docx").exists()
     assert set(local_state.load_file_state("s")) == {"report.docx"}
 
 
-def test_repair_leaves_deliberate_renames_alone(state_env):
+@pytest.mark.asyncio
+async def test_repair_leaves_deliberate_renames_alone(state_env):
     # A .bin sniffed as PDF is stored as .pdf on purpose -- not a container
     # type, so the repair must not touch it.
-    local_store.write_document("s", "blob.bin", b"%PDF-1.4", "application/pdf", {})
+    await local_store.write_document("s", "blob.bin", b"%PDF-1.4", "application/pdf", {})
     local_state.upsert_file("s", "blob.bin", "1", mime_type="application/pdf")
 
-    assert local_state.repair_relocated_documents("s") == []
+    assert await local_state.repair_relocated_documents("s") == []
     assert (local_store.source_dir("s") / "blob.pdf").exists()
 
 
-def test_repair_ignores_container_uri_with_non_container_state(state_env):
+@pytest.mark.asyncio
+async def test_repair_ignores_container_uri_with_non_container_state(state_env):
     # Stored type isn't a container, so nothing is assumed about the name.
     local_state.upsert_file("s", "deck.pptx", "1", mime_type="text/plain")
-    assert local_state.repair_relocated_documents("s") == []
+    assert await local_state.repair_relocated_documents("s") == []
     assert set(local_state.load_file_state("s")) == {"deck.pptx"}
 
 
-def test_repair_ignores_untyped_rows(state_env):
+@pytest.mark.asyncio
+async def test_repair_ignores_untyped_rows(state_env):
     local_state.upsert_file("s", "deck.pptx", "1")
-    assert local_state.repair_relocated_documents("s") == []
+    assert await local_state.repair_relocated_documents("s") == []
 
 
-def test_repair_ignores_extensionless_uri(state_env):
+@pytest.mark.asyncio
+async def test_repair_ignores_extensionless_uri(state_env):
     # Nothing to compare the stored type against -- the guess stands.
-    local_store.write_document("s", "mystery", b"x", DOCX_MIME, {})
+    await local_store.write_document("s", "mystery", b"x", DOCX_MIME, {})
     local_state.upsert_file("s", "mystery", "1", mime_type=DOCX_MIME)
 
-    assert local_state.repair_relocated_documents("s") == []
+    assert await local_state.repair_relocated_documents("s") == []
 
 
-def test_repair_is_idempotent_after_rewrite(state_env):
+@pytest.mark.asyncio
+async def test_repair_is_idempotent_after_rewrite(state_env):
     # Once the document has been rewritten under its real type the row stops
     # matching, so the pass is a no-op from then on.
-    _write_mangled()
-    local_state.repair_relocated_documents("s")
+    await _write_mangled()
+    await local_state.repair_relocated_documents("s")
 
-    local_store.write_document("s", "deck.pptx", b"pptx-bytes", PPTX_MIME, {})
+    await local_store.write_document("s", "deck.pptx", b"pptx-bytes", PPTX_MIME, {})
     local_state.upsert_file("s", "deck.pptx", "1", mime_type=PPTX_MIME)
 
-    assert local_state.repair_relocated_documents("s") == []
+    assert await local_state.repair_relocated_documents("s") == []
     assert (local_store.source_dir("s") / "deck.pptx").exists()
 
 
-def test_prune_documents_repairs_relocated(state_env):
-    # delete_stale reports the repair even though the URI is still current.
-    _write_mangled()
+@pytest.mark.asyncio
+async def test_repair_reports_a_row_whose_document_is_missing(state_env, caplog):
+    # State claimed a document that is not in storage. The row still goes, but
+    # the drift is logged rather than passing silently.
+    local_state.upsert_file("s", "deck.pptx", "1", mime_type=DOCX_MIME)
 
-    removed = local_state.prune_documents("s", {"deck.pptx"})
+    with caplog.at_level(logging.WARNING, logger="soliplex.agents.local_state"):
+        assert await local_state.repair_relocated_documents("s") == ["deck.pptx"]
+
+    assert "no document found at deck.docx" in caplog.text
+    assert local_state.load_file_state("s") == {}
+
+
+@pytest.mark.asyncio
+async def test_repair_clears_incremental_cursor(state_env):
+    # An incremental SCM sync fetches what new commits touched, not what state
+    # is missing, so dropping the row alone would never bring the document
+    # back. Clearing the cursor makes the next run list the repo in full.
+    await _write_mangled()
+    local_state.set_sync_meta("s", "sha-1", branch="trunk", last_sync_date=NOW)
+
+    assert await local_state.repair_relocated_documents("s") == ["deck.pptx"]
+
+    meta = local_state.get_sync_meta("s")
+    assert meta["last_commit_sha"] is None
+    # Only the commit cursor is forgotten: the issue window and branch stay,
+    # so a full listing is the whole cost.
+    assert meta["last_sync_date"] == NOW
+    assert meta["branch"] == "trunk"
+
+
+@pytest.mark.asyncio
+async def test_repair_leaves_cursor_alone_when_nothing_repaired(state_env):
+    await local_store.write_document("s", "report.docx", b"docx-bytes", DOCX_MIME, {})
+    local_state.upsert_file("s", "report.docx", "1", mime_type=DOCX_MIME)
+    local_state.set_sync_meta("s", "sha-1")
+
+    assert await local_state.repair_relocated_documents("s") == []
+
+    assert local_state.get_sync_meta("s")["last_commit_sha"] == "sha-1"
+
+
+def test_clear_sync_cursor_without_marker_row(state_env):
+    # A source that has never synced has no row to update.
+    local_state.clear_sync_cursor("s")
+
+    assert local_state.get_sync_meta("s")["last_commit_sha"] is None
+
+
+@pytest.mark.asyncio
+async def test_prune_documents_repairs_relocated(state_env):
+    # delete_stale reports the repair even though the URI is still current.
+    await _write_mangled()
+
+    removed = await local_state.prune_documents("s", {"deck.pptx"})
 
     assert removed == ["deck.pptx"]
     assert not (local_store.source_dir("s") / "deck.docx").exists()
 
 
-def test_reconcile_documents_repairs_relocated(state_env):
+@pytest.mark.asyncio
+async def test_reconcile_documents_repairs_relocated(state_env):
     # Without the repair the disk sweep keeps deck.docx: the expected-path set
     # is built from the same wrong MIME type, so the file matches itself.
-    _write_mangled()
+    await _write_mangled()
 
-    removed = local_state.reconcile_documents("s", {"deck.pptx"})
+    removed = await local_state.reconcile_documents("s", {"deck.pptx"})
 
     assert removed == ["deck.pptx"]
     assert not (local_store.source_dir("s") / "deck.docx").exists()
@@ -224,15 +286,56 @@ def test_reconcile_documents_repairs_relocated(state_env):
 # --- reconcile_documents ---
 
 
-def test_reconcile_documents_removes_delisted(state_env):
+@pytest.mark.asyncio
+async def test_reconcile_documents_preserves_every_registered_sidecar_kind(state_env):
+    """A registered sidecar kind survives the sweep.
+
+    Regression test: `expected` used to be hard-coded as the document plus
+    `.meta.json`, so any other kind sitting beside a healthy document was
+    deleted on the next reconcile. It is now derived from the registry.
+    """
+    from typing import ClassVar
+
+    from soliplex.agents import sidecar as sidecar_mod
+
+    original = dict(sidecar_mod._REGISTRY)
+    try:
+
+        @sidecar_mod.register
+        class _Extra(sidecar_mod.SidecarKind):
+            kind: ClassVar[str] = "extra"
+            suffix: ClassVar[str] = ".extra.json"
+
+            def build(self, doc):
+                return b'{"extra": true}'
+
+            def parse(self, content):
+                return {}
+
+        await local_store.write_document("s", "a.md", b"body", "text/markdown", {})
+        local_state.upsert_file("s", "a.md", "sha", mime_type="text/markdown")
+        store = agent_store.get_document_store("s")
+        assert "a.md.extra.json" in await store.list()
+
+        removed = await local_state.reconcile_documents("s", {"a.md"})
+
+        assert removed == []
+        assert "a.md.extra.json" in await store.list()
+    finally:
+        sidecar_mod._REGISTRY.clear()
+        sidecar_mod._REGISTRY.update(original)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_documents_removes_delisted(state_env):
     # a.md (top level) and sub/c.md survive; b.md is delisted and removed.
-    local_store.write_document("s", "a.md", b"a", "text/markdown", {})
-    local_store.write_document("s", "sub/c.md", b"c", "text/markdown", {})
-    local_store.write_document("s", "b.md", b"b", "text/markdown", {})
+    await local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+    await local_store.write_document("s", "sub/c.md", b"c", "text/markdown", {})
+    await local_store.write_document("s", "b.md", b"b", "text/markdown", {})
     for uri, sha in (("a.md", "1"), ("sub/c.md", "2"), ("b.md", "3")):
         local_state.upsert_file("s", uri, sha, mime_type="text/markdown")
 
-    removed = local_state.reconcile_documents("s", {"a.md", "sub/c.md"})
+    removed = await local_state.reconcile_documents("s", {"a.md", "sub/c.md"})
 
     assert removed == ["b.md"]
     base = local_store.source_dir("s")
@@ -243,15 +346,16 @@ def test_reconcile_documents_removes_delisted(state_env):
     assert set(local_state.load_file_state("s")) == {"a.md", "sub/c.md"}
 
 
-def test_reconcile_documents_sweeps_disk_orphan(state_env):
+@pytest.mark.asyncio
+async def test_reconcile_documents_sweeps_disk_orphan(state_env):
     # A file present on disk with no state row is swept even though the state
     # comparison alone would never touch it.
-    local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+    await local_store.write_document("s", "a.md", b"a", "text/markdown", {})
     local_state.upsert_file("s", "a.md", "1", mime_type="text/markdown")
     base = local_store.source_dir("s")
     (base / "orphan.bin").write_bytes(b"x")
 
-    removed = local_state.reconcile_documents("s", {"a.md"})
+    removed = await local_state.reconcile_documents("s", {"a.md"})
 
     assert removed == ["orphan.bin"]
     assert (base / "a.md").exists()
@@ -259,20 +363,22 @@ def test_reconcile_documents_sweeps_disk_orphan(state_env):
     assert not (base / "orphan.bin").exists()
 
 
-def test_reconcile_documents_keeps_current(state_env):
-    local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+@pytest.mark.asyncio
+async def test_reconcile_documents_keeps_current(state_env):
+    await local_store.write_document("s", "a.md", b"a", "text/markdown", {})
     local_state.upsert_file("s", "a.md", "1", mime_type="text/markdown")
 
-    removed = local_state.reconcile_documents("s", {"a.md"})
+    removed = await local_state.reconcile_documents("s", {"a.md"})
 
     assert removed == []
     assert (local_store.source_dir("s") / "a.md").exists()
 
 
-def test_reconcile_documents_no_download_dir(state_env):
+@pytest.mark.asyncio
+async def test_reconcile_documents_no_download_dir(state_env):
     # No files ever written: the source folder doesn't exist, so the disk
     # sweep is skipped and nothing is removed.
-    removed = local_state.reconcile_documents("s", set())
+    removed = await local_state.reconcile_documents("s", set())
     assert removed == []
 
 
@@ -317,3 +423,51 @@ def test_reset_state(state_env):
 
 def test_reset_state_missing(state_env):
     assert local_state.reset_state("never") is False
+
+
+# --- get_state_path -------------------------------------------------------
+
+
+def test_state_path_unqualified_for_the_default_local_target(state_env, tmp_path):
+    """The historical filename survives, so an upgrade is a no-op.
+
+    Suffixing unconditionally would orphan every existing `<source>.db` and
+    re-fetch every corpus on deploy.
+    """
+    assert local_state.get_state_path("s").name == "s.db"
+
+
+def test_state_path_is_qualified_for_a_different_target(state_env):
+    """A store swap opens fresh state, so everything re-fetches into it."""
+    from soliplex.agents.store import DownloadTarget
+
+    remote = DownloadTarget(dir="dl", source="s", bucket="b")
+    qualified = local_state.get_state_path("s", remote)
+    assert qualified.name != "s.db"
+    assert qualified.name.endswith(".db")
+    assert remote.digest() in qualified.name
+
+
+def test_state_path_differs_per_target(state_env):
+    """Two targets never share a state file."""
+    from soliplex.agents.store import DownloadTarget
+
+    a = local_state.get_state_path("s", DownloadTarget(dir="dl", source="s", bucket="one"))
+    b = local_state.get_state_path("s", DownloadTarget(dir="dl", source="s", bucket="two"))
+    assert a != b
+
+
+def test_state_path_is_stable_for_the_same_target(state_env):
+    """The digest is derived from the canonical base URI, not from object identity."""
+    from soliplex.agents.store import DownloadTarget
+
+    make = lambda: DownloadTarget(dir="dl", source="s", bucket="b")  # noqa: E731
+    assert local_state.get_state_path("s", make()) == local_state.get_state_path("s", make())
+
+
+def test_state_path_qualified_for_a_local_dir_override(state_env):
+    """A local target pointed somewhere else is still a different location."""
+    from soliplex.agents.store import DownloadTarget
+
+    other = DownloadTarget(dir="/somewhere/else", source="s")
+    assert local_state.get_state_path("s", other).name != "s.db"

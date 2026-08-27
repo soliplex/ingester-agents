@@ -1,17 +1,20 @@
 """Tests for soliplex.agents.local_store (filesystem document writer)."""
 
+import asyncio
 import json
+import logging
 
 import pytest
 
 from soliplex.agents import local_store
+from soliplex.agents import store as agent_store
 
 
 @pytest.fixture
 def dl(tmp_path, monkeypatch):
     """Point download_dir at a temp directory."""
     d = tmp_path / "downloads"
-    monkeypatch.setattr(local_store.settings, "download_dir", str(d))
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(d))
     return d
 
 
@@ -103,8 +106,9 @@ def test_uri_to_relpath_empty_uri_becomes_index():
 # --- write_document / delete_document ---
 
 
-def test_write_document_writes_file_and_sidecar(dl):
-    target = local_store.write_document(
+@pytest.mark.asyncio
+async def test_write_document_writes_file_and_sidecar(dl):
+    target = await local_store.write_document(
         "gitea:admin:r:all",
         "docs/readme.md",
         b"hello",
@@ -127,8 +131,9 @@ def test_write_document_writes_file_and_sidecar(dl):
     assert "source_url" not in meta
 
 
-def test_write_document_records_ingestion_type_and_source_url(dl):
-    target = local_store.write_document(
+@pytest.mark.asyncio
+async def test_write_document_records_ingestion_type_and_source_url(dl):
+    target = await local_store.write_document(
         "webdav:host",
         "docs/readme.md",
         b"hello",
@@ -143,27 +148,117 @@ def test_write_document_records_ingestion_type_and_source_url(dl):
     assert meta["source_url"] == "https://dav.example.com/docs/readme.md"
 
 
-def test_write_document_accepts_str(dl):
-    target = local_store.write_document("s", "a.txt", "hi", "text/plain", {})
+@pytest.mark.asyncio
+async def test_write_document_accepts_str(dl):
+    target = await local_store.write_document("s", "a.txt", "hi", "text/plain", {})
     assert target.read_bytes() == b"hi"
 
 
-def test_write_document_issue_markdown(dl):
-    target = local_store.write_document("s:issues", "/o/r/issues/3", b"# t", "text/markdown", {"state": "open"})
+@pytest.mark.asyncio
+async def test_write_document_issue_markdown(dl):
+    target = await local_store.write_document("s:issues", "/o/r/issues/3", b"# t", "text/markdown", {"state": "open"})
     assert target == dl / "s_issues" / "o" / "r" / "issues" / "3.md"
 
 
-def test_delete_document_removes_file_and_sidecar(dl):
-    target = local_store.write_document("s", "docs/x.md", b"x", "text/markdown", {})
+@pytest.mark.asyncio
+async def test_delete_document_removes_file_and_sidecar(dl):
+    target = await local_store.write_document("s", "docs/x.md", b"x", "text/markdown", {})
     sidecar = target.with_name(target.name + ".meta.json")
     assert target.exists()
     assert sidecar.exists()
 
-    removed = local_store.delete_document("s", "docs/x.md", mime_type="text/markdown")
-    assert removed is True
+    await local_store.delete_document("s", "docs/x.md", mime_type="text/markdown")
+
     assert not target.exists()
     assert not sidecar.exists()
 
 
-def test_delete_document_missing_returns_false(dl):
-    assert local_store.delete_document("s", "nope.md") is False
+@pytest.mark.asyncio
+async def test_delete_document_tolerates_a_missing_document(dl):
+    """Idempotent: absence is not an error, and is not reported."""
+    assert await local_store.delete_document("s", "nope.md") is None
+
+
+# --- rename logging -------------------------------------------------------
+
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@pytest.mark.asyncio
+async def test_write_warns_when_detection_overrides_the_uri_extension(dl, caplog):
+    """The OOXML misfiling was invisible in the log; now it is not."""
+    with caplog.at_level(logging.WARNING, logger="soliplex.agents.local_store"):
+        await local_store.write_document("s", "/team/report.pptx", b"PK", DOCX, {})
+
+    assert "renaming /team/report.pptx to team/report.docx" in caplog.text
+    assert ".pptx" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_write_logs_a_derived_extension_at_info(dl, caplog):
+    """Supplying a missing extension is routine, not a warning."""
+    with caplog.at_level(logging.DEBUG, logger="soliplex.agents.local_store"):
+        await local_store.write_document("s", "/team/handout", b"%PDF-", "application/pdf", {})
+
+    records = [r for r in caplog.records if "handout" in r.message and "naming" in r.message]
+    assert records
+    assert records[0].levelno == logging.INFO
+
+
+@pytest.mark.asyncio
+async def test_write_says_nothing_when_the_name_already_agrees(dl, caplog):
+    with caplog.at_level(logging.DEBUG, logger="soliplex.agents.local_store"):
+        await local_store.write_document("s", "/team/notes.pdf", b"%PDF-", "application/pdf", {})
+
+    assert "renaming" not in caplog.text
+    assert "naming" not in caplog.text
+
+
+# --- batching -------------------------------------------------------------
+
+
+def _watch(store, name):
+    """Replace store.<name> with a wrapper recording peak concurrency."""
+    state = {"peak": 0, "in_flight": 0}
+    method = getattr(store, name)
+
+    async def inner(*args):
+        state["in_flight"] += 1
+        state["peak"] = max(state["peak"], state["in_flight"])
+        # Yield, so a serialized caller cannot look concurrent.
+        await asyncio.sleep(0)
+        try:
+            return await method(*args)
+        finally:
+            state["in_flight"] -= 1
+
+    setattr(store, name, inner)
+    return state
+
+
+@pytest.mark.asyncio
+async def test_write_document_writes_document_and_sidecar_together(dl, monkeypatch):
+    """A document costs one round trip against object storage, not one per object."""
+    store = agent_store.get_document_store("s")
+    monkeypatch.setattr(agent_store, "get_document_store", lambda *a, **k: store)
+    seen = _watch(store, "write")
+
+    await local_store.write_document("s", "a/b.pdf", b"%PDF-", "application/pdf", {})
+
+    assert seen["peak"] == 2
+    assert (store.target.root / "a/b.pdf").exists()
+    assert (store.target.root / "a/b.pdf.meta.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_document_deletes_document_and_sidecar_together(dl, monkeypatch):
+    store = agent_store.get_document_store("s")
+    monkeypatch.setattr(agent_store, "get_document_store", lambda *a, **k: store)
+    await local_store.write_document("s", "a/b.pdf", b"%PDF-", "application/pdf", {})
+    seen = _watch(store, "delete")
+
+    await local_store.delete_document("s", "a/b.pdf", mime_type="application/pdf")
+
+    assert seen["peak"] == 2
+    assert not (store.target.root / "a/b.pdf").exists()
+    assert not (store.target.root / "a/b.pdf.meta.json").exists()

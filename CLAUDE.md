@@ -70,7 +70,9 @@ src/soliplex/agents/
 ├── cli.py              # Main Typer entry point
 ├── config.py           # Pydantic Settings, manifest/component models
 ├── local_state.py      # Local sync state (hashes, commit SHAs, pruning)
-├── local_store.py      # Writes documents + .meta.json to DOWNLOAD_DIR
+├── store.py            # DownloadTarget + DocumentStore (local | s3)
+├── sidecar/            # Sidecar kinds (.meta.json): format + addressing
+├── local_store.py      # Writes documents + sidecars through the store
 ├── common/config.py    # Shared validation utilities
 ├── fs/                 # Filesystem agent
 │   ├── cli.py          # CLI commands
@@ -108,7 +110,7 @@ Key environment variables:
 
 ```bash
 # Required
-DOWNLOAD_DIR=downloads                 # Where fetched documents are written
+DOWNLOAD_DIR=downloads                 # Documents go here (key prefix if DOWNLOAD_S3_BUCKET)
 STATE_DIR=sync_state                   # Local sync state, one SQLite file per source
 
 # haiku-rag loading (optional)
@@ -173,6 +175,7 @@ running them. See `manifest/haiku_maint.py`.
 ### Status Checking
 
 Files are hashed and compared against the local sync state:
+
 - **new:** File does not exist
 - **mismatch:** File changed (hash differs)
 - **match:** File unchanged (skipped)
@@ -195,6 +198,7 @@ uv run pytest --cov-report=html
 ```
 
 Coverage exclusions (pyproject.toml):
+
 - CLI modules (cli.py)
 - App orchestration (app.py)
 - Templates

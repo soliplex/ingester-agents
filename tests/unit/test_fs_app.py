@@ -8,13 +8,14 @@ import pytest
 
 from soliplex.agents import local_state
 from soliplex.agents import local_store
+from soliplex.agents import store as agent_store
 from soliplex.agents.fs import app as fs_app
 
 
 @pytest.fixture
 def local_env(tmp_path, monkeypatch):
     """Point download_dir and state_dir at temp directories."""
-    monkeypatch.setattr(local_store.settings, "download_dir", str(tmp_path / "dl"))
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
     monkeypatch.setattr(local_state.settings, "state_dir", str(tmp_path / "state"))
     return tmp_path
 

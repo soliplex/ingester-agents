@@ -17,13 +17,12 @@ loop (avoiding an in-process deadlock) and makes a stuck compaction killable.
 
 import asyncio
 import logging
-import os
 import shlex
 import signal
 
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import settings
-from soliplex.agents.local_store import sanitize_source
+from soliplex.agents.manifest.context import LoadContext
 from soliplex.agents.manifest.haiku_loader import _pump_stream
 from soliplex.agents.manifest.haiku_loader import resolve_db_path
 from soliplex.agents.manifest.haiku_loader import resolve_haiku_cfg
@@ -69,10 +68,12 @@ def build_maintenance_argv(verb: str, haiku_cfg: str | None, db: str, source: st
 
 
 def _maintenance_env(source: str, verb: str) -> dict[str, str]:
-    """Build the subprocess environment, mirroring ``haiku_loader.run_load``."""
-    env = os.environ.copy()
-    env["SOURCE"] = sanitize_source(source)
-    env["DOWNLOAD_DIR"] = settings.download_dir
+    """Build the subprocess environment for a maintenance verb.
+
+    Same context as the load (:class:`LoadContext`), differing only in the
+    OpenTelemetry service name.
+    """
+    env = LoadContext.for_source(source).env()
     env["OTEL_SERVICE_NAME"] = env.get("OTEL_SERVICE_NAME", "ingester-agent") + f".haiku-rag.{verb}.{source}"
     # Force the (Python) child to flush stdout so we can stream it live.
     env["PYTHONUNBUFFERED"] = "1"
@@ -273,13 +274,19 @@ async def run_maintenance(
         manifest = entry["manifest"]
         base = {"manifest_id": manifest.id, "source": manifest.source, "verb": verb}
         try:
-            result = await run_verb(
-                manifest.source,
-                verb,
-                haiku_cfg=entry["haiku_cfg"],
-                timeout=timeout,
-                dry_run=dry_run,
-            )
+            # Resolved under the manifest's own download target, exactly as
+            # `run_manifest` does. Without this a manifest that overrides
+            # `download_store` gets a DOWNLOAD_URI from the installation
+            # default instead -- a `file://` URI handed to a config whose
+            # source stanza is `type: s3`.
+            with runner.download_target(manifest.get_download_target()):
+                result = await run_verb(
+                    manifest.source,
+                    verb,
+                    haiku_cfg=entry["haiku_cfg"],
+                    timeout=timeout,
+                    dry_run=dry_run,
+                )
         except Exception as e:
             # e.g. the haiku-rag executable is missing; keep going so the
             # remaining databases are still processed.

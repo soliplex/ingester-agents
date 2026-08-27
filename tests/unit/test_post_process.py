@@ -4,10 +4,12 @@ import os
 
 import pytest
 
+from soliplex.agents import store as agent_store
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import ManifestConfig
 from soliplex.agents.config import PostProcessStep
 from soliplex.agents.manifest import post_process
+from soliplex.agents.manifest.context import LoadContext
 
 
 def _manifest(steps=None, *, with_config=True, source="src"):
@@ -93,9 +95,12 @@ async def test_runs_in_order_with_inject_and_sync_async(monkeypatch):
 
     assert [r["ok"] for r in results] == [True, True, True, True]
     assert all(r["error"] is None for r in results)
-    assert calls == [
-        # **kwargs accepts both config and ingester_exit_code -> both injected
-        ("async", "s1", {"config": "CFG", "ingester_exit_code": None}),
+    # **kwargs accepts config, ingester_exit_code and context -> all injected
+    assert calls[0][:2] == ("async", "s1")
+    assert calls[0][2]["config"] == "CFG"
+    assert calls[0][2]["ingester_exit_code"] is None
+    assert calls[0][2]["context"].source == "s1"
+    assert calls[1:] == [
         ("sync", "s1", {"config": "CFG", "x": 1}),
         ("sync", "s1", {"config": "OWN", "x": 2}),
         ("noconf", "s1", {"y": None}),
@@ -111,6 +116,7 @@ async def test_injects_ingester_exit_code_when_accepted(monkeypatch):
 
     def wants_kwargs(source, **kwargs):
         calls.append(("kwargs", kwargs.get("ingester_exit_code")))
+        assert kwargs["context"].source == "src"
 
     def no_code(source, *, x=None):  # no exit-code param, no **kwargs -> no inject
         calls.append(("none", x))
@@ -159,19 +165,27 @@ def test_load_env_sets_and_restores(monkeypatch):
     # SOURCE preexists (restored to old value); DOWNLOAD_DIR is unset (popped).
     monkeypatch.setenv("SOURCE", "preexisting")
     monkeypatch.delenv("DOWNLOAD_DIR", raising=False)
-    monkeypatch.setattr(post_process.settings, "download_dir", "downloads", raising=False)
+    monkeypatch.setattr(agent_store.settings, "download_dir", "downloads")
 
-    with post_process._load_env(_manifest(source="army-airfield")):
+    monkeypatch.delenv("DOWNLOAD_URI", raising=False)
+
+    manifest = _manifest(source="army-airfield")
+    with post_process._load_env(manifest, LoadContext.for_source(manifest.source)):
         assert os.environ["SOURCE"] == "army-airfield"
         assert os.environ["DOWNLOAD_DIR"] == "downloads"
+        # The resolved base URI is exposed too, so a config can use one form
+        # regardless of backend.
+        assert os.environ["DOWNLOAD_URI"].startswith("file://")
 
     assert os.environ["SOURCE"] == "preexisting"  # restored
     assert "DOWNLOAD_DIR" not in os.environ  # popped
+    assert "DOWNLOAD_URI" not in os.environ  # popped
 
 
 def test_load_env_sanitizes_source(monkeypatch):
     monkeypatch.delenv("SOURCE", raising=False)
-    monkeypatch.setattr(post_process.settings, "download_dir", "downloads", raising=False)
+    monkeypatch.setattr(agent_store.settings, "download_dir", "downloads")
 
-    with post_process._load_env(_manifest(source="gitea:admin:repo")):
+    manifest = _manifest(source="gitea:admin:repo")
+    with post_process._load_env(manifest, LoadContext.for_source(manifest.source)):
         assert os.environ["SOURCE"] == "gitea_admin_repo"  # ':' -> '_'

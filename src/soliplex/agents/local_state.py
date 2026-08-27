@@ -22,6 +22,8 @@ from soliplex.agents import local_store
 from soliplex.agents.common import mime
 from soliplex.agents.config import settings
 from soliplex.agents.local_store import sanitize_source
+from soliplex.agents.sidecar import Sidecars
+from soliplex.agents.store import get_document_store
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +42,37 @@ STATUS_UNCHANGED = "unchanged"
 PROCESSABLE_STATUSES = frozenset({STATUS_NEW, STATUS_MISMATCH})
 
 
-def get_state_path(source: str) -> Path:
-    """Return the SQLite state file path for *source*."""
-    return Path(settings.state_dir) / f"{sanitize_source(source)}.db"
+def get_state_path(source: str, target=None) -> Path:
+    """Return the SQLite state file path for *source* under *target*.
+
+    Change detection compares each URI's upstream hash against this state, and
+    a store swap changes neither the URIs nor the hashes -- so a source pointed
+    at a new target would report every document ``unchanged`` and write nothing
+    to the new location. Qualifying the filename by the target makes the swap
+    open a fresh, empty state instead, so everything re-fetches.
+
+    A **local default** target keeps the historical unqualified name. That is
+    deliberate: suffixing unconditionally would orphan every existing
+    ``<source>.db`` on upgrade and re-fetch every corpus, which is a
+    self-inflicted outage from a filename change.
+
+    Rolling a source back is then free -- the original state file is still
+    there, still describing the documents at the old location.
+
+    Args:
+        source: Source identifier.
+        target: Resolved :class:`~soliplex.agents.store.DownloadTarget`.
+            Defaults to whatever the installation settings resolve to.
+
+    Returns:
+        Path to this source-and-target's SQLite file.
+    """
+    if target is None:
+        from soliplex.agents.store import get_document_store
+
+        target = get_document_store(source).target
+    suffix = "" if target.is_local and target.dir == settings.download_dir else f".{target.digest()}"
+    return Path(settings.state_dir) / f"{sanitize_source(source)}{suffix}.db"
 
 
 @contextmanager
@@ -125,7 +155,7 @@ def prune_files(source: str, current_uris: set[str]) -> list[str]:
     return removed
 
 
-def repair_relocated_documents(source: str, download_dir: str | None = None) -> list[str]:
+async def repair_relocated_documents(source: str, download_dir: str | None = None) -> list[str]:
     """Drop documents whose file sits where a stale MIME guess put it.
 
     On-disk names come from the MIME type recorded in state, not from the
@@ -143,6 +173,15 @@ def repair_relocated_documents(source: str, download_dir: str | None = None) -> 
     it under its real extension. Two runs to fully heal, by design: the
     repair happens after the current run has already decided what to fetch.
 
+    Dropping the state row is enough to force that re-fetch only for sources
+    that decide what to fetch by comparing against state. An incremental SCM
+    sync does not: it fetches the files touched by commits it has not seen
+    yet, so a document no commit has touched since would never come back --
+    the repair would delete it permanently instead of relocating it. So a
+    repair also clears the incremental cursor (see :func:`clear_sync_cursor`),
+    which costs one full listing on the next run and is self-limiting,
+    because a repaired row no longer matches.
+
     A row qualifies only when its stored type *and* the type implied by its
     own URI extension are both container types that disagree. Renames that
     were deliberate stay untouched (a ``.bin`` sniffed as PDF is stored as
@@ -157,21 +196,59 @@ def repair_relocated_documents(source: str, download_dir: str | None = None) -> 
         List of URIs whose stored document was discarded for re-fetching.
     """
     repaired = []
-    for uri, entry in load_file_state(source).items():
+    state = load_file_state(source)
+    untyped = 0
+    for uri, entry in state.items():
         stored_type = entry.get("mime_type")
+        if not stored_type:
+            # No recorded type means no way to tell where the file was put,
+            # so the row is skipped. Counted, because a corpus full of these
+            # is a state file older than the mime_type column and explains a
+            # repair pass that finds nothing.
+            untyped += 1
+            continue
         if not mime.is_container_type(stored_type):
             continue
         uri_type = mime.detect_mime_type(uri)
         if not mime.is_container_type(uri_type) or uri_type == stored_type:
             continue
-        local_store.delete_document(source, uri, mime_type=stored_type, download_dir=download_dir)
+        key = local_store.uri_to_relpath(uri, mime_type=stored_type).as_posix()
+        # Checked explicitly, and only here: `delete_document` reports nothing
+        # about what was present (see `DocumentStore.delete`), and this is the
+        # one path that wants to know. A repair is rare and one-time, so the
+        # extra lookup costs nothing the sweep would have to pay per object.
+        existed = await get_document_store(source, download_dir).exists(key)
+        await local_store.delete_document(source, uri, mime_type=stored_type, download_dir=download_dir)
         delete_file(source, uri)
         repaired.append(uri)
-        logger.info("repairing %s: stored as %s, re-fetching as %s", uri, stored_type, uri_type)
+        logger.info(
+            "repairing %s: stored as %s under %s, re-fetching as %s",
+            uri,
+            stored_type,
+            key,
+            uri_type,
+        )
+        if not existed:
+            # The row said the document was there and it was not. Harmless
+            # here -- the row is dropped either way -- but it means state and
+            # storage had drifted, which is worth knowing about.
+            logger.warning("repairing %s: no document found at %s to remove", uri, key)
+    if untyped:
+        logger.info("relocation repair for %s skipped %d row(s) with no recorded mime_type", source, untyped)
+    if repaired:
+        logger.info(
+            "relocation repair for %s: %d of %d row(s) discarded for re-fetch; clearing incremental cursor",
+            source,
+            len(repaired),
+            len(state),
+        )
+        clear_sync_cursor(source)
+    else:
+        logger.debug("relocation repair for %s: nothing to repair in %d row(s)", source, len(state))
     return repaired
 
 
-def prune_documents(source: str, current_uris: set[str], download_dir: str | None = None) -> list[str]:
+async def prune_documents(source: str, current_uris: set[str], download_dir: str | None = None) -> list[str]:
     """Remove stale documents from both the state and the filesystem.
 
     Drops state entries whose URI is absent from *current_uris* and deletes
@@ -188,16 +265,16 @@ def prune_documents(source: str, current_uris: set[str], download_dir: str | Non
     Returns:
         List of URIs that were pruned, including any repaired for re-fetch.
     """
-    repaired = repair_relocated_documents(source, download_dir=download_dir)
+    repaired = await repair_relocated_documents(source, download_dir=download_dir)
     state = load_file_state(source)
     removed = prune_files(source, current_uris)
     for uri in removed:
         mime_type = state.get(uri, {}).get("mime_type")
-        local_store.delete_document(source, uri, mime_type=mime_type, download_dir=download_dir)
+        await local_store.delete_document(source, uri, mime_type=mime_type, download_dir=download_dir)
     return repaired + removed
 
 
-def reconcile_documents(source: str, current_uris: set[str], download_dir: str | None = None) -> list[str]:
+async def reconcile_documents(source: str, current_uris: set[str], download_dir: str | None = None) -> list[str]:
     """Reconcile the on-disk download folder against *current_uris*.
 
     Stricter than :func:`prune_documents`: in addition to dropping tracked
@@ -220,33 +297,34 @@ def reconcile_documents(source: str, current_uris: set[str], download_dir: str |
         List of removed identifiers (URIs repaired for re-fetch, stale URIs,
         and orphan relative paths).
     """
-    repaired = repair_relocated_documents(source, download_dir=download_dir)
+    repaired = await repair_relocated_documents(source, download_dir=download_dir)
     state = load_file_state(source)
 
     # (A) Tracked URIs no longer present: delete file, sidecar, and state row.
     removed = [uri for uri in state if uri not in current_uris]
     for uri in removed:
         mime_type = state.get(uri, {}).get("mime_type")
-        local_store.delete_document(source, uri, mime_type=mime_type, download_dir=download_dir)
+        await local_store.delete_document(source, uri, mime_type=mime_type, download_dir=download_dir)
     prune_files(source, current_uris)
 
     # (B) Disk sweep: delete any file not backing a surviving URI. On-disk
     # names use the resolved MIME type recorded in state, so recomputing the
     # relative path from (uri, stored mime) reproduces the exact file written
     # and cannot false-positive against a file we just stored.
+    sidecars = Sidecars(get_document_store(source, download_dir))
     expected: set[str] = set()
     for uri, entry in state.items():
         if uri in current_uris:
             rel = local_store.uri_to_relpath(uri, mime_type=entry.get("mime_type")).as_posix()
             expected.add(rel)
-            expected.add(rel + local_store.META_SUFFIX)
+            expected |= sidecars.expected_keys(rel)
 
-    base = local_store.source_dir(source, download_dir)
-    if base.is_dir():
-        for path in base.rglob("*"):
-            if path.is_file() and path.relative_to(base).as_posix() not in expected:
-                path.unlink()
-                removed.append(path.relative_to(base).as_posix())
+    store = get_document_store(source, download_dir)
+    for key in await store.list():
+        if key not in expected:
+            logger.info("deleting orphan %s: no current URI accounts for it", store.uri(key))
+            await store.delete(key)
+            removed.append(key)
 
     return repaired + removed
 
@@ -345,6 +423,24 @@ def set_sync_meta(
                 "INSERT OR REPLACE INTO sync (id, last_commit_sha, branch, last_sync_date, metadata) VALUES (1, ?, ?, ?, ?)",
                 (commit_sha, branch, date_str, meta_str),
             )
+
+
+def clear_sync_cursor(source: str) -> None:
+    """Forget how far an incremental SCM sync has read, keeping everything else.
+
+    Only ``last_commit_sha`` is cleared, so the next run falls back to a full
+    listing while ``last_sync_date`` still scopes the issue fetch and the
+    per-file hashes in ``files`` still suppress rewrites. The result is one
+    extra listing, not a re-ingest.
+
+    A no-op for sources that never wrote a marker.
+
+    Args:
+        source: Source identifier.
+    """
+    with _get_connection(source) as conn:
+        with conn:
+            conn.execute("UPDATE sync SET last_commit_sha = NULL WHERE id = 1")
 
 
 def reset_state(source: str) -> bool:

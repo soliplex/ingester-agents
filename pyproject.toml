@@ -1,6 +1,6 @@
 [project]
 name = "soliplex.agents"
-version = "0.7.2"
+version = "0.8.0"
 description = "Agents for use with soliplex-ingester"
 authors = [{ name = "Enfold Systems", email = "info@enfoldsystems.net" }]
 readme = "README.md"
@@ -33,10 +33,13 @@ dependencies = [
     "typer>=0.21.1",
     "uvicorn[standard]>=0.34.0",
     "pyyaml>=6.0",
-    "haiku-rag[ingester]>=0.55.1",
+    "haiku-rag[ingester]>=0.72.1",
     "pypdfium2>=4.0",
     "puremagic>=2.2.0",
+    "obstore>=0.9.5",
 ]
+
+
 
 
 [dependency-groups]

@@ -298,6 +298,53 @@ class TestRunMaintenance:
         assert results[0]["verb"] == "vacuum"
         assert results[0]["returncode"] == 0
 
+    async def test_uses_the_manifest_download_target(self, tmp_path, monkeypatch, maint_env):
+        """DOWNLOAD_URI must match where the run actually wrote.
+
+        A manifest that overrides `download_store` used to get the
+        installation default here, so a config whose source stanza is
+        `type: s3` was handed a `file://` URI.
+        """
+        monkeypatch.setattr(settings, "download_s3_bucket", None, raising=False)
+        path = tmp_path / "m.yml"
+        path.write_text(
+            "id: m\nname: M\nsource: src\n"
+            "config:\n"
+            "  download_store:\n"
+            "    target: s3\n"
+            "    bucket: s3://bucket/ingester\n"
+            "    dir: downloads\n"
+            "components:\n  - type: fs\n    name: c\n    path: /data\n",
+        )
+        seen = {}
+
+        async def capture(*argv, **kwargs):
+            seen["env"] = kwargs["env"]
+            return _fake_proc()
+
+        with patch(_EXEC, new_callable=AsyncMock, side_effect=capture):
+            await haiku_maint.run_maintenance("vacuum", str(path))
+
+        assert seen["env"]["DOWNLOAD_URI"] == "s3://bucket/ingester/downloads/src"
+
+    async def test_restores_the_installation_target_afterwards(self, tmp_path, maint_env):
+        """The override is scoped to the manifest, not leaked to the next one."""
+        path = tmp_path / "m.yml"
+        path.write_text(
+            "id: m\nname: M\nsource: src\n"
+            "config:\n"
+            "  download_store:\n"
+            "    target: s3\n"
+            "    bucket: s3://bucket/ingester\n"
+            "components:\n  - type: fs\n    name: c\n    path: /data\n",
+        )
+        before = settings.download_s3_bucket
+
+        with patch(_EXEC, new_callable=AsyncMock, side_effect=lambda *a, **k: _fake_proc()):
+            await haiku_maint.run_maintenance("vacuum", str(path))
+
+        assert settings.download_s3_bucket == before
+
     async def test_all_uses_manifest_dir(self, tmp_path, monkeypatch, maint_env):
         for name, source in (("a.yml", "sa"), ("b.yaml", "sb")):
             (tmp_path / name).write_text(

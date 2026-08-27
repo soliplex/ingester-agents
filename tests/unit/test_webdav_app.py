@@ -11,6 +11,7 @@ import pytest
 
 from soliplex.agents import local_state
 from soliplex.agents import local_store
+from soliplex.agents import store as agent_store
 from soliplex.agents.webdav import app as webdav_app
 from soliplex.agents.webdav.async_client import WebDAVResponse
 
@@ -18,7 +19,7 @@ from soliplex.agents.webdav.async_client import WebDAVResponse
 @pytest.fixture
 def local_env(tmp_path, monkeypatch):
     """Point download_dir and state_dir at temp directories."""
-    monkeypatch.setattr(local_store.settings, "download_dir", str(tmp_path / "dl"))
+    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
     monkeypatch.setattr(local_state.settings, "state_dir", str(tmp_path / "state"))
     return tmp_path
 
@@ -516,7 +517,7 @@ async def test_load_inventory_404_deletes_when_delete_stale(local_env):
     # A previously-downloaded file that 404s on this run is removed from disk
     # and state (via reconcile), and reported in not_found rather than errors.
     source = "wd-src"
-    local_store.write_document(source, "gone.md", b"old", "text/markdown", {})
+    await local_store.write_document(source, "gone.md", b"old", "text/markdown", {})
     local_state.upsert_file(source, "gone.md", None, mime_type="text/markdown")
     assert (local_store.source_dir(source) / "gone.md").exists()
 

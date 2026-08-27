@@ -7,8 +7,7 @@ accompanied by a ``<filename>.meta.json`` sidecar carrying its MIME
 type and any other available metadata.
 """
 
-import hashlib
-import json
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -17,12 +16,14 @@ from urllib.parse import urlsplit
 
 from soliplex.agents.common.mime import ensure_extension
 from soliplex.agents.common.mime import guess_extension
-from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Suffix appended to a document's filename to form its metadata sidecar.
-META_SUFFIX = ".meta.json"
+# Re-exported for callers that still import it from here; the suffix itself is
+# owned by the sidecar kind that uses it.
+from soliplex.agents.sidecar import META_SUFFIX  # noqa: E402, F401
+
+__all__ = ["META_SUFFIX"]
 
 # Characters illegal in Windows path segments (superset of POSIX concerns).
 _ILLEGAL_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -115,13 +116,49 @@ def uri_to_relpath(uri: str, *, mime_type: str | None = None) -> Path:
     return Path(*rel_segs)
 
 
+def log_extension_choice(uri: str, rel: Path, mime_type: str | None) -> None:
+    """Log when the on-disk name does not match the name in *uri*.
+
+    On-disk names come from the detected MIME type, so a document can land
+    under an extension its URI never mentioned. That is usually intended (a
+    ``.bin`` that really is a PDF), but it is also how OOXML documents ended
+    up misfiled -- every one of them is a ZIP, and content sniffing reads
+    them all back as docx. Either way the divergence is worth a line in the
+    log, because nothing else records that the name changed.
+
+    A *replacement* is logged at WARNING: the URI stated an extension and
+    detection overruled it, which is the case that has been wrong before.
+    Supplying a missing extension is routine and logged at INFO.
+    """
+    stated = uri_to_relpath(uri).suffix
+    chosen = rel.suffix
+    if stated == chosen:
+        return
+    if stated:
+        logger.warning(
+            "renaming %s to %s: detected type %s overrides the URI extension %s",
+            uri,
+            rel.as_posix(),
+            mime_type,
+            stated,
+        )
+    else:
+        logger.info("naming %s as %s: extension %s derived from %s", uri, rel.as_posix(), chosen, mime_type)
+
+
 def source_dir(source: str, download_dir: str | None = None) -> Path:
-    """Return the directory that holds all documents for *source*."""
-    base = Path(download_dir if download_dir is not None else settings.download_dir)
-    return base / sanitize_source(source)
+    """Return the directory that holds all documents for *source*.
+
+    Thin wrapper over :class:`~soliplex.agents.store.DownloadTarget` so the
+    layout has one definition; kept because callers and tests read better with
+    a path than with a target.
+    """
+    from soliplex.agents.store import get_document_store
+
+    return get_document_store(source, download_dir).target.root
 
 
-def write_document(
+async def write_document(
     source: str,
     uri: str,
     content: bytes | str,
@@ -149,57 +186,69 @@ def write_document(
     Returns:
         The path of the written document.
     """
+    from soliplex.agents.sidecar import DocumentWrite
+    from soliplex.agents.sidecar import Sidecars
+    from soliplex.agents.store import get_document_store
+
+    store = get_document_store(source, download_dir)
     rel = uri_to_relpath(uri, mime_type=mime_type)
-    target = source_dir(source, download_dir) / rel
-    target.parent.mkdir(parents=True, exist_ok=True)
+    key = rel.as_posix()
+    log_extension_choice(uri, rel, mime_type)
+    target = store.target.root / rel
 
     data = content.encode("utf-8") if isinstance(content, str) else content
-    target.write_bytes(data)
-
-    sidecar = target.with_name(target.name + META_SUFFIX)
-    payload = {
-        "mime_type": mime_type,
-        "source": source,
-        "source_uri": uri,
-        "ingestion_type": ingestion_type,
-        "sha256": hashlib.sha256(data, usedforsecurity=False).hexdigest(),
-        "size": len(data),
-        "metadata": metadata or {},
-    }
-    if source_url is not None:
-        payload["source_url"] = source_url
-    sidecar.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    # The document and its sidecars occupy distinct keys, so they go together:
+    # against object storage each is a round trip, and a document costs one
+    # instead of one-per-object. The consequence is that a failed document
+    # write can leave a sidecar behind, because both were already in flight.
+    # That is safe -- no state row is recorded for a failed write, so the
+    # sidecar has nothing claiming it and the reconcile sweep removes it as an
+    # orphan on the next clean run.
+    await asyncio.gather(
+        store.write(key, data),
+        Sidecars(store).write_all(
+            key,
+            DocumentWrite(
+                source=source,
+                uri=uri,
+                content=data,
+                mime_type=mime_type,
+                metadata=metadata or {},
+                ingestion_type=ingestion_type,
+                source_url=source_url,
+            ),
+        ),
+    )
     logger.info("wrote %s (%d bytes)", target, len(data))
     return target
 
 
-def delete_document(
+async def delete_document(
     source: str,
     uri: str,
     *,
     mime_type: str | None = None,
     download_dir: str | None = None,
-) -> bool:
+) -> None:
     """Remove a document and its sidecar (used for stale-file cleanup).
+
+    Idempotent, and silent about what was actually there: see
+    :meth:`~soliplex.agents.store.DocumentStore.delete` for why no existence
+    result is returned. A caller that needs one checks first.
 
     Args:
         source: Source identifier.
         uri: Source URI of the document to remove.
         mime_type: MIME type (only needed to reproduce a synthesized extension).
         download_dir: Override for ``settings.download_dir``.
-
-    Returns:
-        True if the document or its sidecar existed and was removed.
     """
-    rel = uri_to_relpath(uri, mime_type=mime_type)
-    target = source_dir(source, download_dir) / rel
-    removed = False
-    for path in (target, target.with_name(target.name + META_SUFFIX)):
-        try:
-            path.unlink()
-            removed = True
-        except FileNotFoundError:
-            pass
-    if removed:
-        logger.info("deleted stale document %s", target)
-    return removed
+    from soliplex.agents.sidecar import Sidecars
+    from soliplex.agents.store import get_document_store
+
+    store = get_document_store(source, download_dir)
+    key = uri_to_relpath(uri, mime_type=mime_type).as_posix()
+    await asyncio.gather(
+        store.delete(key),
+        Sidecars(store).delete_all(key),
+    )
+    logger.info("deleted document %s", store.uri(key))

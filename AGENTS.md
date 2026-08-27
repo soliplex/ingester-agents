@@ -37,7 +37,9 @@ src/soliplex/agents/
 ├── cli.py              # Main Typer CLI entry point
 ├── config.py           # Pydantic settings + manifest models
 ├── local_state.py      # Local sync state (content hashes, commit SHAs)
-├── local_store.py      # Writing documents + .meta.json sidecars to DOWNLOAD_DIR
+├── store.py            # DownloadTarget + DocumentStore (local | s3) -- where documents live
+├── sidecar/            # Sidecar kinds (.meta.json), their format and addressing
+├── local_store.py      # Writing documents + sidecars through the store
 ├── retry.py            # Retry helpers
 ├── common/
 │   └── config.py       # File validation utilities
@@ -130,12 +132,14 @@ uv run pytest tests/unit/test_manifest_runner.py
 ```
 
 **Requirements:**
+
 - 100% branch coverage for non-excluded code
 - Unit tests in `tests/unit/`
 - Functional tests in `tests/functional/` (skipped by default)
 - Mock external services and subprocesses (GitHub, Gitea, `haiku-ingester`)
 
 **Coverage Exclusions:**
+
 - `*/cli.py` - CLI modules
 - `*/app.py` - App orchestration
 - `*/templates/*` - Jinja2 templates
@@ -147,6 +151,7 @@ uv run pytest tests/unit/test_manifest_runner.py
 
 ```bash
 DOWNLOAD_DIR=downloads                       # Where fetched documents are written
+                                             # (a key prefix when DOWNLOAD_S3_BUCKET is set)
 STATE_DIR=sync_state                         # Local sync state (one SQLite file per source)
 ```
 
@@ -263,14 +268,38 @@ Each manifest maps to one `source`. All of a source's documents live under
 source under `STATE_DIR`. Content hashes recorded in sync state enable
 incremental ingestion (only new/changed files are written).
 
+Where that is depends on the resolved **download target** (`store.py`): the
+local filesystem, or an S3 bucket when `DOWNLOAD_S3_BUCKET` is set, or
+whatever a manifest's `config.download_store` overrides it to. Nothing outside
+`store.py` branches on the backend -- callers pass source-relative keys and the
+target owns every layer of prefixing.
+
+A configured bucket may be a bare name or an `s3://bucket/prefix` URI; both
+go through `split_bucket()`, and a prefix there becomes the outermost layer,
+ahead of `DOWNLOAD_DIR`. `DownloadTarget.bucket` therefore holds whatever was
+configured -- use `bucket_name` when an API wants the bucket itself.
+
+Two consequences worth knowing before changing anything here:
+
+- The state filename is qualified by target (a digest suffix; a local default
+  keeps the historical unqualified name). Swapping a source's store therefore
+  opens fresh state and re-fetches, rather than reporting everything unchanged
+  and writing nothing.
+- The reconcile sweep deletes every object under a source that is not in
+  `expected`, and `expected` is derived from the registered sidecar kinds. Add
+  a sidecar kind by registering a `SidecarKind` in `sidecar/`; do not hard-code
+  a suffix anywhere, or the sweep will delete it.
+
 ### haiku-rag Load Serialization
 
 After each manifest run (scheduler, startup, or CLI), a `haiku-ingester`
 load is queued for the source. Inside the server a single worker drains a
 global FIFO queue (`server/haiku_queue.py`), so only one load runs at a
 time; the CLI runs loads sequentially for the same effect. The subprocess
-inherits the parent environment plus injected `SOURCE` (sanitized
-download-folder name) and `DOWNLOAD_DIR`. See `manifest/haiku_loader.py`.
+inherits the parent environment plus the vars from the run's `LoadContext`
+(`manifest/context.py`): `SOURCE` (sanitized download-folder name),
+`DOWNLOAD_DIR`, and `DOWNLOAD_URI` (the resolved base URI, set in both storage
+modes so one config form works either way). See `manifest/haiku_loader.py`.
 
 ### haiku-rag Database Maintenance
 
@@ -286,6 +315,7 @@ raises on failure, because the post-process chain stops on the first error.
 ### Incremental Sync (SCM)
 
 Commit-based tracking for efficient syncing:
+
 1. Get last processed commit SHA from local sync state
 2. Fetch commits since that SHA
 3. Extract changed file paths
@@ -295,6 +325,7 @@ Commit-based tracking for efficient syncing:
 ## File Organization
 
 When adding features:
+
 - Agent logic goes in `{agent}/app.py`
 - CLI commands go in `{agent}/cli.py`
 - API endpoints go in `server/routes/{agent}.py`
@@ -318,6 +349,7 @@ When adding features:
 ## Commit Standards
 
 When asked to commit:
+
 - Use conventional commit format
 - Include `Co-Authored-By: Claude <noreply@anthropic.com>` trailer
 - Stage specific files, avoid `git add -A`

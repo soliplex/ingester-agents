@@ -1,0 +1,37 @@
+# Writing one source's documents to object storage while others stay local.
+#
+# The installation default is whatever DOWNLOAD_S3_BUCKET / DOWNLOAD_DIR say;
+# this block overrides it for this source alone, which is how a migration is
+# done one source at a time.
+#
+# Before the first run:
+#   si-agent manifest migrate-store example-manifests/s3-download-store.yml --dry-run
+#   si-agent manifest migrate-store example-manifests/s3-download-store.yml
+# (skip that to re-fetch from upstream instead -- both work.)
+id: s3-download-store
+name: S3 Download Store
+source: migrated-docs
+
+config:
+  download_store:
+    # "s3" forces object storage; "fs" forces local disk even when the
+    # installation default is S3, which is how a source is pinned or rolled
+    # back. Omit the whole block to inherit the default.
+    target: s3
+    # A bare name or a full s3://bucket/prefix URI; a prefix here nests `dir`
+    # beneath it, so this is the same target as bucket: my-documents with
+    # dir: ingester/downloads.
+    bucket: s3://my-documents/ingester   # optional; defaults to DOWNLOAD_S3_BUCKET
+    dir: downloads                       # optional; defaults to DOWNLOAD_DIR
+
+  # A source on object storage needs a haiku-rag config whose source stanza is
+  # `type: s3` with `uri: ${DOWNLOAD_URI}`. DOWNLOAD_URI is injected
+  # for every load and holds the resolved base URI in both modes, so one config
+  # form works either way.
+  haiku_config: haiku.rag.s3.yaml
+
+components:
+  - name: docs
+    type: webdav
+    url: https://webdav.example.com
+    path: /documents
