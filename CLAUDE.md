@@ -99,7 +99,7 @@ src/soliplex/agents/
 └── server/             # FastAPI REST API
     ├── __init__.py     # App setup, CORS, scheduler, lifespan
     ├── auth.py         # API key and OAuth2 proxy auth
-    ├── locks.py        # Per-manifest execution locks
+    ├── manifest_queue.py  # Single-worker queue serializing manifest runs
     ├── haiku_queue.py  # Global FIFO queue serializing haiku-rag loads
     └── routes/         # Endpoint handlers (fs, scm, webdav, web, manifest)
 ```
