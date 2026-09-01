@@ -1,5 +1,6 @@
 """Tests for soliplex.agents.webdav.app module."""
 
+import asyncio
 import hashlib
 import json
 from unittest.mock import AsyncMock
@@ -13,6 +14,7 @@ from soliplex.agents import local_state
 from soliplex.agents import local_store
 from soliplex.agents import store as agent_store
 from soliplex.agents.webdav import app as webdav_app
+from soliplex.agents.webdav.async_client import AsyncWebDAVClient
 from soliplex.agents.webdav.async_client import WebDAVResponse
 
 
@@ -640,3 +642,208 @@ async def test_load_inventory_from_urls_updates_state(tmp_path, local_env):
     state = local_state.load_file_state("test-source")
     assert "/documents/test.md" in state
     assert state["/documents/test.md"]["sha256"] == hashlib.sha256(b"downloaded", usedforsecurity=False).hexdigest()
+
+
+# --- Phase A: shared client, bounded concurrency, parallel listing ---
+
+
+def _row(name, etag='"e"'):
+    """A cache-miss inventory row for *name*."""
+    return {
+        "path": name,
+        "sha256": None,
+        "_etag": etag,
+        "metadata": {"size": 0, "content-type": "text/markdown"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_reuses_one_client_for_the_whole_run(local_env, monkeypatch):
+    """One session for N files, not one per file."""
+    monkeypatch.setattr(webdav_app.settings, "webdav_max_concurrent_requests", 3)
+    sessions = []
+    closed = []
+
+    async def fake_ensure_session(self):
+        sessions.append(id(self))
+        return object()
+
+    async def fake_aclose(self):
+        closed.append(id(self))
+
+    async def fake_download(self, path):
+        return b"body", "text/markdown"
+
+    config = [_row(f"doc{i}.md") for i in range(12)]
+    with (
+        patch.object(AsyncWebDAVClient, "_ensure_session", fake_ensure_session),
+        patch.object(AsyncWebDAVClient, "aclose", fake_aclose),
+        patch.object(AsyncWebDAVClient, "download", fake_download),
+        patch.object(webdav_app.local_store, "write_document", new_callable=AsyncMock),
+        patch.object(webdav_app.local_state, "upsert_file"),
+    ):
+        result = await webdav_app.load_inventory("", "test-source", config=config, webdav_url="https://dav.example.com")
+
+    assert len(result["ingested"]) == 12
+    assert len(sessions) == 1
+    assert len(closed) == 1
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_downloads_up_to_the_configured_concurrency(local_env, monkeypatch):
+    """Downloads overlap, bounded by webdav_max_concurrent_requests."""
+    monkeypatch.setattr(webdav_app.settings, "webdav_max_concurrent_requests", 4)
+    inflight = 0
+    peak = 0
+
+    async def fake_do_ingest(*args, **kwargs):
+        nonlocal inflight, peak
+        inflight += 1
+        peak = max(peak, inflight)
+        await asyncio.sleep(0.01)
+        inflight -= 1
+        return {"result": "success"}
+
+    config = [_row(f"doc{i}.md") for i in range(12)]
+    with patch("soliplex.agents.webdav.app.do_ingest", side_effect=fake_do_ingest):
+        result = await webdav_app.load_inventory("", "test-source", config=config)
+
+    assert len(result["ingested"]) == 12
+    assert peak == 4
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_merges_outcomes_in_inventory_order(local_env, monkeypatch):
+    """Results land in inventory order regardless of completion order."""
+    monkeypatch.setattr(webdav_app.settings, "webdav_max_concurrent_requests", 6)
+
+    async def fake_do_ingest(base_path, uri, *args, **kwargs):
+        # Finish in reverse order so completion order cannot be the source.
+        await asyncio.sleep(0.02 - 0.002 * int(uri[3]))
+        if uri == "doc1.md":
+            return {"error": "boom"}
+        if uri == "doc2.md":
+            return {"not_found": True, "uri": uri}
+        if uri == "doc3.md":
+            raise RuntimeError("exploded")
+        if uri == "doc4.md":
+            return {"skipped": "content type not allowed", "uri": uri}
+        return {"result": "success"}
+
+    config = [_row(f"doc{i}.md") for i in range(6)]
+    with patch("soliplex.agents.webdav.app.do_ingest", side_effect=fake_do_ingest):
+        result = await webdav_app.load_inventory("", "test-source", config=config)
+
+    assert result["ingested"] == ["doc0.md", "doc5.md"]
+    assert [e["uri"] for e in result["errors"]] == ["doc1.md", "doc3.md"]
+    assert result["errors"][1]["error"] == "exploded"
+    assert result["not_found"] == ["doc2.md"]
+
+
+@pytest.mark.asyncio
+async def test_delete_stale_still_suppressed_when_a_concurrent_download_fails(local_env, monkeypatch):
+    """A single failure anywhere must still block the stale sweep."""
+    monkeypatch.setattr(webdav_app.settings, "webdav_max_concurrent_requests", 5)
+
+    async def fake_do_ingest(base_path, uri, *args, **kwargs):
+        if uri == "doc3.md":
+            raise RuntimeError("exploded")
+        return {"result": "success"}
+
+    config = [_row(f"doc{i}.md") for i in range(6)]
+    with (
+        patch("soliplex.agents.webdav.app.do_ingest", side_effect=fake_do_ingest),
+        patch.object(webdav_app.local_state, "reconcile_documents", new_callable=AsyncMock) as mock_reconcile,
+    ):
+        result = await webdav_app.load_inventory("", "test-source", config=config, delete_stale=True)
+
+    assert result["delete_stale_result"] is None
+    mock_reconcile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_handles_tree_deeper_than_the_limit(monkeypatch):
+    """A chain deeper than the semaphore must not deadlock.
+
+    The limiter is held for one PROPFIND at a time; holding it across the
+    recursive gather would wedge here.
+    """
+    monkeypatch.setattr(webdav_app.settings, "webdav_max_concurrent_requests", 2)
+    depth = 8
+
+    async def fake_ls(path, detail=True):
+        level = path.count("/")
+        if level < depth:
+            return [
+                {"name": "sub", "type": "directory", "content_length": 0},
+                {"name": f"f{level}.md", "type": "file", "content_length": 1, "etag": '"e"'},
+            ]
+        return [{"name": f"leaf{level}.md", "type": "file", "content_length": 1, "etag": '"e"'}]
+
+    client = AsyncMock()
+    client.ls = AsyncMock(side_effect=fake_ls)
+
+    files = await asyncio.wait_for(webdav_app.recursive_listdir_webdav(client, "/root"), timeout=5)
+    assert len(files) == depth
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_lists_siblings_concurrently(monkeypatch):
+    """Sibling directories are listed in parallel up to the limit."""
+    monkeypatch.setattr(webdav_app.settings, "webdav_max_concurrent_requests", 4)
+    inflight = 0
+    peak = 0
+
+    async def fake_ls(path, detail=True):
+        nonlocal inflight, peak
+        inflight += 1
+        peak = max(peak, inflight)
+        await asyncio.sleep(0.01)
+        inflight -= 1
+        if path == "/root":
+            return [{"name": f"d{i}", "type": "directory", "content_length": 0} for i in range(8)]
+        return [{"name": "f.md", "type": "file", "content_length": 1, "etag": '"e"'}]
+
+    client = AsyncMock()
+    client.ls = AsyncMock(side_effect=fake_ls)
+
+    files = await webdav_app.recursive_listdir_webdav(client, "/root")
+    assert len(files) == 8
+    assert peak == 4
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_propagates_connection_errors_from_a_subtree():
+    """A connection-class failure anywhere aborts the whole walk."""
+
+    async def fake_ls(path, detail=True):
+        if path == "/root":
+            return [{"name": "d0", "type": "directory", "content_length": 0}]
+        raise TimeoutError("gone")
+
+    client = AsyncMock()
+    client.ls = AsyncMock(side_effect=fake_ls)
+
+    with pytest.raises(TimeoutError):
+        await webdav_app.recursive_listdir_webdav(client, "/root")
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_keeps_partial_results_on_a_non_connection_error():
+    """A non-connection failure drops that subtree and keeps the siblings."""
+
+    async def fake_ls(path, detail=True):
+        if path == "/root":
+            return [
+                {"name": "bad", "type": "directory", "content_length": 0},
+                {"name": "good", "type": "directory", "content_length": 0},
+            ]
+        if path.endswith("/bad"):
+            raise ValueError("malformed listing")
+        return [{"name": "f.md", "type": "file", "content_length": 1, "etag": '"e"'}]
+
+    client = AsyncMock()
+    client.ls = AsyncMock(side_effect=fake_ls)
+
+    files = await webdav_app.recursive_listdir_webdav(client, "/root")
+    assert [f["path"] for f in files] == ["/root/good/f.md"]
