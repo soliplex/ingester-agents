@@ -3,6 +3,8 @@
 import datetime
 import logging
 import sqlite3
+from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -471,3 +473,106 @@ def test_state_path_qualified_for_a_local_dir_override(state_env):
 
     other = DownloadTarget(dir="/somewhere/else", source="s")
     assert local_state.get_state_path("s", other).name != "s.db"
+
+
+# --- connection cache / WAL ---
+
+
+def test_connection_is_reused_across_calls(state_env):
+    """The same handle serves every write, rather than one open per document."""
+    local_state.upsert_file("s", "a.md", "sha-a")
+    first = dict(local_state._connections)
+    local_state.upsert_file("s", "b.md", "sha-b")
+
+    assert len(first) == 1
+    assert local_state._connections == first
+    assert set(local_state.load_file_state("s")) == {"a.md", "b.md"}
+
+
+def test_connection_runs_in_wal_mode(state_env):
+    local_state.upsert_file("s", "a.md", "sha-a")
+    conn = next(iter(local_state._connections.values()))
+
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+
+def test_separate_sources_get_separate_connections(state_env):
+    local_state.upsert_file("one", "a.md", "sha-a")
+    local_state.upsert_file("two", "b.md", "sha-b")
+
+    assert len(local_state._connections) == 2
+    assert set(local_state.load_file_state("one")) == {"a.md"}
+    assert set(local_state.load_file_state("two")) == {"b.md"}
+
+
+def test_close_state_connections_drops_only_the_named_path(state_env):
+    local_state.upsert_file("one", "a.md", "sha-a")
+    local_state.upsert_file("two", "b.md", "sha-b")
+
+    local_state.close_state_connections(local_state.get_state_path("one"))
+
+    assert len(local_state._connections) == 1
+    # Reopening is transparent, and the data survived the close.
+    assert set(local_state.load_file_state("one")) == {"a.md"}
+
+
+def test_close_state_connections_with_no_path_drops_everything(state_env):
+    local_state.upsert_file("one", "a.md", "sha-a")
+    local_state.upsert_file("two", "b.md", "sha-b")
+
+    local_state.close_state_connections()
+
+    assert local_state._connections == {}
+
+
+def test_close_state_connections_is_a_noop_for_an_unknown_path(state_env):
+    local_state.close_state_connections(state_env / "never-opened.db")
+
+    assert local_state._connections == {}
+
+
+def test_reset_state_closes_the_handle_before_unlinking(state_env):
+    """Windows refuses to unlink an open file, so the close must come first."""
+    local_state.upsert_file("s", "a.md", "sha-a")
+    db = local_state.get_state_path("s")
+    assert db.is_file()
+
+    assert local_state.reset_state("s") is True
+
+    assert not db.is_file()
+    assert local_state._connections == {}
+    # A clean close checkpoints and removes the WAL sidecars.
+    assert not db.with_name(db.name + "-wal").exists()
+    assert local_state.load_file_state("s") == {}
+
+
+def test_state_file_is_complete_once_the_connection_is_closed(state_env):
+    """Under WAL the newest rows live in the sidecar until a clean close.
+
+    This is what makes ``relocate``'s ``copyfile`` safe.
+    """
+    for i in range(20):
+        local_state.upsert_file("s", f"doc{i}.md", f"sha-{i}")
+    db = local_state.get_state_path("s")
+    local_state.close_state_connections(db)
+
+    # Read the .db alone, exactly as a bare copy would see it.
+    conn = sqlite3.connect(str(db))
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 20
+
+
+def test_a_connection_that_cannot_be_configured_is_not_cached(state_env):
+    fake = MagicMock()
+    with (
+        patch.object(local_state.sqlite3, "connect", return_value=fake),
+        patch.object(local_state, "_prepare", side_effect=sqlite3.OperationalError("locked")),
+        pytest.raises(sqlite3.OperationalError),
+    ):
+        local_state.upsert_file("s", "a.md", "sha-a")
+
+    fake.close.assert_called_once()
+    assert local_state._connections == {}

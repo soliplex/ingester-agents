@@ -1,7 +1,9 @@
 """WebDAV agent core functionality."""
 
+import asyncio
 import hashlib
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiofiles
@@ -21,6 +23,58 @@ from soliplex.agents.webdav.async_client import create_async_webdav_client
 logger = logging.getLogger(__name__)
 
 _STRIP_KEYS = ("path", "sha256", "size", "source", "batch_id", "source_uri", "content-type", "_etag")
+
+
+@asynccontextmanager
+async def _client_for(
+    client: AsyncWebDAVClient | None,
+    webdav_url: str | None,
+    webdav_username: str | None,
+    webdav_password: str | None,
+):
+    """Yield *client* if given, else an owned one closed on exit.
+
+    A run threads a single client through discovery and every download so the
+    connection pool is reused: building one per file costs a TCP connect and
+    TLS handshake each time, which dominates an initial sync. Callers that
+    pass nothing (tests, direct entry points) keep the old own-it behaviour.
+    """
+    if client is not None:
+        yield client
+        return
+    owned = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
+    async with owned:
+        yield owned
+
+
+@asynccontextmanager
+async def _optional_shared_client(
+    webdav_url: str | None,
+    webdav_username: str | None,
+    webdav_password: str | None,
+):
+    """Yield a run-level client when one can be built, else ``None``.
+
+    A run may have no WebDAV URL at all -- a local ``base_path``, or a
+    prebuilt config with nothing left to fetch -- and warming a connection
+    pool must not be what makes those fail. Callers pass the result straight
+    to :func:`_client_for`, so ``None`` simply restores the old
+    create-per-call behaviour and the missing-URL error still surfaces at the
+    point that actually needed a connection.
+    """
+    try:
+        owned = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
+    except ValueError:
+        logger.debug("No WebDAV URL configured; not opening a shared client")
+        yield None
+        return
+    async with owned:
+        yield owned
+
+
+def _listing_semaphore() -> asyncio.Semaphore:
+    """Bound concurrent WebDAV requests to the configured limit."""
+    return asyncio.Semaphore(settings.webdav_max_concurrent_requests)
 
 
 def _doc_meta(row: dict, extra_metadata: dict[str, str] | None) -> dict:
@@ -133,6 +187,7 @@ async def build_config_from_urls(
     webdav_password: str = None,
     base_dir: str | None = None,
     source: str | None = None,
+    client: AsyncWebDAVClient | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Build config from a file containing one absolute WebDAV path per line.
@@ -156,11 +211,7 @@ async def build_config_from_urls(
     """
     from soliplex.agents.common.urls_file import read_urls_file
 
-    webdav_client = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
     allowed_extensions = settings.extensions
-    config = []
-    results = []
-
     cached_state = local_state.load_file_state(source) if source else {}
 
     lines = await read_urls_file(
@@ -171,22 +222,32 @@ async def build_config_from_urls(
         webdav_password=webdav_password,
     )
 
-    async with webdav_client:
-        for full_path in lines:
+    async with _client_for(client, webdav_url, webdav_username, webdav_password) as webdav_client:
+        semaphore = _listing_semaphore()
+
+        async def _probe(full_path: str) -> tuple[dict | None, dict]:
+            """Resolve one URL's validator and cache state.
+
+            Returns ``(config_row_or_None, result_row)`` so the caller can
+            rebuild both lists in input order.
+            """
             # Coarse pre-filter: allowed extension or none (extension-less
             # files are typed from the server header / content at download).
             if not passes_extension_prefilter(full_path, allowed_extensions):
                 logger.info(f"skipping {full_path}")
                 ext = Path(full_path).suffix.lstrip(".")
-                results.append({"url": full_path, "status": "skipped", "error_message": f"Extension .{ext} not allowed"})
-                continue
+                return None, {
+                    "url": full_path,
+                    "status": "skipped",
+                    "error_message": f"Extension .{ext} not allowed",
+                }
 
-            try:
-                # Validator for the cache check: prefer ETag, fall back to
-                # last-modified (this server omits ETags but sends modified).
-                server_etag = None
-                modified = None
-                server_content_type = None
+            # Validator for the cache check: prefer ETag, fall back to
+            # last-modified (this server omits ETags but sends modified).
+            server_etag = None
+            modified = None
+            server_content_type = None
+            async with semaphore:
                 try:
                     info = await webdav_client.info(full_path)
                     server_etag = info.get("etag")
@@ -205,47 +266,58 @@ async def build_config_from_urls(
                     except Exception:
                         logger.debug("Could not HEAD %s", full_path, exc_info=True)
 
-                server_token, token_source = _version_token(server_etag, modified)
+            server_token, token_source = _version_token(server_etag, modified)
+            if server_token:
+                logger.debug("validator for %s via %s: %s", full_path, token_source, server_token)
+            else:
+                logger.info("no etag or last-modified for %s -- will re-download every run", full_path)
+
+            cached_entry = cached_state.get(full_path)
+            # Provisional type from the server header (falls back to the
+            # extension). The authoritative type is resolved from headers
+            # + content at download time in do_ingest.
+            mime_type = detect_mime_type(full_path, header_type=server_content_type)
+
+            if server_token and cached_entry and cached_entry.get("etag") == server_token:
+                # Cache hit — reuse cached SHA256, no download
+                logger.debug("cache HIT for %s (validator=%s via %s)", full_path, server_token, token_source)
+                rec = {
+                    "path": full_path,
+                    "sha256": cached_entry["sha256"],
+                    "metadata": {
+                        "size": cached_entry.get("size", 0),
+                        "content-type": mime_type,
+                    },
+                    "_etag": server_token,
+                }
+            else:
+                # Cache miss — defer download to write step
+                rec = {
+                    "path": full_path,
+                    "sha256": None,
+                    "metadata": {
+                        "size": 0,
+                        "content-type": mime_type,
+                    },
+                }
                 if server_token:
-                    logger.debug("validator for %s via %s: %s", full_path, token_source, server_token)
-                else:
-                    logger.debug("no etag or last-modified for %s -- will re-download every run", full_path)
+                    rec["_etag"] = server_token
+            return rec, {"url": full_path, "status": "success", "error_message": None}
 
-                cached_entry = cached_state.get(full_path)
-                # Provisional type from the server header (falls back to the
-                # extension). The authoritative type is resolved from headers
-                # + content at download time in do_ingest.
-                mime_type = detect_mime_type(full_path, header_type=server_content_type)
+        probed = await asyncio.gather(*(_probe(line) for line in lines), return_exceptions=True)
 
-                if server_token and cached_entry and cached_entry.get("etag") == server_token:
-                    # Cache hit — reuse cached SHA256, no download
-                    logger.debug("cache HIT for %s (validator=%s via %s)", full_path, server_token, token_source)
-                    rec = {
-                        "path": full_path,
-                        "sha256": cached_entry["sha256"],
-                        "metadata": {
-                            "size": cached_entry.get("size", 0),
-                            "content-type": mime_type,
-                        },
-                        "_etag": server_token,
-                    }
-                else:
-                    # Cache miss — defer download to write step
-                    rec = {
-                        "path": full_path,
-                        "sha256": None,
-                        "metadata": {
-                            "size": 0,
-                            "content-type": mime_type,
-                        },
-                    }
-                    if server_token:
-                        rec["_etag"] = server_token
-                config.append(rec)
-                results.append({"url": full_path, "status": "success", "error_message": None})
-            except Exception as e:
-                logger.exception(f"Error processing {full_path}")
-                results.append({"url": full_path, "status": "error", "error_message": str(e)})
+    # Rebuilt in input order so both lists match the sequential version.
+    config = []
+    results = []
+    for full_path, outcome in zip(lines, probed, strict=True):
+        if isinstance(outcome, BaseException):
+            logger.error("Error processing %s", full_path, exc_info=outcome)
+            results.append({"url": full_path, "status": "error", "error_message": str(outcome)})
+            continue
+        rec, result = outcome
+        if rec is not None:
+            config.append(rec)
+        results.append(result)
 
     return config, results
 
@@ -318,6 +390,7 @@ async def build_config(
     webdav_username: str = None,
     webdav_password: str = None,
     source: str | None = None,
+    client: AsyncWebDAVClient | None = None,
 ) -> list[dict]:
     """
     Scan a WebDAV directory and create inventory configuration.
@@ -331,11 +404,12 @@ async def build_config(
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
         source: Source identifier used for the ETag cache lookup
+        client: Existing client to reuse; one is created and closed here when
+            omitted.
 
     Returns:
         List of file configuration dictionaries
     """
-    webdav_client = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
     allowed_extensions = settings.extensions
     config = []
     cache_hits = 0
@@ -352,7 +426,7 @@ async def build_config(
         len(cached_state),
     )
 
-    async with webdav_client:
+    async with _client_for(client, webdav_url, webdav_username, webdav_password) as webdav_client:
         # Recursively list all files
         files = await recursive_listdir_webdav(webdav_client, webdav_path)
 
@@ -406,7 +480,7 @@ async def build_config(
                     server_token,
                 )
             else:
-                logger.debug(
+                logger.info(
                     "no etag or last-modified for %s (checked %s) -- will re-download every run",
                     full_path,
                     etag_source,
@@ -467,23 +541,45 @@ async def build_config(
     return config
 
 
-async def recursive_listdir_webdav(webdav_client: AsyncWebDAVClient, path: str) -> list[dict]:
+# Failures that mean the server or the network is unusable, rather than one
+# directory being unreadable. These propagate; anything else degrades to
+# partial results for that subtree.
+_LISTING_FATAL = (TimeoutError, ConnectionError, aiohttp.ClientError, ResourceNotFound)
+
+
+async def recursive_listdir_webdav(
+    webdav_client: AsyncWebDAVClient,
+    path: str,
+    semaphore: asyncio.Semaphore | None = None,
+) -> list[dict]:
     """
     Recursively list files in a WebDAV directory.
+
+    Sibling directories are listed concurrently, bounded by
+    ``webdav_max_concurrent_requests``. The upstream server only honours
+    ``Depth: 1``, so the number of PROPFINDs is fixed at one per directory;
+    overlapping them is what removes the round-trip-per-directory wait.
 
     Args:
         webdav_client: Async WebDAV client instance
         path: Directory path to list
+        semaphore: Shared request limiter; created on the first call and
+            passed down so the whole walk shares one budget.
 
     Returns:
         List of file info dictionaries with 'path' and 'size'
     """
-    file_list = []
+    semaphore = semaphore or _listing_semaphore()
+    file_list: list[dict] = []
+    subdirs: list[str] = []
 
     logger.debug(f"Listing WebDAV directory: {path}")
 
     try:
-        resources = await webdav_client.ls(path, detail=True)
+        # Held for this PROPFIND only. Keeping it across the recursive gather
+        # below would deadlock as soon as the tree is deeper than the limit.
+        async with semaphore:
+            resources = await webdav_client.ls(path, detail=True)
         for resource in resources:
             rel_name = resource["name"]
             logger.debug(f"Found resource: {rel_name}, type: {resource.get('type', 'unknown')}")
@@ -495,8 +591,7 @@ async def recursive_listdir_webdav(webdav_client: AsyncWebDAVClient, path: str) 
             full_resource_path = f"{path.rstrip('/')}/{rel_name.lstrip('/')}"
 
             if resource["type"] == "directory":
-                subdir_files = await recursive_listdir_webdav(webdav_client, full_resource_path)
-                file_list.extend(subdir_files)
+                subdirs.append(full_resource_path)
             else:
                 rec = {"path": full_resource_path, "size": resource.get("content_length", 0)}
                 if "etag" in resource:
@@ -504,7 +599,7 @@ async def recursive_listdir_webdav(webdav_client: AsyncWebDAVClient, path: str) 
                 for key in [x for x in resource.keys() if x not in ["href", "etag", "type", "name"]]:
                     rec[key] = resource.get(key)
                 file_list.append(rec)
-    except (TimeoutError, ConnectionError, aiohttp.ClientError, ResourceNotFound):
+    except _LISTING_FATAL:
         logger.exception(f"Connection error listing {path}")
         raise
     except Exception:
@@ -513,6 +608,29 @@ async def recursive_listdir_webdav(webdav_client: AsyncWebDAVClient, path: str) 
             path,
             exc_info=True,
         )
+        return file_list
+
+    if not subdirs:
+        return file_list
+
+    results = await asyncio.gather(
+        *(recursive_listdir_webdav(webdav_client, sub, semaphore) for sub in subdirs),
+        return_exceptions=True,
+    )
+    # Preserve the two-tier contract: a connection-class failure anywhere in
+    # the tree aborts the walk, while any other error leaves that subtree out
+    # and keeps the rest. Results stay in directory order regardless.
+    for sub, result in zip(subdirs, results, strict=True):
+        if isinstance(result, _LISTING_FATAL):
+            raise result
+        if isinstance(result, BaseException):
+            logger.error(
+                "Error listing WebDAV subtree %s, returning partial results",
+                sub,
+                exc_info=result,
+            )
+            continue
+        file_list.extend(result)
 
     return file_list
 
@@ -552,8 +670,45 @@ async def load_inventory(
         Dictionary with inventory, to_process, ingested, errors, and
         delete_stale_result
     """
+    async with _optional_shared_client(webdav_url, webdav_username, webdav_password) as webdav_client:
+        return await _load_inventory(
+            path=path,
+            source=source,
+            start=start,
+            end=end,
+            skip_invalid=skip_invalid,
+            webdav_url=webdav_url,
+            webdav_username=webdav_username,
+            webdav_password=webdav_password,
+            config=config,
+            extra_metadata=extra_metadata,
+            delete_stale=delete_stale,
+            client=webdav_client,
+        )
+
+
+async def _load_inventory(
+    *,
+    path: str,
+    source: str,
+    start: int,
+    end: int | None,
+    skip_invalid: bool,
+    webdav_url: str | None,
+    webdav_username: str | None,
+    webdav_password: str | None,
+    config: list[dict] | None,
+    extra_metadata: dict[str, str] | None,
+    delete_stale: bool,
+    client: AsyncWebDAVClient | None,
+):
+    """Body of :func:`load_inventory`, with the run's client already open.
+
+    *client* is ``None`` when no WebDAV URL is configured; callees then fall
+    back to creating their own, exactly as before.
+    """
     if config is None:
-        config = await build_config(path, webdav_url, webdav_username, webdav_password, source=source)
+        config = await build_config(path, webdav_url, webdav_username, webdav_password, source=source, client=client)
     base_path = path
     if skip_invalid:
         filtered = check_config(config)
@@ -577,16 +732,18 @@ async def load_inventory(
         "errors": errors,
         "not_found": not_found,
     }
-    for idx, row in enumerate(to_process):
-        uri = row["path"]
-        try:
+    semaphore = _listing_semaphore()
+
+    async def _fetch_one(idx: int, row: dict):
+        """Download and write one row, bounded by the shared request budget."""
+        async with semaphore:
+            uri = row["path"]
             meta = _doc_meta(row, extra_metadata)
-            etag = row.get("_etag")
             logger.info(f"writing {uri} {idx + 1}/{len(to_process)}")
             # Provisional type from discovery; do_ingest resolves the final
             # type from the GET Content-Type header and content sniffing.
             mime_type = (row.get("metadata") or {}).get("content-type")
-            res = await do_ingest(
+            return await do_ingest(
                 base_path,
                 uri,
                 meta,
@@ -595,23 +752,35 @@ async def load_inventory(
                 webdav_url,
                 webdav_username,
                 webdav_password,
-                etag=etag,
+                etag=row.get("_etag"),
+                client=client,
             )
-            if "error" in res:
-                logger.error(f"Error writing {uri}: {res['error']}")
-                errors.append({"uri": uri, "error": res["error"]})
-            elif res.get("not_found"):
-                # Definitive removal, not a blocking error: excluded from the
-                # reconcile's "should exist" set below so its local copy is
-                # deleted (when delete_stale is on).
-                not_found.append(uri)
-            elif res.get("skipped"):
-                logger.info("skipping %s: %s", uri, res["skipped"])
-            else:
-                ingested.append(uri)
-        except Exception as e:
-            logger.exception("Failed to write %s", uri)
-            errors.append({"uri": uri, "error": str(e)})
+
+    outcomes = await asyncio.gather(
+        *(_fetch_one(idx, row) for idx, row in enumerate(to_process)),
+        return_exceptions=True,
+    )
+
+    # Folded back in inventory order, not completion order, so the result
+    # lists are identical to the sequential version for the same inputs --
+    # and so every failure reaches `errors`, which gates delete_stale below.
+    for row, res in zip(to_process, outcomes, strict=True):
+        uri = row["path"]
+        if isinstance(res, BaseException):
+            logger.error("Failed to write %s", uri, exc_info=res)
+            errors.append({"uri": uri, "error": str(res)})
+        elif "error" in res:
+            logger.error(f"Error writing {uri}: {res['error']}")
+            errors.append({"uri": uri, "error": res["error"]})
+        elif res.get("not_found"):
+            # Definitive removal, not a blocking error: excluded from the
+            # reconcile's "should exist" set below so its local copy is
+            # deleted (when delete_stale is on).
+            not_found.append(uri)
+        elif res.get("skipped"):
+            logger.info("skipping %s: %s", uri, res["skipped"])
+        else:
+            ingested.append(uri)
 
     delete_stale_result = None
     if delete_stale and len(errors) == 0:
@@ -631,6 +800,7 @@ async def do_ingest(
     webdav_username: str = None,
     webdav_password: str = None,
     etag: str | None = None,
+    client: AsyncWebDAVClient | None = None,
 ):
     """
     Read a file from WebDAV (or local filesystem) and write it locally.
@@ -647,6 +817,9 @@ async def do_ingest(
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
         etag: Server ETag to record in local state, if known
+        client: Existing client to reuse; one is created and closed here when
+            omitted. Reusing the caller's client keeps the connection pool
+            warm across a run instead of paying a TLS handshake per file.
 
     Returns:
         Result dictionary with success/error information (or a ``skipped``
@@ -663,14 +836,29 @@ async def do_ingest(
         async with aiofiles.open(load_path, "rb") as f:
             doc_body = await f.read()
     else:
+        full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}" if base_path else uri
+        if webdav_url:
+            source_url = f"{webdav_url.rstrip('/')}/{full_path.lstrip('/')}"
         try:
-            webdav_client = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
-            full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}" if base_path else uri
-            if webdav_url:
-                source_url = f"{webdav_url.rstrip('/')}/{full_path.lstrip('/')}"
-            logger.info(f"Downloading from WebDAV: {full_path}")
-            async with webdav_client:
+            async with _client_for(client, webdav_url, webdav_username, webdav_password) as webdav_client:
+                logger.info(f"Downloading from WebDAV: {full_path}")
                 doc_body, header_type = await webdav_client.download(full_path)
+
+                # Capture a validator (ETag, else Last-Modified) via HEAD if
+                # the caller didn't already supply one from the listing step.
+                # Same client as the GET above, so this costs a round trip,
+                # not a connection.
+                if not etag and webdav_url:
+                    try:
+                        head_path = full_path if base_path else uri
+                        resp = await webdav_client.head(head_path)
+                        etag, token_source = _version_token(
+                            resp.headers.get("etag"),
+                            resp.headers.get("last-modified"),
+                        )
+                        logger.debug("do_ingest HEAD validator for %s via %s: %s", uri, token_source, etag)
+                    except Exception:
+                        logger.debug("Could not get validator via HEAD for %s", uri, exc_info=True)
         except ResourceNotFound:
             # 404 is a definitive "gone" signal (not a transient failure), so
             # report it separately -- the caller treats it as a removal when
@@ -680,22 +868,6 @@ async def do_ingest(
         except Exception as e:
             logger.exception(f"Error downloading {uri} from WebDAV")
             return {"error": str(e)}
-
-        # Capture a validator (ETag, else Last-Modified) via HEAD if the
-        # caller didn't already supply one from the listing step.
-        if not etag and webdav_url:
-            try:
-                wc = create_async_webdav_client(webdav_url, webdav_username, webdav_password)
-                head_path = full_path if base_path else uri
-                async with wc:
-                    resp = await wc.head(head_path)
-                etag, token_source = _version_token(
-                    resp.headers.get("etag"),
-                    resp.headers.get("last-modified"),
-                )
-                logger.debug("do_ingest HEAD validator for %s via %s: %s", uri, token_source, etag)
-            except Exception:
-                logger.debug("Could not get validator via HEAD for %s", uri, exc_info=True)
 
     # Resolve the final type: server GET header wins, then content sniffing,
     # then the filename extension. WebDAV relies on the server's mime type,
@@ -716,7 +888,7 @@ async def do_ingest(
     if etag:
         logger.debug("recording %s in local state (validator=%s)", uri, etag)
     else:
-        logger.debug("recording %s WITHOUT a validator -- it will re-download next run", uri)
+        logger.info("recording %s WITHOUT a validator -- it will re-download next run", uri)
     local_state.upsert_file(source, uri, sha256_hash, etag=etag, size=len(doc_body), mime_type=mime_type)
     return {"result": "success", "uri": uri, "_sha256": sha256_hash, "_size": len(doc_body)}
 
@@ -757,23 +929,31 @@ async def load_inventory_from_urls(
         Dictionary with inventory, to_process, ingested, errors, and
         url_results
     """
-    config, url_results = await build_config_from_urls(
-        urls_file, webdav_url, webdav_username, webdav_password, base_dir=base_dir, source=source
-    )
+    async with _optional_shared_client(webdav_url, webdav_username, webdav_password) as webdav_client:
+        config, url_results = await build_config_from_urls(
+            urls_file,
+            webdav_url,
+            webdav_username,
+            webdav_password,
+            base_dir=base_dir,
+            source=source,
+            client=webdav_client,
+        )
 
-    result = await load_inventory(
-        path="",
-        source=source,
-        start=start,
-        end=end,
-        skip_invalid=skip_invalid,
-        webdav_url=webdav_url,
-        webdav_username=webdav_username,
-        webdav_password=webdav_password,
-        config=config,
-        extra_metadata=extra_metadata,
-        delete_stale=delete_stale,
-    )
+        result = await _load_inventory(
+            path="",
+            source=source,
+            start=start,
+            end=end,
+            skip_invalid=skip_invalid,
+            webdav_url=webdav_url,
+            webdav_username=webdav_username,
+            webdav_password=webdav_password,
+            config=config,
+            extra_metadata=extra_metadata,
+            delete_stale=delete_stale,
+            client=webdav_client,
+        )
 
     result["url_results"] = url_results
     return result

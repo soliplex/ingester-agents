@@ -519,6 +519,7 @@ async def migrate_store(manifest: Manifest, dry_run: bool = False) -> dict:
     """
     import shutil
 
+    from soliplex.agents.local_state import close_state_connections
     from soliplex.agents.local_state import get_state_path
     from soliplex.agents.store import LocalDocumentStore
     from soliplex.agents.store import S3DocumentStore
@@ -564,6 +565,10 @@ async def migrate_store(manifest: Manifest, dry_run: bool = False) -> dict:
     old_state = get_state_path(manifest.source, origin)
     new_state = get_state_path(manifest.source, destination)
     if old_state.is_file() and old_state != new_state:
+        # Close first: under WAL the newest commits sit in the -wal sidecar
+        # until a clean close checkpoints them, so copying the .db alone
+        # while a connection is open would silently drop recent rows.
+        close_state_connections(old_state)
         new_state.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(old_state, new_state)
         result["state_copied"] = True

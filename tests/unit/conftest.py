@@ -6,6 +6,22 @@ from unittest.mock import MagicMock
 import aiohttp
 import pytest
 
+from soliplex.agents import local_state
+
+
+@pytest.fixture(autouse=True)
+def _close_state_connections():
+    """Drop cached SQLite handles between tests.
+
+    ``local_state`` keeps one connection per state file open for the life of
+    the process. Tests point ``state_dir`` at a fresh ``tmp_path`` each time,
+    so without this the handles accumulate and keep temp databases open --
+    which on Windows blocks their cleanup.
+    """
+    local_state.close_state_connections()
+    yield
+    local_state.close_state_connections()
+
 
 def create_async_context_manager(return_value):
     """Create an async context manager that returns the given value."""
