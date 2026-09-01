@@ -381,8 +381,8 @@ def download_target(target):
     The agents read `settings.download_dir` / `settings.download_s3_bucket`
     rather than taking a target, so a per-manifest override is applied by
     overriding those for the duration. This relies on manifest execution being
-    serialized, which the global semaphore in `server.locks` enforces -- the
-    same assumption `override_settings` already makes for `extensions`.
+    serialized, which the single worker in `server.manifest_queue` enforces --
+    the same assumption `override_settings` already makes for `extensions`.
 
     Threading the resolved target through `write_document` and the four agents
     instead would remove that assumption; it is a wider change than the

@@ -4,7 +4,6 @@ FastAPI server for Soliplex Agents.
 Provides REST API endpoints for filesystem, SCM, and WebDAV ingestion agents.
 """
 
-import asyncio
 import logging
 from datetime import UTC
 from datetime import datetime
@@ -18,13 +17,8 @@ from soliplex.agents.config import configure_logging
 from soliplex.agents.config import settings
 from soliplex.agents.manifest.schedule_registry import ScheduleRegistry
 
-from .haiku_queue import enqueue_load
-from .haiku_queue import start_worker
-from .haiku_queue import stop_worker
-from .locks import get_global_manifest_semaphore
-from .locks import get_manifest_lock
-from .locks import is_any_manifest_running
-from .locks import is_manifest_running
+from . import haiku_queue
+from . import manifest_queue
 from .routes.fs import fs_router
 from .routes.manifest import manifest_router
 from .routes.scm import scm_router
@@ -39,49 +33,6 @@ logger = logging.getLogger(__name__)
 _schedule_registry = ScheduleRegistry()
 
 
-async def run_scheduled_manifest(manifest_id: str, path: str) -> None:
-    """Execute one manifest, honoring the global one-at-a-time lock.
-
-    Skips (rather than queues) when another manifest is already running so
-    frequent schedules don't pile up. Failures are logged, not raised, since
-    this is invoked as a fire-and-forget task.
-
-    Args:
-        manifest_id: The manifest's id (used for locking and logging).
-        path: Path to the manifest YAML file, reloaded fresh on each run.
-    """
-    from soliplex.agents.manifest import runner as manifest_runner
-
-    if is_manifest_running(manifest_id):
-        logger.warning(
-            "Skipping manifest '%s': previous run still in progress",
-            manifest_id,
-        )
-        return
-    if is_any_manifest_running():
-        logger.info(
-            "Skipping manifest '%s': another manifest is running",
-            manifest_id,
-        )
-        return
-
-    try:
-        async with get_global_manifest_semaphore():
-            lock = get_manifest_lock(manifest_id)
-            async with lock:
-                loaded = manifest_runner.load_manifest(path)
-                result = await manifest_runner.run_manifest(loaded)
-                logger.info(
-                    "Manifest '%s' completed: %d components",
-                    manifest_id,
-                    len(result.get("results", [])),
-                )
-        if settings.haiku_load_enabled:
-            await enqueue_load(loaded)
-    except Exception:
-        logger.exception("Error running manifest '%s'", manifest_id)
-
-
 async def reconcile_manifest_schedules() -> None:
     """Rescan the manifest directory and fire due/newly-added manifests.
 
@@ -89,6 +40,11 @@ async def reconcile_manifest_schedules() -> None:
     added, removed, and re-scheduled manifest files take effect without a
     restart. Scheduled manifests fire when due; manifests without a schedule
     run once when first seen.
+
+    Due manifests are handed to :mod:`.manifest_queue` rather than executed
+    here, so a manifest that comes due while another is running waits its
+    turn instead of being dropped. This pass therefore never blocks on a
+    manifest run and stays safe to drive from a cron tick.
     """
     from soliplex.agents.manifest import runner as manifest_runner
 
@@ -134,10 +90,7 @@ async def reconcile_manifest_schedules() -> None:
         logger.info("Unregistered manifest '%s' (file removed)", mid)
 
     for entry in result.to_run:
-        asyncio.create_task(
-            run_scheduled_manifest(entry.manifest_id, entry.path),
-            name=f"manifest_run_{entry.manifest_id}",
-        )
+        await manifest_queue.enqueue_manifest(entry.manifest_id, entry.path)
 
 
 def configure_logfire(app: FastAPI) -> None:
@@ -183,17 +136,24 @@ async def lifespan(app: FastAPI):
         logger.info(f"Root path: {settings.root_path}")
 
     if settings.haiku_load_enabled:
-        start_worker()
+        haiku_queue.start_worker()
 
     if settings.scheduler_enabled:
+        # The worker must be draining before the first reconcile, or that
+        # pass would have nowhere to enqueue its due manifests.
+        manifest_queue.start_worker()
         # Run one reconcile immediately so schedules register and
         # unscheduled manifests run at startup; the reconciler cron picks
         # up changes on every subsequent tick.
         await reconcile_manifest_schedules()
 
     yield
+    # Stop the manifest worker first: it feeds the haiku queue, so draining
+    # it in the other order could enqueue a load onto a stopped worker.
+    if settings.scheduler_enabled:
+        await manifest_queue.stop_worker()
     if settings.haiku_load_enabled:
-        await stop_worker()
+        await haiku_queue.stop_worker()
     logger.info("soliplex-agents server stopped")
 
 

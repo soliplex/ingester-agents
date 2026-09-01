@@ -863,16 +863,27 @@ takes down the scheduler.
 
 **Execution behavior:**
 
-- **At most one manifest runs at a time.** A process-global lock serializes
-  all manifest execution (scheduled runs, startup runs, and API-triggered
-  runs), so different manifests never run concurrently. This bounds resource
-  use, since a single manifest can already fan out across its components.
-- **Overlapping schedules are dropped, not queued.** If a cron fires while
-  any manifest is still running, that fire is skipped (logged) instead of
-  being queued behind the in-progress run. This prevents pile-ups from
-  frequent schedules or long-running loads. Startup runs and explicit API
-  calls instead wait for the lock rather than being skipped.
-- **Single process only.** Because the cron state and locks are held in
+- **At most one manifest runs at a time.** Due manifests are handed to a
+  single-worker FIFO queue (`server/manifest_queue.py`) that drains them one
+  at a time, so different manifests never run concurrently. This bounds
+  resource use, since a single manifest can already fan out across its
+  components. Serialization is structural — the worker does one thing at a
+  time — rather than enforced by a lock each caller has to remember to take,
+  and the scheduler is the only thing that feeds the queue.
+- **Manifests due at the same time all run, in order.** A cron firing while
+  another manifest is in progress is queued behind it, not skipped, so no
+  scheduled occurrence is silently lost.
+- **A repeat occurrence of a still-pending manifest coalesces.** If a
+  manifest comes due again while its previous run is still queued or
+  running, the new occurrence folds into the pending one (logged) rather
+  than queueing a redundant second run — the pending run reloads the
+  manifest from disk and so covers the newer occurrence anyway. This bounds
+  the queue at the number of manifests on disk, so a cron faster than its
+  own runs cannot grow a backlog.
+- **Shutdown cancels the in-flight manifest.** The worker is cancelled and
+  awaited on shutdown rather than left orphaned; queued manifests are
+  dropped and picked up again by the reconciler on the next start.
+- **Single process only.** Because the cron state and run queue are held in
   memory, scheduling relies on the server running as a single worker (see
   [Starting the Server](#starting-the-server)). If you run multiple server
   instances, enable `SCHEDULER_ENABLED` on only one of them.
@@ -1249,7 +1260,7 @@ si-agent serve --reload
 ```
 
 **The server always runs as a single worker process.** The manifest
-scheduler keeps its cron state and execution locks in memory, so running
+scheduler keeps its cron state and run queue in memory, so running
 multiple workers would make each worker register every cron and run every
 manifest independently, with no cross-process coordination. Multi-worker
 mode is therefore intentionally not exposed, and any `WEB_CONCURRENCY`
@@ -1409,21 +1420,18 @@ curl -X POST http://localhost:8001/api/v1/web/run-from-file \
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/v1/manifest/run` | Run manifests from a file or directory path |
-| `POST` | `/api/v1/manifest/run-single` | Run a single manifest file |
 | `POST` | `/api/v1/manifest/validate` | Validate manifests without executing |
+
+Manifests are executed only by the cron scheduler, which feeds the
+single-worker queue in `server/manifest_queue.py`. There is deliberately no
+HTTP run endpoint: a second execution entry point would need a lock to
+serialize against the scheduler, and one worker draining one queue removes
+the need for that lock entirely. Use the `soliplex-agents` CLI for a one-off
+run outside the server.
 
 **Examples:**
 
 ```bash
-# Run all manifests in a directory
-curl -X POST http://localhost:8001/api/v1/manifest/run \
-  -F "path=/path/to/manifests"
-
-# Run a single manifest
-curl -X POST http://localhost:8001/api/v1/manifest/run-single \
-  -F "path=/path/to/manifest.yml"
-
 # Validate manifest files
 curl -X POST http://localhost:8001/api/v1/manifest/validate \
   -F "path=/path/to/manifests"
