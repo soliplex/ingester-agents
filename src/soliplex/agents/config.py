@@ -146,13 +146,13 @@ class Settings(BaseSettings):
     haiku_path: str | None = None  # Base dir for haiku-rag config files (HAIKU_PATH)
     haiku_default_config: str = "haiku.rag.default.yaml"  # Default config filename under haiku_path
     # Full command template; placeholders: {haiku_cfg} {db} {source} {lancedb_dir} {haiku_path}
-    haiku_load_command: str = "haiku-ingester --config={haiku_cfg} run-batch --db={db}"
+    haiku_load_command: str = "haiku-ingester --config={haiku_cfg} run-batch"
     haiku_load_timeout: int = 1800  # Timeout for a single load subprocess (seconds)
     haiku_load_cwd: str | None = None  # Working dir for the load subprocess (default: inherit)
 
     # haiku-rag maintenance settings (`manifest migrate` / `manifest vacuum`)
     # Placeholders: {verb} {haiku_cfg} {db} {source} {lancedb_dir} {haiku_path}
-    haiku_maintenance_command: str = "haiku-rag --config={haiku_cfg} {verb} --db={db}"
+    haiku_maintenance_command: str = "haiku-rag --config={haiku_cfg} {verb}"
     # Timeout for a single maintenance subprocess (seconds); higher than the
     # load timeout because a vacuum/compaction can outlast a batch load.
     haiku_maintenance_timeout: int = 3600
