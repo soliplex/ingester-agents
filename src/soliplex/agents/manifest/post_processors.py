@@ -3,8 +3,9 @@
 A post-process callback is referenced from a manifest's ``config.post_process``
 list by dotted path and invoked as ``method(source, **kwargs)`` after the
 ``haiku-ingester`` load for that source completes (see
-``docs/post-process-plan.md``). This module holds the callbacks that ship with
-ingester-agents.
+:mod:`soliplex.agents.manifest.post_process` for how a step is resolved and
+called, and the README's "Post-process callbacks" for how one is configured).
+This module holds the callbacks that ship with ingester-agents.
 """
 
 import logging

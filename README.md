@@ -1136,10 +1136,17 @@ config:
 - **Config auto-inject:** when a step omits `config` and the callable accepts
   one (an explicit `config` parameter or `**kwargs`), the manifest's resolved
   haiku config path is passed so the callback opens the store with the same
-  config the load used. While the callbacks run, `SOURCE` and `DOWNLOAD_DIR` are
-  set in the environment (as they are for the load subprocess), so a config that
-  interpolates `${SOURCE}` / `${DOWNLOAD_DIR}` loads in-process too. Other
-  `${VAR}` references must be present in the inherited environment.
+  config the load used. While the callbacks run, `SOURCE`, `DOWNLOAD_DIR` and
+  `DOWNLOAD_URI` are set in the environment (as they are for the load
+  subprocess) and restored afterwards, so a config interpolating them loads
+  in-process too. Other `${VAR}` references must be present in the inherited
+  environment — see [Variables the haiku-rag config
+  needs](#variables-the-haiku-rag-config-needs).
+- **Context auto-inject:** likewise for a `context` parameter, which receives
+  the run's `LoadContext` — the resolved download target, document store and
+  sidecar facade for this source. A callback that needs to read what the
+  manifest just downloaded takes `context` instead of rediscovering the
+  storage layout from the environment.
 - **Load outcome (`ingester_exit_code`):** callbacks fire regardless of the
   load result. The load's exit code (`0` on success, non-zero on failure,
   `None` on timeout) is auto-injected as an `ingester_exit_code` kwarg for
