@@ -180,15 +180,16 @@ MANIFEST_DIR=/path/to/manifests
 
 # haiku-rag loading (runs `haiku-ingester run-batch` after each manifest run)
 HAIKU_LOAD_ENABLED=false
-LANCEDB_DIR=/var/lib/lancedb          # holds <source>.lancedb per source
+LANCEDB_DIR=/var/lib/lancedb          # read by the haiku-rag config, which
+                                      # places <source>.lancedb under it
 HAIKU_PATH=/etc/haiku                  # base dir for haiku-rag config files
 # HAIKU_DEFAULT_CONFIG=haiku.rag.default.yaml   # config filename under HAIKU_PATH
-# HAIKU_LOAD_COMMAND=haiku-ingester --config={haiku_cfg} run-batch --db={db}
+# HAIKU_LOAD_COMMAND=haiku-ingester --config={haiku_cfg} run-batch
 # HAIKU_LOAD_TIMEOUT=1800
 # HAIKU_LOAD_CWD=/var/lib/ingester     # subprocess working dir (default: inherit)
 
 # haiku-rag maintenance (`si-agent manifest migrate` / `manifest vacuum`)
-# HAIKU_MAINTENANCE_COMMAND=haiku-rag --config={haiku_cfg} {verb} --db={db}
+# HAIKU_MAINTENANCE_COMMAND=haiku-rag --config={haiku_cfg} {verb}
 # HAIKU_MAINTENANCE_TIMEOUT=3600
 
 # S3-compatible storage. S3_ENDPOINT_URL is shared between urls_file reads
@@ -203,7 +204,11 @@ S3_ENDPOINT_URL=https://minio.example.com:9000
 # DOWNLOAD_S3_BUCKET=my-documents
 ```
 
-See [haiku-rag Loading](#haiku-rag-loading) for what these settings do.
+See [haiku-rag Loading](#haiku-rag-loading) for what these settings do. The
+haiku-rag config file needs a further set of its own — model and service
+endpoints, and the bucket variables in S3 mode — which fail the load when
+unset; see [Variables the haiku-rag config
+needs](#variables-the-haiku-rag-config-needs).
 
 ### Object Storage
 
@@ -896,8 +901,13 @@ that the manifest just wrote to `${DOWNLOAD_DIR}/<source>/` into a
 per-source LanceDB database. The default command is:
 
 ```bash
-haiku-ingester --config=${HAIKU_CFG} run-batch --db=${LANCEDB_DIR}/<source>.lancedb
+haiku-ingester --config=${HAIKU_CFG} run-batch
 ```
+
+Note what is *not* on that command line: a database. The haiku-rag config
+places it. See [Where the database comes from](#where-the-database-comes-from)
+below — a config that does not place one per source is the one
+misconfiguration here that fails quietly.
 
 - **One load at a time.** Inside the server, loads are drained from a
   single global FIFO queue by one worker, so only one `haiku-ingester`
@@ -911,20 +921,22 @@ haiku-ingester --config=${HAIKU_CFG} run-batch --db=${LANCEDB_DIR}/<source>.lanc
   (absolute path used as-is; relative resolved under `HAIKU_PATH`),
   falling back to `${HAIKU_PATH}/${HAIKU_DEFAULT_CONFIG}`
   (`haiku.rag.default.yaml`).
-- **Database** path is `${LANCEDB_DIR}/<slug>.lancedb`, where `<slug>` is
-  the source with whitespace replaced by hyphens
-  (`composite source` → `composite-source.lancedb`).
 - **Environment.** The subprocess inherits the server's environment plus
-  two injected variables:
+  three injected variables:
   - `SOURCE` — the sanitized download-folder name, so a haiku-rag config
     using `root: ${DOWNLOAD_DIR}/${SOURCE}` resolves to the ingested
-    documents.
+    documents, and one using
+    `databases: {db: ${LANCEDB_DIR}/${SOURCE}.lancedb}` gets a database per
+    source.
   - `DOWNLOAD_DIR` — `settings.download_dir`, so the path above resolves
     even when it was left at its default.
+  - `DOWNLOAD_URI` — the resolved base URI of the download store, set in
+    both filesystem and S3 mode so one config form works either way.
 
-  Any other `${VAR}` interpolated by the haiku-rag config (e.g.
-  `OLLAMA_BASE_URL`, `DOCLING1_BASE_URL`, `DOCLING2_BASE_URL`,
-  `EMBEDDINGS_BASE_URL`) must be present in the server's environment.
+  Any other `${VAR}` interpolated by the haiku-rag config (`LANCEDB_DIR`
+  included, along with e.g. `OLLAMA_BASE_URL`, `DOCLING1_BASE_URL`,
+  `DOCLING2_BASE_URL`, `EMBEDDINGS_BASE_URL`) must be present in the server's
+  environment.
 
 ```bash
 export HAIKU_LOAD_ENABLED=true
@@ -937,6 +949,99 @@ si-agent serve
 
 The CLI honors the same `HAIKU_LOAD_ENABLED` default; override per
 invocation with `si-agent manifest run <path> --load` / `--no-load`.
+
+##### Where the database comes from
+
+The agent does not choose the database. It passes `--config` and nothing else,
+and haiku-rag resolves the location from `lancedb.databases` in that file. So
+the config must place exactly one database, and must place a *different* one
+per source — which is what `${SOURCE}` is for:
+
+```yaml
+lancedb:
+  databases:
+    db: ${LANCEDB_DIR:-/lancedb}/${SOURCE}.lancedb
+```
+
+The entry name (`db` above) is arbitrary and never leaves the configuration.
+`${SOURCE}` in the location is what separates one source from another. Four
+cases, and only one of them is loud:
+
+| `lancedb.databases` | Result |
+|---|---|
+| One entry interpolating `${SOURCE}` | Correct: one database per source |
+| One entry, no `${SOURCE}` | Every source loads into **one shared database** |
+| Absent | Everything lands in `haiku.rag.lancedb` under `storage.data_dir`, resolved relative to `HAIKU_LOAD_CWD` |
+| Two or more entries | `haiku-ingester` refuses to start: it writes one database |
+
+The middle two run to completion and silently merge every source into one
+store, so check the resolved location in the load's log line the first time a
+config is deployed:
+
+```text
+Starting haiku load for source 'synced-docs' -> /var/lib/lancedb/synced-docs.lancedb
+```
+
+`LANCEDB_DIR` is read twice, and the two readers must agree: the haiku-rag
+config interpolates it to place the database, and the agent resolves
+`${LANCEDB_DIR}/<slug>.lancedb` for that log line, the run report, and the
+maintenance dedupe key. It is required even though the config is what actually
+places the database. The two spellings differ for a source containing
+whitespace — the agent slugifies (`composite source` →
+`composite-source.lancedb`) while `${SOURCE}` sanitizes (`composite
+source.lancedb`) — so prefer source ids without spaces.
+
+Working examples for both storage modes are in
+[`example-haiku-configs/`](example-haiku-configs/).
+
+##### Variables the haiku-rag config needs
+
+haiku expands `${VAR}` eagerly, when the config file is read — so a variable
+that is unset **or empty** fails the load before any document is touched:
+
+```text
+MissingEnvVarError: Config references unset or empty environment variable
+${QA_MODEL}. Set it, or use ${QA_MODEL:-default} to provide a fallback.
+```
+
+There is no partial start and nothing to inspect afterwards, so the whole set
+has to be present up front. These are what
+[`example-haiku-configs/`](example-haiku-configs/) reference; a config of your
+own can of course need fewer or more.
+
+| Variable | Supplied by | Required by | Purpose |
+|---|---|---|---|
+| `SOURCE` | injected per load | both examples | Sanitized source name. Separates each source's database, queue file and documents — **do not set it yourself** |
+| `DOWNLOAD_DIR` | injected per load, from `settings.download_dir` | both examples | Where the manifest run wrote the documents |
+| `DOWNLOAD_URI` | injected per load | neither example | Base URI of the download store; available for a config that wants one form across both storage modes |
+| `STATE_DIR` | environment | both examples | Holds the per-source ingester queue file |
+| `QA_MODEL` | environment | both examples | Vision model used to identify documents |
+| `QA_BASE_URL` | environment | both examples | OpenAI-compatible endpoint serving `QA_MODEL` |
+| `OLLAMA_BASE_URL` | environment | both examples | Ollama endpoint |
+| `DOCLING1_BASE_URL` | environment | both examples | First docling-serve instance |
+| `DOCLING2_BASE_URL` | environment | both examples | Second docling-serve instance |
+| `EMBEDDINGS_BASE_URL` | environment | both examples | Endpoint serving the embedding model |
+| `S3_BUCKET` | environment | `haiku.rag.s3.yaml` | Bucket URI holding the **databases** |
+| `S3_REGION` | environment | `haiku.rag.s3.yaml` | Region for that bucket |
+| `DOWNLOAD_S3_BUCKET` | environment | `haiku.rag.s3.yaml` | Bucket URI holding the **documents**; the same value the download store wrote with |
+| `LANCEDB_DIR` | environment | optional in both (`:-/lancedb`) | Base dir, or S3 key prefix, for the database |
+| `INGESTER_AUTH_TOKEN` | environment | only if `ingester.api.auth_token` is uncommented | Bearer token for the ingester's HTTP control plane |
+
+Two notes on that table:
+
+- **`LANCEDB_DIR` is only optional to the config.** The examples default it to
+  `/lancedb`, but ingester-agents itself refuses to run a load without it —
+  it resolves `${LANCEDB_DIR}/<slug>.lancedb` for the log line, the run report
+  and the maintenance dedupe key. Set it, and keep the two in step.
+- **Injected variables are not yours to set.** `SOURCE`, `DOWNLOAD_DIR` and
+  `DOWNLOAD_URI` are overwritten per load from the run's `LoadContext`; a value
+  exported in the server's environment is replaced, not merged. Post-process
+  callbacks, which load the same config in-process, see all three mirrored into
+  the process environment for the duration of the callbacks, then restored.
+
+`${VAR}` inside a YAML comment is never expanded — the file is parsed
+first, and expansion runs over the parsed data — so a commented-out setting
+costs nothing.
 
 #### Database Maintenance
 
@@ -961,19 +1066,23 @@ si-agent manifest vacuum  [PATH] [--json] [--timeout N] [--dry-run]
   `all` is a reserved word, so a file or directory literally named `all`
   cannot be addressed by name.
 - **Command** is configurable via `HAIKU_MAINTENANCE_COMMAND` (default
-  `haiku-rag --config={haiku_cfg} {verb} --db={db}`). Placeholders:
-  `{verb}`, `{haiku_cfg}`, `{db}`, `{source}`, `{lancedb_dir}`,
-  `{haiku_path}`. As with the load command, the template is tokenized before
-  substitution, so values containing spaces cannot inject extra arguments.
-- **Config file, database path, and environment** resolve exactly as they do
-  for a load: `config.haiku_config` (or `${HAIKU_PATH}/${HAIKU_DEFAULT_CONFIG}`),
-  `${LANCEDB_DIR}/<slug>.lancedb`, and the parent environment plus injected
-  `SOURCE` / `DOWNLOAD_DIR` so the haiku-rag config's `${VAR}` references
-  resolve. Output is streamed to the log line by line.
+  `haiku-rag --config={haiku_cfg} {verb}`). Placeholders: `{verb}`,
+  `{haiku_cfg}`, `{db}`, `{source}`, `{lancedb_dir}`, `{haiku_path}`. As with
+  the load command, the template is tokenized before substitution, so values
+  containing spaces cannot inject extra arguments.
+- **Config file, database, and environment** resolve exactly as they do for a
+  load: the config from `config.haiku_config` (or
+  `${HAIKU_PATH}/${HAIKU_DEFAULT_CONFIG}`) places the database (see [Where the
+  database comes from](#where-the-database-comes-from)), and the parent
+  environment plus injected `SOURCE` / `DOWNLOAD_DIR` / `DOWNLOAD_URI` let its
+  `${VAR}` references resolve. Output is streamed to the log line by line.
 - **One at a time.** Operations run strictly sequentially, the same capacity
   constraint that applies to loads.
 - **Deduplicated.** Manifests that share a source resolve to the same
-  database; it is processed once and the rest are reported as skipped.
+  database; it is processed once and the rest are reported as skipped. The
+  dedupe key is the agent's own `${LANCEDB_DIR}/<slug>.lancedb`, not the
+  location the config resolves to, so it matches reality only while the config
+  places the database under `${LANCEDB_DIR}` by source.
 - **Timeout** defaults to `HAIKU_MAINTENANCE_TIMEOUT` (3600s — higher than
   the load timeout because a compaction can outlast a batch load) and can be
   overridden per invocation with `--timeout`.
@@ -988,8 +1097,8 @@ paste-safe:
 
 ```console
 $ si-agent manifest vacuum --dry-run
-haiku-rag --config=/etc/haiku/haiku.rag.default.yaml vacuum --db=/var/lib/lancedb/synced-docs.lancedb
-haiku-rag --config=/etc/haiku/haiku.rag.default.yaml vacuum --db=/var/lib/lancedb/web-source.lancedb
+haiku-rag --config=/etc/haiku/haiku.rag.default.yaml vacuum
+haiku-rag --config=/etc/haiku/haiku.rag.web.yaml vacuum
 # composite source: skipped (duplicate db)
 ```
 
@@ -1232,7 +1341,12 @@ ls ./downloads/webdav-docs
 ### Example 4: Index Ingested Documents with haiku-rag
 
 ```bash
-# Set up environment
+# The haiku-rag config places the database; copy the example and keep its
+# `lancedb.databases` entry interpolating ${SOURCE}.
+mkdir -p ./haiku-config
+cp example-haiku-configs/haiku.rag.default.yaml ./haiku-config/
+
+# Set up environment. LANCEDB_DIR is what that config interpolates.
 export DOWNLOAD_DIR=./downloads
 export LANCEDB_DIR=./lancedb
 export HAIKU_PATH=./haiku-config
@@ -1241,6 +1355,11 @@ export HAIKU_LOAD_ENABLED=true
 # Run a manifest and load the result into ./lancedb/<source>.lancedb
 si-agent manifest run /path/to/manifest.yml --load
 ```
+
+The example config also interpolates `${STATE_DIR}` and the model/service URLs
+(`QA_MODEL`, `QA_BASE_URL`, `OLLAMA_BASE_URL`, `DOCLING1_BASE_URL`,
+`DOCLING2_BASE_URL`, `EMBEDDINGS_BASE_URL`); every one must be exported too, or
+the load fails on the missing variable.
 
 ## Server API
 
@@ -1640,6 +1759,7 @@ soliplex.agents/
 │           ├── templates/  # Issue rendering templates
 │           └── utils.py    # Utility functions
 ├── example-manifests/      # Example manifests (fs, scm, web, webdav, composite, delete-stale)
+├── example-haiku-configs/  # Example haiku-rag configs for the load step (local, S3)
 ├── tests/                  # Test suite
 │   └── unit/
 │       ├── test_server_*.py  # Server API tests
