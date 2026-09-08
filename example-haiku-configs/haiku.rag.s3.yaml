@@ -1,0 +1,125 @@
+# haiku-rag configuration for a manifest load, with both the database and the
+# documents in object storage.
+#
+# The same contract as haiku.rag.default.yaml -- ingester-agents passes no
+# `--db`, so this file places the database and `lancedb.databases` must
+# interpolate ${SOURCE} -- with two changes: the database location carries an
+# s3:// prefix, and the ingester reads an `s3` source rather than a local
+# directory.
+#
+# Use this when DOWNLOAD_S3_BUCKET moves the download store to S3. Point a
+# manifest at it with `config.haiku_config: haiku.rag.s3.yaml`, or make it the
+# default with HAIKU_DEFAULT_CONFIG.
+#
+# Required environment variables. Every ${VAR} without a `:-default` must be
+# set and non-empty, or the load fails before it starts with
+# `MissingEnvVarError` -- haiku expands them eagerly, when the file is read.
+#
+#   Injected by ingester-agents (do not set these yourself):
+#     SOURCE               sanitized source name; separates one source's
+#                          database, queue and documents from another's
+#     DOWNLOAD_DIR         where the manifest run wrote the documents
+#
+#   Must be in the server's environment:
+#     STATE_DIR            holds the per-source ingester queue file
+#     QA_MODEL             vision model used to identify documents
+#     QA_BASE_URL          OpenAI-compatible endpoint serving QA_MODEL
+#     OLLAMA_BASE_URL      Ollama endpoint
+#     DOCLING1_BASE_URL    first docling-serve instance
+#     DOCLING2_BASE_URL    second docling-serve instance
+#     EMBEDDINGS_BASE_URL  endpoint serving the embedding model
+#     S3_BUCKET            bucket URI holding the databases ("s3://my-lancedb")
+#     S3_REGION            region for that bucket
+#     DOWNLOAD_S3_BUCKET   bucket URI holding the documents; the same value
+#                          ingester-agents downloaded with
+#
+#   Optional:
+#     LANCEDB_DIR          key prefix under S3_BUCKET (default: /lancedb).
+#                          ingester-agents requires it regardless -- see
+#                          haiku.rag.default.yaml.
+#     INGESTER_AUTH_TOKEN  only if you uncomment ingester.api.auth_token
+
+lancedb:
+  databases:
+    # ${S3_BUCKET} is the bucket URI ("s3://my-lancedb"), so the location
+    # reads s3://my-lancedb/lancedb/<source>.lancedb. It is a separate
+    # variable from DOWNLOAD_S3_BUCKET (which places the *documents*) so the
+    # two can live in different buckets.
+    db: ${S3_BUCKET}${LANCEDB_DIR:-/lancedb}/${SOURCE}.lancedb
+  # Credentials for the LanceDB store. Object-store settings must be passed
+  # here: the Rust client behind LanceDB does not read the process
+  # environment the way the Python S3 clients do.
+  storage_options:
+    region: ${S3_REGION}
+
+storage:
+  data_dir: ./data
+  auto_vacuum: false
+  vacuum_retention_seconds: 0
+
+qa:
+  model:
+    provider: openai
+    name: ${QA_MODEL}
+    base_url: ${QA_BASE_URL}
+    vision: true
+
+providers:
+  ollama:
+    base_url: ${OLLAMA_BASE_URL}
+  docling_serve:
+    base_url:
+      - ${DOCLING1_BASE_URL}
+      - ${DOCLING2_BASE_URL}
+
+processing:
+  converter: docling-serve
+  split_pages: 10
+  chunker: docling-serve
+  chunking_tokenizer: ibm-granite/granite-docling-258M
+  conversion_options:
+    do_ocr: false
+    force_ocr: false
+    images_scale: 1.0
+    table_mode: accurate
+
+embeddings:
+  batch_size: 64
+  model:
+    provider: vllm
+    name: nvidia/llama-nemotron-embed-vl-1b-v2
+    vector_dim: 2048
+    base_url: ${EMBEDDINGS_BASE_URL}
+    multimodal: true
+
+ingester:
+  api:
+    host: 0.0.0.0
+    port: 8765
+    # auth_token: ${INGESTER_AUTH_TOKEN}
+
+  queue:
+    # Local even in S3 mode: the job queue is working state, not a document.
+    path: ${STATE_DIR}/${SOURCE}-s3-ingester.db
+
+  workers:
+    worker_count: 8
+    poll_idle_interval_s: 1.0
+    shutdown_grace_s: 60
+    retry:
+      max_attempts: 5
+      base_delay_s: 2.0
+      max_delay_s: 300.0
+      jitter: 0.25
+
+  sources:
+    - type: s3
+      id: ${SOURCE}
+      # ${DOWNLOAD_S3_BUCKET} and ${DOWNLOAD_DIR} are the same pair the
+      # download store wrote with, so this reads exactly what the manifest run
+      # just produced.
+      uri: ${DOWNLOAD_S3_BUCKET}${DOWNLOAD_DIR}/${SOURCE}
+      poll_interval_s: 300
+      delete_orphans: true
+      include_patterns: ["*.md", "*.pdf", "*.adoc", "*.pptx", "*.puml", "*.plantuml", "*.asciidoc", "*.docx", "*.xlsx", "*.ppsx", "*.txt", "*.csv"]
+      ignore_patterns: ["*.json", "*.meta.json"]

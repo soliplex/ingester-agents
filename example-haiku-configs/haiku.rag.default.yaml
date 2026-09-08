@@ -1,0 +1,117 @@
+# haiku-rag configuration for a manifest load, on local disk.
+#
+# ingester-agents runs `haiku-ingester --config=<this file> run-batch` after
+# each manifest run. It passes no `--db`, so THIS FILE places the database, and
+# `lancedb.databases` must interpolate ${SOURCE} to get one database per
+# manifest source. `${SOURCE}` and `${DOWNLOAD_DIR}` are injected into the
+# subprocess; every other ${VAR} here must be in the server's environment.
+#
+# Copy to ${HAIKU_PATH}/haiku.rag.default.yaml (the default file name), or
+# point a single manifest at a variant with `config.haiku_config`.
+#
+# Required environment variables. Every ${VAR} without a `:-default` must be
+# set and non-empty, or the load fails before it starts with
+# `MissingEnvVarError` -- haiku expands them eagerly, when the file is read.
+#
+#   Injected by ingester-agents (do not set these yourself):
+#     SOURCE               sanitized source name; separates one source's
+#                          database, queue and documents from another's
+#     DOWNLOAD_DIR         where the manifest run wrote the documents
+#
+#   Must be in the server's environment:
+#     STATE_DIR            holds the per-source ingester queue file
+#     QA_MODEL             vision model used to identify documents
+#     QA_BASE_URL          OpenAI-compatible endpoint serving QA_MODEL
+#     OLLAMA_BASE_URL      Ollama endpoint
+#     DOCLING1_BASE_URL    first docling-serve instance
+#     DOCLING2_BASE_URL    second docling-serve instance
+#     EMBEDDINGS_BASE_URL  endpoint serving the embedding model
+#
+#   Optional:
+#     LANCEDB_DIR          base dir for the database (default: /lancedb).
+#                          ingester-agents requires it regardless -- it
+#                          resolves ${LANCEDB_DIR}/<slug>.lancedb for the load
+#                          log line, the run report and the maintenance
+#                          dedupe key -- so set it and keep both in step.
+#     INGESTER_AUTH_TOKEN  only if you uncomment ingester.api.auth_token
+
+lancedb:
+  databases:
+    # Exactly one entry: haiku-ingester writes one database and refuses a
+    # config naming several. The name ("db") is arbitrary and never leaves the
+    # configuration; ${SOURCE} in the *location* is what separates sources.
+    db: ${LANCEDB_DIR:-/lancedb}/${SOURCE}.lancedb
+
+storage:
+  data_dir: ./data
+  auto_vacuum: false
+  vacuum_retention_seconds: 0
+
+# Vision model used to identify documents (the `qa` role).
+qa:
+  model:
+    provider: openai
+    name: ${QA_MODEL}
+    base_url: ${QA_BASE_URL}
+    vision: true
+
+providers:
+  ollama:
+    base_url: ${OLLAMA_BASE_URL}
+  docling_serve:
+    # A list fans conversions out across a pool of docling-serve instances.
+    base_url:
+      - ${DOCLING1_BASE_URL}
+      - ${DOCLING2_BASE_URL}
+
+processing:
+  converter: docling-serve
+  split_pages: 10
+  chunker: docling-serve
+  chunking_tokenizer: ibm-granite/granite-docling-258M
+  conversion_options:
+    do_ocr: false
+    force_ocr: false
+    images_scale: 1.0
+    table_mode: accurate
+
+embeddings:
+  batch_size: 64
+  model:
+    provider: vllm
+    name: nvidia/llama-nemotron-embed-vl-1b-v2
+    vector_dim: 2048
+    base_url: ${EMBEDDINGS_BASE_URL}
+    multimodal: true
+
+ingester:
+  api:
+    host: 0.0.0.0
+    port: 8765
+    # auth_token: ${INGESTER_AUTH_TOKEN}
+
+  queue:
+    # Per-source too: two sources loading through one queue file would
+    # interleave their jobs.
+    path: ${STATE_DIR}/${SOURCE}-ingester.db
+
+  workers:
+    worker_count: 8
+    poll_idle_interval_s: 1.0
+    shutdown_grace_s: 60
+    retry:
+      max_attempts: 5
+      base_delay_s: 2.0
+      max_delay_s: 300.0
+      jitter: 0.25
+
+  sources:
+    - type: fs
+      # Keep `id` pinned to ${SOURCE}: haiku derives it from the root
+      # otherwise, and a derived id changes when the path does.
+      id: ${SOURCE}
+      root: ${DOWNLOAD_DIR}/${SOURCE}
+      poll_interval_s: 300
+      delete_orphans: true
+      include_patterns: ["*.md", "*.pdf", "*.adoc", "*.pptx", "*.puml", "*.plantuml", "*.asciidoc", "*.docx", "*.xlsx", "*.ppsx", "*.txt", "*.csv"]
+      ignore_patterns: ["*.json", "*.meta.json"]

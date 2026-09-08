@@ -159,11 +159,23 @@ STATE_DIR=sync_state                         # Local sync state (one SQLite file
 
 ```bash
 HAIKU_LOAD_ENABLED=true                       # Queue a haiku-rag load after each manifest run
-LANCEDB_DIR=/var/lib/lancedb                  # Base dir for per-source <source>.lancedb
+LANCEDB_DIR=/var/lib/lancedb                  # Interpolated by the haiku-rag config to place
+                                              # <source>.lancedb; also the agent's dedupe key
 HAIKU_PATH=/etc/haiku                         # Base dir for haiku-rag config files
 # HAIKU_LOAD_COMMAND, HAIKU_DEFAULT_CONFIG, HAIKU_LOAD_TIMEOUT, HAIKU_LOAD_CWD also available
 # HAIKU_MAINTENANCE_COMMAND, HAIKU_MAINTENANCE_TIMEOUT for `manifest migrate` / `manifest vacuum`
 ```
+
+The haiku-rag config file needs its own set on top of these — haiku expands
+`${VAR}` eagerly when the file is read, so one that is unset **or empty** fails
+the load with `MissingEnvVarError` before any document is touched. The example
+configs need `STATE_DIR`, `QA_MODEL`, `QA_BASE_URL`, `OLLAMA_BASE_URL`,
+`DOCLING1_BASE_URL`, `DOCLING2_BASE_URL` and `EMBEDDINGS_BASE_URL`, plus
+`S3_BUCKET`, `S3_REGION` and `DOWNLOAD_S3_BUCKET` in S3 mode. `SOURCE`,
+`DOWNLOAD_DIR` and `DOWNLOAD_URI` are injected per load and must not be set by
+hand. Each file in `example-haiku-configs/` lists its own set in a header
+comment; the README table is
+["Variables the haiku-rag config needs"](README.md#variables-the-haiku-rag-config-needs).
 
 ### SCM Authentication
 
@@ -301,11 +313,33 @@ inherits the parent environment plus the vars from the run's `LoadContext`
 `DOWNLOAD_DIR`, and `DOWNLOAD_URI` (the resolved base URI, set in both storage
 modes so one config form works either way). See `manifest/haiku_loader.py`.
 
+**The database comes from the haiku-rag config, not the command line.** The
+default `HAIKU_LOAD_COMMAND` passes `--config` and no `--db`, so
+`lancedb.databases` in that file places the database and must interpolate
+`${SOURCE}` to get one per source:
+
+```yaml
+lancedb:
+  databases:
+    db: ${LANCEDB_DIR:-/lancedb}/${SOURCE}.lancedb
+```
+
+A config with one entry and no `${SOURCE}`, or with no `lancedb.databases` at
+all, merges every source into a single store *without erroring*; two or more
+entries is the only case haiku-ingester refuses. `resolve_db_path` still
+computes `${LANCEDB_DIR}/<slug>.lancedb` for the log line, the run report and
+the maintenance dedupe key, so `LANCEDB_DIR` stays required — and note that
+`slugify_source` (whitespace to hyphens) and `sanitize_source` (the `${SOURCE}`
+the config sees) disagree for a source containing whitespace. See
+`example-haiku-configs/` for working configs, and the README's "Where the
+database comes from".
+
 ### haiku-rag Database Maintenance
 
 `si-agent manifest {migrate,vacuum} [path|all]` runs
-`haiku-rag --config=<cfg> <verb> --db=<db>` per manifest source, reusing the
-load's config/DB/env resolution (see `manifest/haiku_maint.py`). `all`
+`haiku-rag --config=<cfg> <verb>` per manifest source, reusing the load's
+config/DB/env resolution — including the config placing the database (see
+`manifest/haiku_maint.py`). `all`
 (the default) means every manifest in `MANIFEST_DIR`. Operations run
 sequentially, manifests sharing a database are deduplicated, no post-process
 callbacks fire, and `--dry-run` prints the command lines without spawning.
