@@ -429,9 +429,12 @@ Component = Annotated[
 class PostProcessStep(BaseModel):
     """One post-load callback, invoked as ``method(source, **kwargs)``.
 
-    ``method`` is a dotted import path (``pkg.mod:func`` or ``pkg.mod.func``);
-    ``kwargs`` are passed through as keyword arguments. See
-    ``docs/post-process-plan.md``.
+    ``method`` is a dotted import path (``pkg.mod:func`` or ``pkg.mod.func``)
+    to a callable importable in the agent's environment; ``kwargs`` are passed
+    through as keyword arguments. Steps run in order after the load, and the
+    runner fills in ``config``, ``context`` and ``ingester_exit_code`` for a
+    callable that accepts them -- see
+    :mod:`soliplex.agents.manifest.post_process`.
     """
 
     method: str

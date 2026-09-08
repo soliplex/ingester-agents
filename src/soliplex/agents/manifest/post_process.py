@@ -5,7 +5,7 @@ that is invoked as ``method(source, **kwargs)`` -- ``source`` is the manifest's
 source, ``kwargs`` are the configured extra args. Steps run **in order** after
 ``haiku-ingester`` finishes (see :func:`haiku_loader.run_load`).
 
-Two conveniences:
+Three things a step does not have to arrange for itself:
 
 * **config auto-inject** -- when a step omits ``config`` and the callable
   accepts one (an explicit ``config`` parameter or ``**kwargs``), the manifest's
@@ -15,10 +15,13 @@ Two conveniences:
   :class:`~soliplex.agents.manifest.context.LoadContext` for the source: the
   resolved download target, store, and sidecar facade. A callback that needs
   storage does not have to rediscover it from the environment;
-* **log-and-continue** -- a failing step is logged and recorded, and the
-  remaining steps still run.
+* **outcome auto-inject** -- likewise for ``ingester_exit_code``, the load's
+  exit code (``None`` on timeout). Callbacks fire whatever the load did, so a
+  step that only makes sense after a clean load has to be able to ask.
 
-See ``docs/post-process-plan.md``.
+A step that raises stops the chain: the exception is logged and propagates, and
+the steps after it do not run. See :func:`run_post_process`, and the README's
+"Post-process callbacks" for the configuration side.
 """
 
 import importlib
