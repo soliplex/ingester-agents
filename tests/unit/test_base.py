@@ -521,6 +521,8 @@ def test_parse_file_rec(provider, sample_file_record):
     assert "sha256" in result
     assert len(result["sha256"]) == 64
     assert result["content-type"] == "text/markdown"
+    # Kept alongside the API "url" so the sidecar can record a browsable one.
+    assert result["html_url"] == "https://example.com/owner/repo/src/branch/main/docs/test.md"
 
 
 @pytest.mark.asyncio

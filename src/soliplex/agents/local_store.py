@@ -8,6 +8,7 @@ type and any other available metadata.
 """
 
 import asyncio
+import datetime
 import logging
 import re
 from pathlib import Path
@@ -18,6 +19,17 @@ from soliplex.agents.common.mime import ensure_extension
 from soliplex.agents.common.mime import guess_extension
 
 logger = logging.getLogger(__name__)
+
+
+def _utcnow() -> str:
+    """Current UTC time, ISO 8601 with an explicit offset.
+
+    A named seam rather than an inline call so tests can pin the clock; there
+    is no time-freezing dependency in this project and one timestamp does not
+    justify adding it.
+    """
+    return datetime.datetime.now(datetime.UTC).isoformat()
+
 
 # Re-exported for callers that still import it from here; the suffix itself is
 # owned by the sidecar kind that uses it.
@@ -179,12 +191,19 @@ async def write_document(
         metadata: Additional metadata stored under the sidecar ``metadata`` key.
         ingestion_type: Method used to fetch the document (e.g. ``"fs"``,
             ``"webdav"``, ``"scm"``, ``"web"``), recorded in the sidecar.
-        source_url: Full URL the document was downloaded from, recorded in the
-            sidecar when available (currently WebDAV only).
+        source_url: Full URL the document was downloaded from, recorded in
+            the sidecar when available. Omitted only when the agent has no
+            URL to record (see the sidecar table in the README).
         download_dir: Override for ``settings.download_dir`` (mainly for tests).
 
     Returns:
         The path of the written document.
+
+    Note:
+        The sidecar's ``downloaded_time`` is stamped here, so it marks when
+        the document was last *written*. A document that passes its source's
+        freshness check never reaches this function, so its existing sidecar
+        -- and its original timestamp -- are left untouched.
     """
     from soliplex.agents.sidecar import DocumentWrite
     from soliplex.agents.sidecar import Sidecars
@@ -216,6 +235,7 @@ async def write_document(
                 metadata=metadata or {},
                 ingestion_type=ingestion_type,
                 source_url=source_url,
+                downloaded_time=_utcnow(),
             ),
         ),
     )
