@@ -95,6 +95,7 @@ def sample_file_record():
         "name": "test.md",
         "path": "docs/test.md",
         "url": "https://api.example.com/repos/owner/repo/contents/docs/test.md",
+        "html_url": "https://example.com/owner/repo/src/branch/main/docs/test.md",
         "type": "file",
         "content": "VGVzdCBjb250ZW50",  # "Test content" in base64
         "sha": "abc123",
@@ -113,6 +114,7 @@ def sample_issue():
         "body": "Test issue body",
         "state": "open",
         "url": "https://api.example.com/repos/owner/repo/issues/1",
+        "html_url": "https://example.com/owner/repo/issues/1",
         "user": {"login": "testuser"},
         "created_at": "2024-01-01T00:00:00Z",
     }

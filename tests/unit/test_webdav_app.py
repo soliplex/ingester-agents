@@ -573,25 +573,36 @@ async def test_do_ingest_returns_sha256_on_success(local_env):
     sidecar = json.loads((target.parent / "test.md.meta.json").read_text())
     assert sidecar["ingestion_type"] == "webdav"
     assert sidecar["source_url"] == "http://dav/webdav/docs/test.md"
+    assert sidecar["downloaded_time"]
 
 
 @pytest.mark.asyncio
-async def test_do_ingest_local_file_returns_sha256(tmp_path, local_env):
-    test_file = tmp_path / "test.md"
-    test_file.write_bytes(b"local content")
-    expected_sha = hashlib.sha256(b"local content", usedforsecurity=False).hexdigest()
+async def test_do_ingest_without_url_omits_source_url(local_env):
+    """An injected client with no configured URL yields no download URL.
+
+    ``source_url`` is built from ``webdav_url``, so a caller that supplies its
+    own client and no URL leaves the sidecar without one rather than recording
+    a half-formed path.
+    """
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.download.return_value = (b"file content", None)
+    expected_sha = hashlib.sha256(b"file content", usedforsecurity=False).hexdigest()
 
     result = await webdav_app.do_ingest(
-        base_path=str(tmp_path),
+        base_path="/webdav/docs",
         uri="test.md",
         meta={},
         source="test-source",
         mime_type="text/markdown",
+        client=mock_client,
     )
 
     assert result["_sha256"] == expected_sha
-    assert result["_size"] == len(b"local content")
-    # a local-directory read has no download URL, so source_url is omitted
+    assert result["_size"] == len(b"file content")
+    # no URL to HEAD against, so the validator lookup is skipped entirely
+    mock_client.head.assert_not_awaited()
     target = local_store.source_dir("test-source") / "test.md"
     sidecar = json.loads((target.parent / "test.md.meta.json").read_text())
     assert sidecar["ingestion_type"] == "webdav"

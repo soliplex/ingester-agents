@@ -803,10 +803,11 @@ async def do_ingest(
     client: AsyncWebDAVClient | None = None,
 ):
     """
-    Read a file from WebDAV (or local filesystem) and write it locally.
+    Download a file from WebDAV and write it locally.
 
     Args:
-        base_path: Base directory or WebDAV path
+        base_path: Base WebDAV path that *uri* is relative to (may be empty
+            when *uri* is already an absolute WebDAV path)
         uri: Relative file path
         meta: File metadata for the sidecar
         source: Source identifier
@@ -827,47 +828,38 @@ async def do_ingest(
     """
     logger.info(f"base_path={base_path}, uri={uri}")
 
-    header_type = None
     source_url = None
-    # Check if base_path is a local directory
-    if base_path and Path(base_path).exists():
-        load_path = Path(base_path) / uri
-        logger.debug(f"Loading from local path: {load_path}")
-        async with aiofiles.open(load_path, "rb") as f:
-            doc_body = await f.read()
-    else:
-        full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}" if base_path else uri
-        if webdav_url:
-            source_url = f"{webdav_url.rstrip('/')}/{full_path.lstrip('/')}"
-        try:
-            async with _client_for(client, webdav_url, webdav_username, webdav_password) as webdav_client:
-                logger.info(f"Downloading from WebDAV: {full_path}")
-                doc_body, header_type = await webdav_client.download(full_path)
+    full_path = f"{base_path.rstrip('/')}/{uri.lstrip('/')}" if base_path else uri
+    if webdav_url:
+        source_url = f"{webdav_url.rstrip('/')}/{full_path.lstrip('/')}"
+    try:
+        async with _client_for(client, webdav_url, webdav_username, webdav_password) as webdav_client:
+            logger.info(f"Downloading from WebDAV: {full_path}")
+            doc_body, header_type = await webdav_client.download(full_path)
 
-                # Capture a validator (ETag, else Last-Modified) via HEAD if
-                # the caller didn't already supply one from the listing step.
-                # Same client as the GET above, so this costs a round trip,
-                # not a connection.
-                if not etag and webdav_url:
-                    try:
-                        head_path = full_path if base_path else uri
-                        resp = await webdav_client.head(head_path)
-                        etag, token_source = _version_token(
-                            resp.headers.get("etag"),
-                            resp.headers.get("last-modified"),
-                        )
-                        logger.debug("do_ingest HEAD validator for %s via %s: %s", uri, token_source, etag)
-                    except Exception:
-                        logger.debug("Could not get validator via HEAD for %s", uri, exc_info=True)
-        except ResourceNotFound:
-            # 404 is a definitive "gone" signal (not a transient failure), so
-            # report it separately -- the caller treats it as a removal when
-            # delete_stale is enabled rather than a blocking error.
-            logger.info("source file gone (404): %s", uri)
-            return {"not_found": True, "uri": uri}
-        except Exception as e:
-            logger.exception(f"Error downloading {uri} from WebDAV")
-            return {"error": str(e)}
+            # Capture a validator (ETag, else Last-Modified) via HEAD if the
+            # caller didn't already supply one from the listing step. Same
+            # client as the GET above, so this costs a round trip, not a
+            # connection.
+            if not etag and webdav_url:
+                try:
+                    resp = await webdav_client.head(full_path)
+                    etag, token_source = _version_token(
+                        resp.headers.get("etag"),
+                        resp.headers.get("last-modified"),
+                    )
+                    logger.debug("do_ingest HEAD validator for %s via %s: %s", uri, token_source, etag)
+                except Exception:
+                    logger.debug("Could not get validator via HEAD for %s", uri, exc_info=True)
+    except ResourceNotFound:
+        # 404 is a definitive "gone" signal (not a transient failure), so
+        # report it separately -- the caller treats it as a removal when
+        # delete_stale is enabled rather than a blocking error.
+        logger.info("source file gone (404): %s", uri)
+        return {"not_found": True, "uri": uri}
+    except Exception as e:
+        logger.exception(f"Error downloading {uri} from WebDAV")
+        return {"error": str(e)}
 
     # Resolve the final type: server GET header wins, then content sniffing,
     # then the filename extension. WebDAV relies on the server's mime type,

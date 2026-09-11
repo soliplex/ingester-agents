@@ -46,9 +46,9 @@ def clean_meta(meta: dict):
     return meta
 
 
-# Keys that are recorded separately (mime_type, hash, source) and should not
-# be duplicated into the sidecar's ``metadata`` block.
-_STRIP_KEYS = ("path", "sha256", "size", "source", "batch_id", "source_uri", "content-type")
+# Keys that are recorded separately (mime_type, hash, source, source_url) and
+# should not be duplicated into the sidecar's ``metadata`` block.
+_STRIP_KEYS = ("path", "sha256", "size", "source", "batch_id", "source_uri", "content-type", "html_url")
 
 
 def _doc_meta(row: dict, extra_metadata: dict[str, str] | None) -> dict:
@@ -60,6 +60,21 @@ def _doc_meta(row: dict, extra_metadata: dict[str, str] | None) -> dict:
     if extra_metadata:
         meta.update(extra_metadata)
     return meta
+
+
+def _source_url(row: dict) -> str | None:
+    """The browsable URL for an inventory row, if the provider gave one.
+
+    Reads both row shapes: ``get_data`` nests provider fields under
+    ``metadata``, while ``incremental_sync`` passes ``parse_file_rec`` output
+    through flat. Keeping that in one place is deliberate -- the two shapes
+    diverging is how the URL came to be dropped on both paths.
+
+    Prefers ``html_url`` (what a person can open) over ``url`` (the contents
+    API endpoint), and returns None when neither is present.
+    """
+    meta = row.get("metadata") or {}
+    return row.get("html_url") or meta.get("html_url") or row.get("url") or meta.get("url")
 
 
 def _resolve_mime(row: dict) -> str:
@@ -114,7 +129,9 @@ async def load_inventory(
             meta = _doc_meta(row, extra_metadata)
             doc_bytes = processors.run_processors(row["file_bytes"], mime_type)
             logger.info(f"writing {uri}")
-            await local_store.write_document(source, uri, doc_bytes, mime_type, meta, ingestion_type="scm")
+            await local_store.write_document(
+                source, uri, doc_bytes, mime_type, meta, ingestion_type="scm", source_url=_source_url(row)
+            )
             local_state.upsert_file(source, uri, row.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
             ingested.append(uri)
         except processors.ProcessorRejected as e:
@@ -149,6 +166,7 @@ async def get_issues(scm: str, repo_name: str, owner: str = None, since: datetim
             "file_bytes": txt.encode("utf-8"),
             "uri": f"/{owner}/{repo_name}/issues/{issue['number']}",
             "title": issue["title"],
+            "html_url": issue.get("html_url"),
             "metadata": {
                 "date": issue["created_at"],
                 "assignee": str(issue["assignee"]),
@@ -234,6 +252,9 @@ async def get_data(scm: str, repo_name: str, owner: str = None, content_filter: 
                 "file_bytes": f["file_bytes"],
                 "uri": f["uri"],
                 "sha256": f["sha256"],
+                # Top level, not in metadata: it becomes the sidecar's own
+                # source_url rather than operator-supplied metadata.
+                "html_url": f.get("html_url"),
                 "metadata": {
                     "last_modified_date": f["last_updated"],
                     "content-type": f["content-type"],
@@ -433,7 +454,9 @@ async def incremental_sync(
             mime_type = _resolve_mime(file)
             meta = _doc_meta(file, extra_metadata)
             doc_bytes = processors.run_processors(file["file_bytes"], mime_type)
-            await local_store.write_document(source, uri, doc_bytes, mime_type, meta, ingestion_type="scm")
+            await local_store.write_document(
+                source, uri, doc_bytes, mime_type, meta, ingestion_type="scm", source_url=_source_url(file)
+            )
             local_state.upsert_file(source, uri, file.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
             ingested.append(uri)
             logger.info(f"wrote {uri}")

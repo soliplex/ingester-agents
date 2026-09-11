@@ -288,6 +288,10 @@ class BaseSCMProvider(ABC):
         return {
             "name": rec["name"],
             "url": rec["url"],
+            # Browsable location, as opposed to the API "url" above. Read
+            # with .get because the listing and blob-fetch shapes do not all
+            # carry it; a missing one simply leaves the sidecar without a URL.
+            "html_url": rec.get("html_url"),
             "uri": uri,
             "path": uri,
             "file_bytes": file_bytes,
