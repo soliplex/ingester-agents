@@ -190,7 +190,11 @@ async def _write_local(
     # it from the bytes, defaulting extension-less text to text/plain.
     if not mime_type or mime_type == "application/octet-stream":
         mime_type = detect_mime_type(uri, data=doc_body, text_fallback=True)
-    await local_store.write_document(source, uri, doc_body, mime_type, meta, ingestion_type="fs")
+    # A file:// URL of the resolved path. Only meaningful on the host that
+    # ran the ingest, which is what provenance for a local source is: there
+    # is no other address this document ever had.
+    source_url = Path(load_path).resolve().as_uri()
+    await local_store.write_document(source, uri, doc_body, mime_type, meta, ingestion_type="fs", source_url=source_url)
     local_state.upsert_file(source, uri, sha256, size=len(doc_body), mime_type=mime_type)
 
 

@@ -1,8 +1,9 @@
 """Sidecars: the extra objects stored alongside each downloaded document.
 
 One kind exists today -- ``.meta.json``, carrying the document's MIME type,
-its upstream URI, and any manifest-supplied metadata -- because the indexing
-step reads only the document bytes and would otherwise never see them.
+its upstream URI and URL, when it was downloaded, and any manifest-supplied
+metadata -- because the indexing step reads only the document bytes and would
+otherwise never see them.
 
 Everything about a kind lives in one :class:`SidecarKind` subclass: its
 suffix, how its content is built at write time, and how that content is read
@@ -39,10 +40,11 @@ class DocumentWrite:
     """The facts a sidecar can be built from, as one document is stored.
 
     Deliberately the arguments ``write_document`` already takes, plus the
-    content, because those are what all four agents demonstrably supply.
-    Anything richer -- an ETag, a PROPFIND property set, a commit sha -- is
-    held by only one agent, so a kind needing it should be written by that
-    agent through :meth:`Sidecars.write` rather than by widening this.
+    content and the write's own timestamp, because those are what all four
+    agents demonstrably supply. Anything richer -- an ETag, a PROPFIND
+    property set, a commit sha -- is held by only one agent, so a kind needing
+    it should be written by that agent through :meth:`Sidecars.write` rather
+    than by widening this.
     """
 
     source: str
@@ -52,6 +54,7 @@ class DocumentWrite:
     metadata: dict = field(default_factory=dict)
     ingestion_type: str | None = None
     source_url: str | None = None
+    downloaded_time: str | None = None
 
 
 class SidecarKind(ABC):

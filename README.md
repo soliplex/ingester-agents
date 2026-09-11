@@ -1199,7 +1199,8 @@ written next to it. The sidecar records:
 | `sha256` | SHA256 of the written bytes |
 | `size` | Size of the written bytes |
 | `metadata` | Any additional source-specific metadata |
-| `source_url` | Full URL the document was downloaded from. Written for **WebDAV** downloads (omitted when a WebDAV source resolves to a local directory) and for **web** pages (the fetched page URL); omitted for `fs` and `scm` sources |
+| `source_url` | Full URL the document was fetched from (see below) |
+| `downloaded_time` | When the document was last written, ISO 8601 with a UTC offset (see below) |
 
 Example sidecar for a WebDAV download:
 
@@ -1212,9 +1213,35 @@ Example sidecar for a WebDAV download:
   "sha256": "…",
   "size": 1234,
   "metadata": {},
-  "source_url": "https://dav.example.com/docs/handbook/readme.md"
+  "source_url": "https://dav.example.com/docs/handbook/readme.md",
+  "downloaded_time": "2026-09-11T14:22:05.123456+00:00"
 }
 ```
+
+#### `source_url`
+
+Every agent records one, but what it points at differs by source:
+
+| Agent | `source_url` |
+| --- | --- |
+| `webdav` | The server URL joined with the document's path |
+| `web` | The **requested** page URL. Redirects are followed when fetching, but the requested URL is what is recorded -- it is the stable identifier, and the one sync state is keyed on |
+| `fs` | A `file://` URL for the resolved source path. Only meaningful on the host that ran the ingest, which is the only address a local document ever had |
+| `scm` | The provider's browsable `html_url` for the file or issue, falling back to the contents API `url` when the provider did not return one |
+
+The field is omitted entirely when an agent has no URL to record -- for
+example an SCM provider whose response carried neither key. Consumers should
+treat it as optional.
+
+#### `downloaded_time`
+
+Records when the document's bytes were last **written**, not when they were
+last checked for changes. A document that passes its source's freshness check
+(an unchanged content hash, a matching WebDAV ETag) is never rewritten, so its
+sidecar keeps the timestamp of the fetch that did produce it.
+
+This also means sidecars written before the field existed will never gain one,
+since nothing rewrites an unchanged document. Treat it as optional too.
 
 ### Incremental Sync (SCM Agent)
 

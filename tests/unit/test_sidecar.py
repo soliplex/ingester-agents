@@ -233,6 +233,22 @@ def test_meta_omits_source_url_when_absent():
     assert "source_url" not in json.loads(kind.build(_doc()))
 
 
+def test_meta_includes_downloaded_time_when_given():
+    kind = MetaSidecar()
+    out = kind.parse(kind.build(_doc(downloaded_time="2026-09-11T14:22:05+00:00")))
+    assert out["downloaded_time"] == "2026-09-11T14:22:05+00:00"
+
+
+def test_meta_omits_downloaded_time_when_absent():
+    """Sidecars written before the field existed stay readable.
+
+    ``write_document`` always supplies one, so this is the construct-it-by-hand
+    case -- and the reason consumers must treat the key as optional.
+    """
+    kind = MetaSidecar()
+    assert "downloaded_time" not in json.loads(kind.build(_doc()))
+
+
 def test_meta_drops_none_values():
     kind = MetaSidecar()
     out = kind.parse(kind.build(_doc(ingestion_type=None, metadata={"x": None})))

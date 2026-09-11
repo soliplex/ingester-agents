@@ -1,8 +1,14 @@
 """The ``.meta.json`` sidecar: what the indexing step cannot see for itself.
 
 A downloaded document arrives at the indexer as bytes under a local path or
-object key. Its MIME type, the upstream URI it came from, and any metadata the
-manifest attached are all lost in that handoff, so they are written beside it.
+object key. Its MIME type, the upstream URI and URL it came from, when it was
+downloaded, and any metadata the manifest attached are all lost in that
+handoff, so they are written beside it.
+
+``downloaded_time`` records when the bytes were last written, not when they
+were last checked: a document that passes its source's freshness check is
+never rewritten, so its sidecar keeps the timestamp of the fetch that did
+produce it.
 
 :meth:`MetaSidecar.build` produces the payload; :meth:`MetaSidecar.parse` reads
 it back flattened, promoting the nested ``metadata`` sub-dict to the top level
@@ -77,6 +83,8 @@ class MetaSidecar(SidecarKind):
         }
         if doc.source_url is not None:
             payload["source_url"] = doc.source_url
+        if doc.downloaded_time is not None:
+            payload["downloaded_time"] = doc.downloaded_time
         return json.dumps(payload, indent=2, default=str).encode("utf-8")
 
     def parse(self, content: bytes) -> dict:

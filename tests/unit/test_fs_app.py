@@ -108,7 +108,9 @@ class TestLoadInventory:
         assert (sd / "readme.md").exists()
         meta = json.loads((sd / "test.md.meta.json").read_text())
         assert meta["ingestion_type"] == "fs"
-        assert "source_url" not in meta
+        # A local source's only address is where it sat on this host.
+        assert meta["source_url"] == (Path(temp_document_dir) / "test.md").resolve().as_uri()
+        assert meta["downloaded_time"]
 
     @pytest.mark.asyncio
     async def test_load_inventory_skips_unchanged(self, temp_document_dir, local_env):
@@ -118,6 +120,33 @@ class TestLoadInventory:
 
         assert result["to_process"] == []
         assert result["ingested"] == []
+
+    @pytest.mark.asyncio
+    async def test_load_inventory_preserves_downloaded_time(self, temp_document_dir, local_env, monkeypatch):
+        """A freshness check that passes must not restamp downloaded_time.
+
+        The timestamp records when the bytes were last *written*, not when
+        they were last checked. Nothing suppresses the restamp explicitly --
+        an unchanged document never reaches ``write_document`` at all, so its
+        sidecar is simply never rewritten.
+
+        The clock is pinned rather than read, so the second run proves the
+        write was skipped instead of merely landing in the same clock tick.
+        """
+        monkeypatch.setattr(local_store, "_utcnow", lambda: "2026-09-11T14:22:05+00:00")
+        await fs_app.load_inventory(temp_document_dir, "fs-src")
+        sidecar = local_store.source_dir("fs-src") / "test.md.meta.json"
+        assert json.loads(sidecar.read_text())["downloaded_time"] == "2026-09-11T14:22:05+00:00"
+
+        # Second run, later clock, unchanged content: the sidecar is untouched.
+        monkeypatch.setattr(local_store, "_utcnow", lambda: "2026-09-12T09:00:00+00:00")
+        await fs_app.load_inventory(temp_document_dir, "fs-src")
+        assert json.loads(sidecar.read_text())["downloaded_time"] == "2026-09-11T14:22:05+00:00"
+
+        # Changing the content does bring it back through write_document.
+        (Path(temp_document_dir) / "test.md").write_text("# Changed\n")
+        await fs_app.load_inventory(temp_document_dir, "fs-src")
+        assert json.loads(sidecar.read_text())["downloaded_time"] == "2026-09-12T09:00:00+00:00"
 
     @pytest.mark.asyncio
     async def test_load_inventory_delete_stale(self, temp_document_dir, local_env):

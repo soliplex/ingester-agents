@@ -1,6 +1,7 @@
 """Tests for soliplex.agents.local_store (filesystem document writer)."""
 
 import asyncio
+import datetime
 import json
 import logging
 
@@ -129,6 +130,8 @@ async def test_write_document_writes_file_and_sidecar(dl):
     # ingestion_type defaults to None; source_url is omitted unless provided.
     assert meta["ingestion_type"] is None
     assert "source_url" not in meta
+    # downloaded_time is stamped by write_document itself, never passed in.
+    assert datetime.datetime.fromisoformat(meta["downloaded_time"]).tzinfo is not None
 
 
 @pytest.mark.asyncio
@@ -146,6 +149,34 @@ async def test_write_document_records_ingestion_type_and_source_url(dl):
     meta = json.loads(sidecar.read_text())
     assert meta["ingestion_type"] == "webdav"
     assert meta["source_url"] == "https://dav.example.com/docs/readme.md"
+
+
+@pytest.mark.asyncio
+async def test_write_document_stamps_downloaded_time(dl, monkeypatch):
+    """The sidecar records when write_document ran, from the _utcnow seam."""
+    monkeypatch.setattr(local_store, "_utcnow", lambda: "2026-09-11T14:22:05+00:00")
+    target = await local_store.write_document("s", "a.md", b"hello", "text/markdown")
+    meta = json.loads(target.with_name(target.name + ".meta.json").read_text())
+    assert meta["downloaded_time"] == "2026-09-11T14:22:05+00:00"
+
+
+@pytest.mark.asyncio
+async def test_rewriting_a_document_advances_downloaded_time(dl, monkeypatch):
+    """A second write restamps it -- freshness is the caller's business.
+
+    ``write_document`` has no opinion about whether the content changed; the
+    agents decide what to re-write by filtering through ``compute_to_process``
+    before they get here. See ``test_load_inventory_preserves_downloaded_time``
+    in the fs tests for the end-to-end half of that contract.
+    """
+    monkeypatch.setattr(local_store, "_utcnow", lambda: "2026-09-11T14:22:05+00:00")
+    target = await local_store.write_document("s", "a.md", b"hello", "text/markdown")
+    sidecar = target.with_name(target.name + ".meta.json")
+    assert json.loads(sidecar.read_text())["downloaded_time"] == "2026-09-11T14:22:05+00:00"
+
+    monkeypatch.setattr(local_store, "_utcnow", lambda: "2026-09-12T09:00:00+00:00")
+    await local_store.write_document("s", "a.md", b"hello", "text/markdown")
+    assert json.loads(sidecar.read_text())["downloaded_time"] == "2026-09-12T09:00:00+00:00"
 
 
 @pytest.mark.asyncio
