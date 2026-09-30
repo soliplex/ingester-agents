@@ -3,6 +3,7 @@
 import os
 
 import pytest
+from opentelemetry.trace import StatusCode
 
 from soliplex.agents import store as agent_store
 from soliplex.agents.config import Manifest
@@ -156,6 +157,47 @@ async def test_failing_step_terminates_and_skips_rest(monkeypatch):
         await post_process.run_post_process(_manifest(steps=steps))
 
     assert ran == []  # the step after the failure did not run
+
+
+@pytest.mark.asyncio
+async def test_each_step_gets_a_span(monkeypatch, spans):
+    registry = {"pkg:first": lambda source, **kw: None, "pkg:second": lambda source, **kw: None}
+    monkeypatch.setattr(post_process, "_resolve_method", lambda spec: registry[spec])
+    monkeypatch.setattr(post_process, "resolve_haiku_cfg", lambda manifest: "CFG")
+    steps = [PostProcessStep(method="pkg:first"), PostProcessStep(method="pkg:second")]
+
+    await post_process.run_post_process(_manifest(steps=steps), ingester_exit_code=0)
+
+    first, second = spans.named("post-process")
+    assert first.attributes["logfire.msg"] == "post-process pkg:first"
+    assert first.attributes["post_process.method"] == "pkg:first"
+    assert first.attributes["post_process.index"] == 0
+    assert first.attributes["manifest.id"] == "m"
+    assert first.attributes["manifest.source"] == "src"
+    assert first.attributes["haiku.returncode"] == 0
+    assert second.attributes["post_process.index"] == 1
+    assert first.status.status_code is StatusCode.UNSET
+
+
+@pytest.mark.asyncio
+async def test_the_failing_step_span_is_an_error_and_later_steps_have_none(monkeypatch, spans):
+    def boom(source, **kwargs):
+        raise RuntimeError("nope")
+
+    registry = {"pkg:boom": boom, "pkg:later": lambda source, **kw: None}
+    monkeypatch.setattr(post_process, "_resolve_method", lambda spec: registry[spec])
+    monkeypatch.setattr(post_process, "resolve_haiku_cfg", lambda manifest: "CFG")
+    steps = [PostProcessStep(method="pkg:boom"), PostProcessStep(method="pkg:later")]
+
+    with pytest.raises(RuntimeError):
+        await post_process.run_post_process(_manifest(steps=steps))
+
+    (failed,) = spans.named("post-process")
+    assert failed.attributes["post_process.method"] == "pkg:boom"
+    # A timed-out load passes no exit code; the attribute is left off, not None.
+    assert "haiku.returncode" not in failed.attributes
+    assert failed.status.status_code is StatusCode.ERROR
+    assert failed.events[0].name == "exception"
 
 
 # --- _load_env ---

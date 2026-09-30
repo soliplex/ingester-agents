@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
+from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 
+from soliplex.agents.config import FSComponent
+from soliplex.agents.manifest import runner
+from soliplex.agents.server import haiku_queue
 from soliplex.agents.server import manifest_queue
 
 
@@ -54,7 +59,7 @@ class TestEnqueue:
             patch(
                 "soliplex.agents.manifest.runner.run_manifest",
                 new_callable=AsyncMock,
-                return_value={"results": []},
+                return_value={"results": [], "summary": {}},
             ),
             caplog.at_level(logging.INFO),
         ):
@@ -73,7 +78,7 @@ class TestEnqueue:
             patch(
                 "soliplex.agents.manifest.runner.run_manifest",
                 new_callable=AsyncMock,
-                return_value={"results": []},
+                return_value={"results": [], "summary": {}},
             ),
         ):
             ms.haiku_load_enabled = False
@@ -91,7 +96,7 @@ class TestWorker:
         async def fake_run(manifest):
             started.append(manifest.id)
             await asyncio.sleep(0)  # a real run yields on I/O
-            return {"results": []}
+            return {"results": [], "summary": {}}
 
         manifest_queue.start_worker()
         with (
@@ -116,7 +121,7 @@ class TestWorker:
             peak = max(peak, concurrent)
             await asyncio.sleep(0.01)
             concurrent -= 1
-            return {"results": []}
+            return {"results": [], "summary": {}}
 
         manifest_queue.start_worker()
         with (
@@ -138,7 +143,7 @@ class TestWorker:
             started.append(manifest.id)
             if manifest.id == "aaa":
                 raise RuntimeError("boom")
-            return {"results": []}
+            return {"results": [], "summary": {}}
 
         manifest_queue.start_worker()
         with (
@@ -163,7 +168,7 @@ class TestWorker:
             patch(
                 "soliplex.agents.manifest.runner.run_manifest",
                 new_callable=AsyncMock,
-                return_value={"results": []},
+                return_value={"results": [], "summary": {}},
             ),
             patch("soliplex.agents.server.manifest_queue.enqueue_load", new_callable=AsyncMock) as mock_load,
         ):
@@ -195,7 +200,7 @@ class TestWorkerLifecycle:
         async def fake_run(manifest):
             running.set()
             await asyncio.sleep(60)  # never completes on its own
-            return {"results": []}
+            return {"results": [], "summary": {}}
 
         manifest_queue.start_worker()
         with (
@@ -210,3 +215,89 @@ class TestWorkerLifecycle:
         assert manifest_queue._worker_task is None
         assert manifest_queue._queue is None
         assert manifest_queue.pending_manifests() == frozenset()
+
+
+class TestManifestRunSpan:
+    """Each queued run is one span; its components and its haiku load hang off it."""
+
+    @pytest.mark.asyncio
+    async def test_run_span_carries_the_outcome_and_parents_its_components(self, tmp_path, spans):
+        path = _write_manifest(tmp_path, "a.yml", "aaa")
+        seen = {}
+
+        async def handler(component, manifest, metadata):
+            seen["span"] = trace.get_current_span().get_span_context()
+            return {"ingested": ["x"], "errors": [{"uri": "y", "error": "502"}]}
+
+        manifest_queue.start_worker()
+        with (
+            patch("soliplex.agents.server.manifest_queue.settings") as ms,
+            patch.dict(runner._DISPATCH, {FSComponent: handler}),
+        ):
+            ms.haiku_load_enabled = False
+            await manifest_queue.enqueue_manifest("aaa", path)
+            await _drain()
+
+        (run,) = spans.named("manifest run")
+        (component,) = spans.named("component")
+        assert run.attributes["logfire.msg"] == "manifest aaa"
+        assert run.attributes["manifest.id"] == "aaa"
+        assert run.attributes["manifest.path"] == path
+        assert run.attributes["manifest.queue_wait_s"] >= 0
+        assert run.attributes["manifest.name"] == "Manifest aaa"
+        assert run.attributes["manifest.source"] == "src-aaa"
+        assert run.attributes["manifest.components"] == 1
+        assert run.attributes["manifest.file_errors"] == 1
+        assert run.attributes["manifest.ingested"] == 1
+        assert run.status.status_code is StatusCode.ERROR
+        # The component span is the run's child, and the agent ran inside it.
+        assert component.parent.span_id == run.context.span_id
+        assert seen["span"].span_id == component.context.span_id
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_fails_to_load_fails_its_span(self, spans):
+        manifest_queue.start_worker()
+        with patch("soliplex.agents.server.manifest_queue.settings") as ms:
+            ms.haiku_load_enabled = False
+            await manifest_queue.enqueue_manifest("gone", "/nope/gone.yml")
+            await _drain()
+
+        (run,) = spans.named("manifest run")
+        assert run.status.status_code is StatusCode.ERROR
+        assert run.status.description == "manifest run failed: FileNotFoundError"
+        assert run.events[0].name == "exception"
+
+    @pytest.mark.asyncio
+    async def test_the_haiku_load_joins_the_manifest_trace(self, tmp_path, spans, caplog):
+        path = _write_manifest(tmp_path, "a.yml", "aaa")
+        loaded = {}
+
+        async def fake_load(manifest):
+            loaded["span"] = trace.get_current_span().get_span_context()
+
+        manifest_queue.start_worker()
+        haiku_queue.start_worker()
+        try:
+            with (
+                patch("soliplex.agents.server.manifest_queue.settings") as ms,
+                patch(
+                    "soliplex.agents.manifest.runner.run_manifest",
+                    new_callable=AsyncMock,
+                    return_value={"results": [], "summary": {}},
+                ),
+                patch("soliplex.agents.manifest.haiku_loader.run_load", side_effect=fake_load),
+                caplog.at_level(logging.INFO, logger="soliplex.agents.server.haiku_queue"),
+            ):
+                ms.haiku_load_enabled = True
+                await manifest_queue.enqueue_manifest("aaa", path)
+                await _drain()
+                await asyncio.wait_for(haiku_queue._queue.join(), timeout=5)
+        finally:
+            await haiku_queue.stop_worker()
+
+        (run,) = spans.named("manifest run")
+        # The load ran later, on the haiku worker, but under the run's context:
+        # anything it traces is a child of the run, in the same trace.
+        assert loaded["span"].trace_id == run.context.trace_id
+        assert loaded["span"].span_id == run.context.span_id
+        assert "Starting queued haiku load for source 'src-aaa' after" in caplog.text

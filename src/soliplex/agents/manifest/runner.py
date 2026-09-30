@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from soliplex.agents import local_state
+from soliplex.agents import telemetry
 from soliplex.agents.config import FSComponent
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import SCMComponent
@@ -432,6 +433,12 @@ def download_target(target):
         reset_store_cache()
 
 
+def _component_type(component) -> str:
+    """The component's manifest ``type`` (``fs``, ``webdav``, ...), or its class name."""
+    ctype = getattr(component, "type", None)
+    return ctype if isinstance(ctype, str) else type(component).__name__
+
+
 def _count(result: dict[str, Any], key: str) -> int:
     """Length of the list an agent reported under *key* (0 when absent)."""
     value = result.get(key)
@@ -464,48 +471,72 @@ async def _run_components(manifest: Manifest, target) -> dict:
     incremental_scm_components: list[SCMComponent] = []
 
     for component in manifest.components:
-        logger.info("Running component '%s' (type=%s)", component.name, type(component).__name__)
-        metadata = manifest.get_metadata(component)
-        handler = _DISPATCH.get(type(component))
-        if handler is None:
-            logger.error("Unknown component type: %s", type(component))
-            results.append({"component": component.name, "error": f"Unknown component type: {type(component)}"})
-            summary["component_errors"] += 1
-            has_errors = True
-            continue
-        try:
-            result = await handler(component, manifest, metadata)
-            # Skip URI collection for incremental SCM — handled below
-            if isinstance(component, SCMComponent) and component.incremental:
-                incremental_scm_components.append(component)
-            else:
-                all_uri_hashes.extend(collect_inventory_uris(result))
-            # 404s are removals, not errors: exclude them from the reconcile
-            # "should exist" set so their local copies are deleted.
-            all_not_found.update(result.get("not_found", []))
-            summary["ingested"] += _count(result, "ingested")
-            summary["rejected"] += _count(result, "rejected")
-            results.append({"component": component.name, "result": result})
-            # Per-file transient errors (timeout/5xx) block the reconcile to
-            # stay safe, mirroring a raised component exception.
-            file_errors = _count(result, "errors")
-            if file_errors:
+        ctype = _component_type(component)
+        attributes = {
+            telemetry.COMPONENT_NAME: component.name,
+            telemetry.COMPONENT_TYPE: ctype,
+            telemetry.MANIFEST_ID: manifest.id,
+        }
+        with telemetry.span("component", f"component {component.name} ({ctype})", attributes) as component_span:
+            logger.info("Running component '%s' (type=%s)", component.name, type(component).__name__)
+            metadata = manifest.get_metadata(component)
+            handler = _DISPATCH.get(type(component))
+            if handler is None:
+                logger.error("Unknown component type: %s", type(component))
+                results.append({"component": component.name, "error": f"Unknown component type: {type(component)}"})
+                summary["component_errors"] += 1
                 has_errors = True
-                summary["components_with_file_errors"] += 1
-                summary["file_errors"] += file_errors
-                logger.warning("Component '%s' finished with %d file errors", component.name, file_errors)
-            else:
-                logger.info("Component '%s' completed successfully", component.name)
-        except Exception as e:
-            logger.exception("Error running component %s", component.name)
-            results.append({"component": component.name, "error": str(e)})
-            summary["component_errors"] += 1
-            has_errors = True
+                telemetry.fail(component_span, "unknown component type")
+                continue
+            try:
+                result = await handler(component, manifest, metadata)
+                # Skip URI collection for incremental SCM — handled below
+                if isinstance(component, SCMComponent) and component.incremental:
+                    incremental_scm_components.append(component)
+                else:
+                    all_uri_hashes.extend(collect_inventory_uris(result))
+                # 404s are removals, not errors: exclude them from the reconcile
+                # "should exist" set so their local copies are deleted.
+                all_not_found.update(result.get("not_found", []))
+                summary["ingested"] += _count(result, "ingested")
+                summary["rejected"] += _count(result, "rejected")
+                results.append({"component": component.name, "result": result})
+                # Per-file transient errors (timeout/5xx) block the reconcile to
+                # stay safe, mirroring a raised component exception.
+                file_errors = _count(result, "errors")
+                component_span.set_attributes(
+                    {
+                        "component.ingested": _count(result, "ingested"),
+                        "component.errors": file_errors,
+                        "component.not_found": _count(result, "not_found"),
+                        "component.rejected": _count(result, "rejected"),
+                    }
+                )
+                if file_errors:
+                    has_errors = True
+                    summary["components_with_file_errors"] += 1
+                    summary["file_errors"] += file_errors
+                    logger.warning("Component '%s' finished with %d file errors", component.name, file_errors)
+                    telemetry.fail(component_span, f"{file_errors} file errors")
+                else:
+                    logger.info("Component '%s' completed successfully", component.name)
+            except Exception as e:
+                logger.exception("Error running component %s", component.name)
+                results.append({"component": component.name, "error": str(e)})
+                summary["component_errors"] += 1
+                has_errors = True
+                # Caught so the next component still runs: fail the span by hand.
+                telemetry.fail(component_span, f"component failed: {type(e).__name__}", e)
 
     # --- full URI listing for incremental SCM components -----------------------
     if manifest.config and manifest.config.delete_stale and not has_errors and incremental_scm_components:
         for inc_component in incremental_scm_components:
-            full_uris = await _list_scm_all_uris(inc_component, manifest)
+            with telemetry.span(
+                "list scm uris",
+                f"list scm uris {inc_component.name}",
+                {telemetry.COMPONENT_NAME: inc_component.name, telemetry.MANIFEST_ID: manifest.id},
+            ):
+                full_uris = await _list_scm_all_uris(inc_component, manifest)
             all_uri_hashes.extend(full_uris)
 
     # --- delete stale documents ------------------------------------------------
@@ -519,7 +550,13 @@ async def _run_components(manifest: Manifest, target) -> dict:
             )
         else:
             current_uris = {item["uri"] for item in all_uri_hashes} - all_not_found
-            delete_stale_result = await local_state.reconcile_documents(manifest.source, current_uris)
+            with telemetry.span(
+                "delete stale",
+                f"delete stale {manifest.source}",
+                {telemetry.MANIFEST_ID: manifest.id, telemetry.MANIFEST_SOURCE: manifest.source},
+            ) as stale_span:
+                delete_stale_result = await local_state.reconcile_documents(manifest.source, current_uris)
+                stale_span.set_attribute("manifest.deleted", len(delete_stale_result or []))
 
     summary["deleted"] = len(delete_stale_result or [])
     summary["not_found"] = len(all_not_found)
@@ -668,19 +705,26 @@ async def run_manifests(path: str, load: bool = False) -> list[dict]:
     manifests = resolve_manifests(path)
     results = []
     for manifest in manifests:
-        try:
-            result = await run_manifest(manifest)
-        except Exception as e:
-            logger.exception("Manifest '%s' (%s) failed", manifest.id, manifest.name)
-            results.append({"manifest_id": manifest.id, "manifest_name": manifest.name, "error": str(e)})
-            continue
-        if load:
-            from soliplex.agents.manifest import haiku_loader
-
+        # The same span the server's queue opens, so a CLI run traces the same
+        # way whenever Logfire is configured (and costs nothing when it isn't).
+        with telemetry.manifest_span(manifest.id) as span:
+            telemetry.describe_manifest(span, manifest)
             try:
-                result["haiku_load"] = await haiku_loader.run_load(manifest)
+                result = await run_manifest(manifest)
             except Exception as e:
-                logger.exception("haiku load failed for manifest '%s' (%s)", manifest.id, manifest.name)
-                result["haiku_load_error"] = str(e)
-        results.append(result)
+                logger.exception("Manifest '%s' (%s) failed", manifest.id, manifest.name)
+                results.append({"manifest_id": manifest.id, "manifest_name": manifest.name, "error": str(e)})
+                telemetry.fail(span, f"manifest run failed: {type(e).__name__}", e)
+                continue
+            telemetry.record_summary(span, result["summary"])
+            if load:
+                from soliplex.agents.manifest import haiku_loader
+
+                try:
+                    result["haiku_load"] = await haiku_loader.run_load(manifest)
+                except Exception as e:
+                    logger.exception("haiku load failed for manifest '%s' (%s)", manifest.id, manifest.name)
+                    result["haiku_load_error"] = str(e)
+                    telemetry.fail(span, f"haiku load failed: {type(e).__name__}", e)
+            results.append(result)
     return results

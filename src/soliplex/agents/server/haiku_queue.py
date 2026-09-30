@@ -8,6 +8,9 @@ guaranteed by the single worker.
 
 import asyncio
 import logging
+import time
+
+from opentelemetry import context as otel_context
 
 from soliplex.agents.config import Manifest
 from soliplex.agents.manifest import haiku_loader
@@ -23,6 +26,10 @@ async def enqueue_load(manifest: Manifest) -> None:
 
     No-op (with a warning) if the worker has not been started, so manifest
     runs never fail just because loads are disabled.
+
+    The caller's trace context travels with the manifest: the load runs later,
+    on another task, and attaching that context there makes the load's spans
+    children of the manifest run that queued it, in the same trace.
     """
     if _queue is None:
         logger.warning(
@@ -30,7 +37,7 @@ async def enqueue_load(manifest: Manifest) -> None:
             manifest.source,
         )
         return
-    await _queue.put(manifest)
+    await _queue.put((manifest, otel_context.get_current(), time.monotonic()))
     logger.info(
         "Queued haiku load for source '%s' (queue size=%d)",
         manifest.source,
@@ -42,8 +49,14 @@ async def _worker() -> None:
     """Drain the queue, running one load at a time."""
     assert _queue is not None
     while True:
-        manifest = await _queue.get()
+        manifest, parent, enqueued_at = await _queue.get()
+        token = otel_context.attach(parent)
         try:
+            logger.info(
+                "Starting queued haiku load for source '%s' after %.1fs in the queue",
+                manifest.source,
+                time.monotonic() - enqueued_at,
+            )
             await haiku_loader.run_load(manifest)
         except Exception:
             logger.exception(
@@ -51,6 +64,7 @@ async def _worker() -> None:
                 manifest.source,
             )
         finally:
+            otel_context.detach(token)
             _queue.task_done()
 
 
