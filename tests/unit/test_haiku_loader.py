@@ -177,7 +177,7 @@ class TestRunLoad:
         assert result["stdout"] == "step 1\ndone"
         assert result["db"].replace("\\", "/").endswith("composite-source.lancedb")
         # Output is logged in one part per stream, not one record per line.
-        assert "haiku load composite source stdout part 1:\nstep 1\ndone" in caplog.text
+        assert "haiku load composite source stdout output part 1:\nstep 1\ndone" in caplog.text
         assert "haiku load for source 'composite source' completed" in caplog.text
 
         kwargs = mock_exec.call_args.kwargs
@@ -198,6 +198,21 @@ class TestRunLoad:
         ) as mock_exec:
             await haiku_loader.run_load(_manifest())
         assert mock_exec.call_args.kwargs["env"]["LOGFIRE_TOKEN"] == "lf-secret"
+
+    @pytest.mark.asyncio
+    async def test_queue_wait_is_recorded_on_the_load_span(self, haiku_env, spans):
+        with patch(
+            "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            side_effect=[_fake_proc(returncode=0), _fake_proc(returncode=0)],
+        ):
+            await haiku_loader.run_load(_manifest(), queue_wait_s=4.5)
+            await haiku_loader.run_load(_manifest())  # not queued, as from the CLI
+
+        queued, direct = spans.named("haiku load")
+        assert queued.attributes["haiku.queue_wait_s"] == 4.5
+        assert queued.attributes["manifest.id"] == "m"
+        assert "haiku.queue_wait_s" not in direct.attributes
 
     @pytest.mark.asyncio
     async def test_nonzero_returncode_quotes_stderr(self, haiku_env, caplog):

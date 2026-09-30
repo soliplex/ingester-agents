@@ -52,12 +52,13 @@ async def _worker() -> None:
         manifest, parent, enqueued_at = await _queue.get()
         token = otel_context.attach(parent)
         try:
+            queue_wait_s = time.monotonic() - enqueued_at
             logger.info(
                 "Starting queued haiku load for source '%s' after %.1fs in the queue",
                 manifest.source,
-                time.monotonic() - enqueued_at,
+                queue_wait_s,
             )
-            await haiku_loader.run_load(manifest)
+            await haiku_loader.run_load(manifest, queue_wait_s=queue_wait_s)
         except Exception:
             logger.exception(
                 "Unhandled error during haiku load for '%s'",

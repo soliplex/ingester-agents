@@ -87,6 +87,50 @@ class TestCommandPath:
         assert telemetry.command_path(root, ["--otel"]) == ""
 
 
+class TestCommandArgs:
+    @pytest.fixture
+    def root(self):
+        return typer.main.get_command(root_cli)
+
+    def test_positional_arguments_are_kept(self, root):
+        argv = ["--otel", "manifest", "vacuum", "/manifests/test.yaml"]
+        assert telemetry.command_args(root, argv) == "manifest vacuum /manifests/test.yaml"
+
+    def test_secret_option_values_are_redacted(self, root):
+        argv = ["webdav", "run-inventory", "/docs", "--webdav-password", "hunter2", "--webdav-username", "bob"]
+        assert telemetry.command_args(root, argv) == (
+            "webdav run-inventory /docs --webdav-password '[redacted]' --webdav-username bob"
+        )
+
+    def test_the_equals_form_is_redacted_too(self, root):
+        argv = ["webdav", "check-status", "--webdav-password=hunter2"]
+        assert telemetry.command_args(root, argv) == "webdav check-status '--webdav-password=[redacted]'"
+
+    def test_arguments_are_shell_quoted(self, root):
+        assert telemetry.command_args(root, ["manifest", "run", "/my manifests/a.yaml"]) == (
+            "manifest run '/my manifests/a.yaml'"
+        )
+
+    def test_a_secret_option_at_the_end_redacts_nothing_further(self, root):
+        assert telemetry.command_args(root, ["webdav", "check-status", "--webdav-password"]) == (
+            "webdav check-status --webdav-password"
+        )
+
+    def test_hidden_input_and_secret_names_count_but_flags_do_not(self):
+        import click
+
+        @click.command()
+        @click.option("--pin", hide_input=True)
+        @click.option("--api-key-enabled", is_flag=True)
+        @click.argument("path")
+        def leaf(pin, api_key_enabled, path): ...
+
+        root = click.Group(commands={"leaf": leaf})
+        argv = ["leaf", "--pin", "1234", "--api-key-enabled", "/p"]
+        # The flag takes no value, so the argument after it is not redacted.
+        assert telemetry.command_args(root, argv) == "leaf --pin '[redacted]' --api-key-enabled /p"
+
+
 class TestCliSpan:
     def test_success(self, spans):
         with telemetry.CliSpan("manifest run"):
@@ -94,6 +138,7 @@ class TestCliSpan:
         (span,) = spans.named("cli")
         assert span.attributes["logfire.msg"] == "si-agent manifest run"
         assert span.attributes[telemetry.CLI_COMMAND] == "manifest run"
+        assert span.attributes[telemetry.CLI_ARGS] == "manifest run"
         assert span.attributes[telemetry.CLI_EXIT_CODE] == 0
         assert span.status.status_code is StatusCode.UNSET
 
@@ -135,6 +180,15 @@ class TestCliSpan:
         except typer.Exit:
             cli_span.__exit__(None, None, None)
         assert spans.named("cli")[0].attributes[telemetry.CLI_EXIT_CODE] == 4
+
+
+def test_the_message_is_the_full_command_line(spans):
+    with telemetry.CliSpan("manifest vacuum", "manifest vacuum /manifests/test.yaml"):
+        pass
+    (span,) = spans.named("cli")
+    assert span.attributes["logfire.msg"] == "si-agent manifest vacuum /manifests/test.yaml"
+    assert span.attributes[telemetry.CLI_COMMAND] == "manifest vacuum"
+    assert span.attributes[telemetry.CLI_ARGS] == "manifest vacuum /manifests/test.yaml"
 
 
 def test_empty_command_message(spans):

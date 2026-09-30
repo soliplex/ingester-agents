@@ -1,6 +1,7 @@
 """Tests for the root CLI's opt-in tracing (``si-agent --otel ...``)."""
 
 import logging
+import shlex
 import sys
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -58,14 +59,16 @@ def test_otel_opens_one_root_span_that_the_command_runs_under(monkeypatch, confi
             pass
         return []
 
+    manifest = _manifest_file(tmp_path)
     with patch("soliplex.agents.manifest.runner.run_manifests", side_effect=fake_run_manifests):
-        result = _invoke(monkeypatch, "--otel", "manifest", "run", _manifest_file(tmp_path), "--no-load")
+        result = _invoke(monkeypatch, "--otel", "manifest", "run", manifest, "--no-load")
 
     assert result.exit_code == 0, result.output
     configure.assert_called_once()
     (root,) = spans.named("cli")
     (inner,) = spans.named("inner")
-    assert root.attributes["logfire.msg"] == "si-agent manifest run"
+    # The message is the command line (without --otel); cli.command just the path.
+    assert root.attributes["logfire.msg"] == f"si-agent manifest run {shlex.quote(manifest)} --no-load"
     assert root.attributes[telemetry.CLI_COMMAND] == "manifest run"
     assert root.attributes[telemetry.CLI_EXIT_CODE] == 0
     assert root.status.status_code is StatusCode.UNSET

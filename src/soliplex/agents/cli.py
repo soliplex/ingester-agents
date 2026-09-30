@@ -36,8 +36,10 @@ def init(
         )
         return
     # One root span for the whole command, closed by Click when it finishes.
-    # sys.argv is what Click parses; command_path keeps only command names.
-    ctx.with_resource(telemetry.CliSpan(telemetry.command_path(ctx.find_root().command, sys.argv[1:])))
+    # sys.argv is what Click parses. The message is the command line with any
+    # secret option values redacted; `cli.command` keeps just the command path.
+    root, argv = ctx.find_root().command, sys.argv[1:]
+    ctx.with_resource(telemetry.CliSpan(telemetry.command_path(root, argv), telemetry.command_args(root, argv)))
 
 
 cli = typer.Typer(no_args_is_help=True, callback=init)

@@ -23,6 +23,8 @@ The trace a server run produces::
 """
 
 import logging
+import re
+import shlex
 import sys
 from collections.abc import Iterator
 from collections.abc import Sequence
@@ -58,7 +60,15 @@ INGESTER_EXIT_CODE = "haiku.returncode"
 
 
 CLI_COMMAND = "cli.command"
+CLI_ARGS = "cli.args"
 CLI_EXIT_CODE = "cli.exit_code"
+
+REDACTED = "[redacted]"
+# An option whose value is a secret, going by its name.
+_SECRET_OPTION = re.compile(r"pass|secret|token|key|auth|credential", re.IGNORECASE)
+# Arguments left out of the recorded command line: they are about tracing
+# itself, not about what the command did.
+_UNRECORDED_ARGS = frozenset({"--otel"})
 
 
 def configure() -> bool:
@@ -104,8 +114,10 @@ def configure() -> bool:
 def command_path(root, argv: Sequence[str]) -> str:
     """The subcommand names in *argv*, walked against the command tree *root*.
 
-    Only tokens that name a command are kept, so option values never make it
-    into a span: ``webdav run --password hunter2`` is ``webdav run``.
+    Only tokens that name a command are kept -- ``webdav run-inventory /docs
+    --webdav-password hunter2`` is ``webdav run-inventory`` -- which makes it
+    the stable part of a command line, to group runs by. The full line, with
+    secrets redacted, is :func:`command_args`.
 
     Args:
         root: The root ``click.Group`` (a Typer app's command).
@@ -121,6 +133,58 @@ def command_path(root, argv: Sequence[str]) -> str:
             path.append(token)
             command = commands[token]
     return " ".join(path)
+
+
+def _secret_options(root) -> frozenset[str]:
+    """Every option string in the tree *root* whose value must not be recorded.
+
+    An option qualifies when it takes a value and either hides its input or
+    has a name that reads as a secret (``--webdav-password``). Taken from the
+    commands' own metadata rather than guessed from the command line, so a
+    flag named ``--api-key-enabled`` doesn't swallow the next argument.
+    """
+    secret: set[str] = set()
+    stack = [root]
+    while stack:
+        command = stack.pop()
+        for param in getattr(command, "params", ()):
+            if getattr(param, "param_type_name", None) != "option" or getattr(param, "is_flag", False):
+                continue
+            names = [*param.opts, *param.secondary_opts]
+            if getattr(param, "hide_input", False) or any(_SECRET_OPTION.search(name) for name in names):
+                secret.update(names)
+        stack.extend(getattr(command, "commands", {}).values())
+    return frozenset(secret)
+
+
+def command_args(root, argv: Sequence[str]) -> str:
+    """*argv* as a shell-quoted command line, with secret option values redacted.
+
+    ``webdav run-inventory /docs --webdav-password hunter2`` becomes
+    ``webdav run-inventory /docs --webdav-password [redacted]``, and the
+    ``--opt=value`` form is redacted the same way. ``--otel`` is left out.
+
+    Args:
+        root: The root ``click.Group`` (a Typer app's command).
+        argv: The arguments after the program name.
+    """
+    secret = _secret_options(root)
+    recorded: list[str] = []
+    redact_next = False
+    for token in argv:
+        if redact_next:
+            recorded.append(REDACTED)
+            redact_next = False
+        elif token in _UNRECORDED_ARGS:
+            continue
+        elif token in secret:
+            recorded.append(token)
+            redact_next = True
+        elif "=" in token and token.split("=", 1)[0] in secret:
+            recorded.append(f"{token.split('=', 1)[0]}={REDACTED}")
+        else:
+            recorded.append(token)
+    return shlex.join(recorded)
 
 
 def _exit_code(error: BaseException | None) -> int:
@@ -146,8 +210,13 @@ class CliSpan:
     as success; any other exit code, or an exception, fails the span.
     """
 
-    def __init__(self, command: str) -> None:
-        self._context = span("cli", f"si-agent {command}".rstrip(), {CLI_COMMAND: command})
+    def __init__(self, command: str, args: str | None = None) -> None:
+        """*command* is the command path (``manifest vacuum``), stable enough to
+        group runs by; *args* the full, redacted command line
+        (``manifest vacuum /manifests/test.yaml``), which is the span's message.
+        """
+        args = command if args is None else args
+        self._context = span("cli", f"si-agent {args}".rstrip(), {CLI_COMMAND: command, CLI_ARGS: args})
         self.span: Span | None = None
 
     def __enter__(self) -> Span:

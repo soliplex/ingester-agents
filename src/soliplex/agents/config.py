@@ -156,6 +156,11 @@ class Settings(BaseSettings):
     haiku_output_chunk_bytes: int = Field(default=64 * 1024, gt=0)
     haiku_output_flush_seconds: float = Field(default=30.0, gt=0)
     haiku_output_max_bytes: int = Field(default=0, ge=0)  # logged per stream; 0 = unlimited
+    # Run haiku commands through `python -m soliplex.agents.traced_run`, which
+    # attaches the TRACEPARENT the agent exports, so haiku-ingester's own spans
+    # join the agent's trace. Only needed while haiku-rag doesn't read
+    # TRACEPARENT itself; harmless alongside it.
+    haiku_trace_wrapper: bool = False
 
     # haiku-rag maintenance settings (`manifest migrate` / `manifest vacuum`)
     # Placeholders: {verb} {haiku_cfg} {db} {source} {lancedb_dir} {haiku_path}

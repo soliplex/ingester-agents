@@ -272,8 +272,9 @@ class TestManifestRunSpan:
         path = _write_manifest(tmp_path, "a.yml", "aaa")
         loaded = {}
 
-        async def fake_load(manifest):
+        async def fake_load(manifest, *, queue_wait_s=None):
             loaded["span"] = trace.get_current_span().get_span_context()
+            loaded["queue_wait_s"] = queue_wait_s
 
         manifest_queue.start_worker()
         haiku_queue.start_worker()
@@ -301,3 +302,5 @@ class TestManifestRunSpan:
         assert loaded["span"].trace_id == run.context.trace_id
         assert loaded["span"].span_id == run.context.span_id
         assert "Starting queued haiku load for source 'src-aaa' after" in caplog.text
+        # The wait is handed to the load, which records it on its span.
+        assert loaded["queue_wait_s"] >= 0
