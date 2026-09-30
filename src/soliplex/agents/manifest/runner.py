@@ -3,6 +3,7 @@
 import logging
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,43 @@ def load_manifest(path: str) -> Manifest:
     return manifest
 
 
+@dataclass(frozen=True)
+class ScanResult:
+    """What a manifest directory holds, including what is wrong with it.
+
+    ``invalid`` maps each file that failed to load to why; ``duplicates``
+    lists ids declared by more than one file. Reporting them rather than
+    logging or raising lets a caller that scans repeatedly (the scheduler's
+    reconcile tick) decide how often to say so.
+    """
+
+    pairs: list[tuple[Manifest, str]]
+    invalid: dict[str, str]
+    duplicates: list[str]
+
+
+def scan_manifests(dir_path: str) -> ScanResult:
+    """Load every ``.yml`` / ``.yaml`` manifest in *dir_path*, never raising.
+
+    Args:
+        dir_path: Path to directory containing .yml/.yaml files.
+
+    Returns:
+        A :class:`ScanResult`.
+    """
+    directory = Path(dir_path)
+    pairs: list[tuple[Manifest, str]] = []
+    invalid: dict[str, str] = {}
+    for yml_file in sorted(directory.glob("*.yml")) + sorted(directory.glob("*.yaml")):
+        try:
+            pairs.append((load_manifest(str(yml_file)), str(yml_file)))
+        except Exception as e:
+            invalid[str(yml_file)] = str(e)
+    ids = [m.id for m, _ in pairs]
+    duplicates = sorted(i for i in set(ids) if ids.count(i) > 1)
+    return ScanResult(pairs=pairs, invalid=invalid, duplicates=duplicates)
+
+
 def load_manifests_with_paths(
     dir_path: str,
 ) -> list[tuple[Manifest, str]]:
@@ -67,21 +105,12 @@ def load_manifests_with_paths(
     Raises:
         ValueError: If duplicate manifest IDs are found.
     """
-    directory = Path(dir_path)
-    pairs: list[tuple[Manifest, str]] = []
-    for yml_file in sorted(directory.glob("*.yml")) + sorted(directory.glob("*.yaml")):
-        try:
-            pairs.append((load_manifest(str(yml_file)), str(yml_file)))
-        except Exception:
-            logger.warning(
-                f"Skipping invalid manifest {yml_file}",
-                exc_info=True,
-            )
-    ids = [m.id for m, _ in pairs]
-    duplicates = [i for i in set(ids) if ids.count(i) > 1]
-    if duplicates:
-        raise ValueError(f"Duplicate manifest IDs found: {sorted(duplicates)}")
-    return pairs
+    scan = scan_manifests(dir_path)
+    for path, error in scan.invalid.items():
+        logger.warning("Skipping invalid manifest %s: %s", path, error)
+    if scan.duplicates:
+        raise ValueError(f"Duplicate manifest IDs found: {scan.duplicates}")
+    return scan.pairs
 
 
 def load_manifests_from_dir(dir_path: str) -> list[Manifest]:
@@ -403,9 +432,32 @@ def download_target(target):
         reset_store_cache()
 
 
+def _count(result: dict[str, Any], key: str) -> int:
+    """Length of the list an agent reported under *key* (0 when absent)."""
+    value = result.get(key)
+    return len(value) if isinstance(value, list) else 0
+
+
 async def _run_components(manifest: Manifest, target) -> dict:
-    """Execute a manifest's components and reconcile, under a resolved target."""
+    """Execute a manifest's components and reconcile, under a resolved target.
+
+    The returned ``summary`` is the one set of outcome counts for the run: the
+    final log line reads it, and so can anything reporting on the run. A
+    component *fails* when its handler raises; it finishes *with file errors*
+    when it returns per-file ``errors``. Either makes the run a failure.
+    """
     results: list[dict[str, Any]] = []
+    summary = {
+        "components": len(manifest.components),
+        "component_errors": 0,
+        "components_with_file_errors": 0,
+        "file_errors": 0,
+        "ingested": 0,
+        "not_found": 0,
+        "rejected": 0,
+        "deleted": 0,
+        "delete_stale_skipped": False,
+    }
     all_uri_hashes: list[dict[str, str]] = []
     all_not_found: set[str] = set()
     has_errors = False
@@ -416,8 +468,9 @@ async def _run_components(manifest: Manifest, target) -> dict:
         metadata = manifest.get_metadata(component)
         handler = _DISPATCH.get(type(component))
         if handler is None:
-            logger.error(f"Unknown component type: {type(component)}")
+            logger.error("Unknown component type: %s", type(component))
             results.append({"component": component.name, "error": f"Unknown component type: {type(component)}"})
+            summary["component_errors"] += 1
             has_errors = True
             continue
         try:
@@ -430,15 +483,23 @@ async def _run_components(manifest: Manifest, target) -> dict:
             # 404s are removals, not errors: exclude them from the reconcile
             # "should exist" set so their local copies are deleted.
             all_not_found.update(result.get("not_found", []))
+            summary["ingested"] += _count(result, "ingested")
+            summary["rejected"] += _count(result, "rejected")
+            results.append({"component": component.name, "result": result})
             # Per-file transient errors (timeout/5xx) block the reconcile to
             # stay safe, mirroring a raised component exception.
-            if result.get("errors"):
+            file_errors = _count(result, "errors")
+            if file_errors:
                 has_errors = True
-            results.append({"component": component.name, "result": result})
-            logger.info("Component '%s' completed successfully", component.name)
+                summary["components_with_file_errors"] += 1
+                summary["file_errors"] += file_errors
+                logger.warning("Component '%s' finished with %d file errors", component.name, file_errors)
+            else:
+                logger.info("Component '%s' completed successfully", component.name)
         except Exception as e:
-            logger.exception(f"Error running component {component.name}")
+            logger.exception("Error running component %s", component.name)
             results.append({"component": component.name, "error": str(e)})
+            summary["component_errors"] += 1
             has_errors = True
 
     # --- full URI listing for incremental SCM components -----------------------
@@ -451,6 +512,7 @@ async def _run_components(manifest: Manifest, target) -> dict:
     delete_stale_result = None
     if manifest.config and manifest.config.delete_stale:
         if has_errors:
+            summary["delete_stale_skipped"] = True
             logger.warning(
                 "Skipping delete_stale for source %s: one or more components had errors",
                 manifest.source,
@@ -459,16 +521,20 @@ async def _run_components(manifest: Manifest, target) -> dict:
             current_uris = {item["uri"] for item in all_uri_hashes} - all_not_found
             delete_stale_result = await local_state.reconcile_documents(manifest.source, current_uris)
 
-    error_count = sum(1 for r in results if "error" in r)
-    deleted_count = len(delete_stale_result or [])
-    not_found_count = len(all_not_found)
-    logger.info(
-        "Manifest '%s' finished: %d components, %d errors, %d not found (404), %d deleted",
+    summary["deleted"] = len(delete_stale_result or [])
+    summary["not_found"] = len(all_not_found)
+    # ERROR, not INFO, whenever anything failed: a level filter must find a run
+    # whose files failed even though every component returned.
+    failed = summary["component_errors"] or summary["file_errors"]
+    logger.log(
+        logging.ERROR if failed else logging.INFO,
+        "Manifest '%s' finished: %d components, %d component errors, %d file errors, %d not found (404), %d deleted",
         manifest.id,
-        len(results),
-        error_count,
-        not_found_count,
-        deleted_count,
+        summary["components"],
+        summary["component_errors"],
+        summary["file_errors"],
+        summary["not_found"],
+        summary["deleted"],
     )
 
     return {
@@ -476,6 +542,7 @@ async def _run_components(manifest: Manifest, target) -> dict:
         "manifest_name": manifest.name,
         "results": results,
         "delete_stale_result": delete_stale_result,
+        "summary": summary,
     }
 
 

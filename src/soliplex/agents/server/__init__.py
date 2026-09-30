@@ -33,6 +33,57 @@ logger = logging.getLogger(__name__)
 _schedule_registry = ScheduleRegistry()
 
 
+class _ReconcileLog:
+    """What the reconcile tick last reported, so each problem is logged once.
+
+    The tick runs every minute. Without this a broken manifest logged the same
+    warning sixty times an hour -- and still never said which manifest had
+    stopped running. A problem is reported again only when it changes: a
+    different error, or the file edited while still invalid.
+    """
+
+    def __init__(self) -> None:
+        self.dir_problem: str | None = None
+        self.duplicates: list[str] = []
+        # path -> (error, mtime_ns) as last reported
+        self.invalid: dict[str, tuple[str, int]] = {}
+
+
+_reconcile_log = _ReconcileLog()
+
+
+def _mtime_ns(path: str) -> int:
+    try:
+        return Path(path).stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _report_invalid(invalid: dict[str, str]) -> None:
+    """Log each invalid manifest file once per change, and each recovery.
+
+    Runs before the registry reconciles, so a file that just broke can still
+    be named by the manifest id it was registered under.
+    """
+    reported = _reconcile_log.invalid
+    for path, error in invalid.items():
+        fingerprint = (error, _mtime_ns(path))
+        if reported.get(path) == fingerprint:
+            continue
+        reported[path] = fingerprint
+        entry = _schedule_registry.entry_for_path(path)
+        logger.error(
+            "Manifest file %s (id %s) is invalid; it will not run until fixed: %s",
+            path,
+            entry.manifest_id if entry else "unknown",
+            error,
+        )
+    for path in [p for p in reported if p not in invalid]:
+        del reported[path]
+        if Path(path).exists():
+            logger.info("Manifest file %s is valid again", path)
+
+
 async def reconcile_manifest_schedules() -> None:
     """Rescan the manifest directory and fire due/newly-added manifests.
 
@@ -45,6 +96,10 @@ async def reconcile_manifest_schedules() -> None:
     here, so a manifest that comes due while another is running waits its
     turn instead of being dropped. This pass therefore never blocks on a
     manifest run and stays safe to drive from a cron tick.
+
+    Problems with the directory -- it is missing, a file is invalid, two files
+    share an id -- are logged once per change rather than on every tick (see
+    :class:`_ReconcileLog`).
     """
     from soliplex.agents.manifest import runner as manifest_runner
 
@@ -53,20 +108,31 @@ async def reconcile_manifest_schedules() -> None:
 
     manifest_path = Path(settings.manifest_dir)
     if not manifest_path.is_dir():
-        logger.warning(
-            "manifest_dir is not a directory: %s",
-            settings.manifest_dir,
-        )
+        if _reconcile_log.dir_problem != settings.manifest_dir:
+            logger.warning(
+                "manifest_dir is not a directory: %s",
+                settings.manifest_dir,
+            )
+            _reconcile_log.dir_problem = settings.manifest_dir
         return
+    _reconcile_log.dir_problem = None
 
-    try:
-        pairs = manifest_runner.load_manifests_with_paths(settings.manifest_dir)
-    except ValueError:
+    scan = manifest_runner.scan_manifests(settings.manifest_dir)
+    _report_invalid(scan.invalid)
+    if scan.duplicates:
         # e.g. a transient duplicate id mid-edit -- keep the last good state.
-        logger.exception("Error loading manifests; skipping this reconcile")
+        if scan.duplicates != _reconcile_log.duplicates:
+            logger.error(
+                "Duplicate manifest IDs found: %s; skipping reconcile until resolved",
+                scan.duplicates,
+            )
+            _reconcile_log.duplicates = scan.duplicates
         return
+    if _reconcile_log.duplicates:
+        logger.info("Duplicate manifest IDs resolved")
+        _reconcile_log.duplicates = []
 
-    result = _schedule_registry.reconcile(pairs, datetime.now(UTC))
+    result = _schedule_registry.reconcile(scan.pairs, datetime.now(UTC))
 
     for entry in result.added:
         if entry.cron_expr is not None:
@@ -86,8 +152,13 @@ async def reconcile_manifest_schedules() -> None:
             entry.manifest_id,
             entry.cron_expr,
         )
-    for mid in result.removed:
-        logger.info("Unregistered manifest '%s' (file removed)", mid)
+    for entry in result.removed:
+        if entry.path in scan.invalid:
+            # The file is still there: it stopped loading. Saying "removed"
+            # would hide that the manifest silently stopped running.
+            logger.error("Unregistered manifest '%s': %s is invalid", entry.manifest_id, entry.path)
+        else:
+            logger.info("Unregistered manifest '%s' (file removed)", entry.manifest_id)
 
     for entry in result.to_run:
         await manifest_queue.enqueue_manifest(entry.manifest_id, entry.path)

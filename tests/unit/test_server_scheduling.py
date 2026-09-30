@@ -8,6 +8,7 @@ behaviour (serialization, coalescing, failure isolation) is covered in
 
 import asyncio
 import logging
+import os
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -25,10 +26,12 @@ from soliplex.agents.server import reconcile_manifest_schedules
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    """Reset the schedule registry between tests."""
+    """Reset the schedule registry, and what reconcile last reported, between tests."""
     server._schedule_registry = ScheduleRegistry()
+    server._reconcile_log = server._ReconcileLog()
     yield
     server._schedule_registry = ScheduleRegistry()
+    server._reconcile_log = server._ReconcileLog()
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -98,7 +101,7 @@ class TestReconcileManifestSchedules:
         ):
             ms.manifest_dir = str(tmp_path)
             await reconcile_manifest_schedules()
-        assert "Error loading manifests" in caplog.text
+        assert "Duplicate manifest IDs found: ['dup']" in caplog.text
         mock_enq.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -161,6 +164,117 @@ class TestReconcileManifestSchedules:
             caplog.clear()
             await reconcile_manifest_schedules()
         assert "Rescheduled manifest 'a' cron='*/5 * * * *'" in caplog.text
+
+
+def _messages(caplog, level):
+    return [r.getMessage() for r in caplog.records if r.levelno == level and r.name == "soliplex.agents.server"]
+
+
+def _touch_later(path):
+    """Bump *path*'s mtime so the change is visible even on a coarse clock."""
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+
+class TestReconcileReportsProblemsOnce:
+    """Each problem is logged when it appears or changes, not on every tick."""
+
+    @pytest.fixture
+    def reconcile(self, tmp_path):
+        async def _run(times=1):
+            with (
+                patch("soliplex.agents.server.settings") as ms,
+                patch("soliplex.agents.server.manifest_queue.enqueue_manifest", new_callable=AsyncMock),
+            ):
+                ms.manifest_dir = str(tmp_path)
+                for _ in range(times):
+                    await reconcile_manifest_schedules()
+
+        return _run
+
+    @pytest.mark.asyncio
+    async def test_invalid_file_logged_once_then_again_after_an_edit(self, tmp_path, reconcile, caplog):
+        bad = tmp_path / "bad.yml"
+        bad.write_text(":::invalid:::")
+        with caplog.at_level(logging.INFO):
+            await reconcile(times=3)
+            errors = _messages(caplog, logging.ERROR)
+            assert len(errors) == 1
+            assert errors[0].startswith(f"Manifest file {bad} (id unknown) is invalid; it will not run until fixed")
+
+            bad.write_text("- still: [not, a, mapping]")
+            _touch_later(bad)
+            await reconcile(times=2)
+        assert len(_messages(caplog, logging.ERROR)) == 2
+
+    @pytest.mark.asyncio
+    async def test_registered_manifest_that_breaks_is_invalid_not_removed(self, tmp_path, reconcile, caplog):
+        _write_manifest(tmp_path, "a.yml", "a", schedule="*/5 * * * *")
+        await reconcile()
+        (tmp_path / "a.yml").write_text("id: a\nname: missing source and components\n")
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            await reconcile(times=2)
+
+        errors = _messages(caplog, logging.ERROR)
+        assert errors[0].startswith(f"Manifest file {tmp_path / 'a.yml'} (id a) is invalid")
+        assert errors[1] == f"Unregistered manifest 'a': {tmp_path / 'a.yml'} is invalid"
+        assert len(errors) == 2
+        assert "file removed" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_fixed_file_is_reported_valid_again(self, tmp_path, reconcile, caplog):
+        (tmp_path / "a.yml").write_text(":::invalid:::")
+        await reconcile()
+        _write_manifest(tmp_path, "a.yml", "a", schedule="*/5 * * * *")
+        with caplog.at_level(logging.INFO):
+            await reconcile()
+        assert f"Manifest file {tmp_path / 'a.yml'} is valid again" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_deleted_invalid_file_is_forgotten_quietly(self, tmp_path, reconcile, caplog):
+        (tmp_path / "a.yml").write_text(":::invalid:::")
+        await reconcile()
+        (tmp_path / "a.yml").unlink()
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            await reconcile()
+        assert server._reconcile_log.invalid == {}
+        assert "valid again" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_duplicate_ids_logged_once_and_resolution_reported(self, tmp_path, reconcile, caplog):
+        _write_manifest(tmp_path, "a.yml", "dup")
+        _write_manifest(tmp_path, "b.yml", "dup")
+        with caplog.at_level(logging.INFO):
+            await reconcile(times=3)
+            assert len(_messages(caplog, logging.ERROR)) == 1
+            (tmp_path / "b.yml").unlink()
+            await reconcile()
+        assert "Duplicate manifest IDs resolved" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_missing_directory_warned_once(self, tmp_path, caplog):
+        not_a_dir = tmp_path / "file.txt"
+        not_a_dir.write_text("hi")
+        with (
+            patch("soliplex.agents.server.settings") as ms,
+            patch("soliplex.agents.server.manifest_queue.enqueue_manifest", new_callable=AsyncMock),
+            caplog.at_level(logging.WARNING),
+        ):
+            ms.manifest_dir = str(not_a_dir)
+            for _ in range(3):
+                await reconcile_manifest_schedules()
+            assert caplog.text.count("not a directory") == 1
+            # Once the directory is usable again, a later problem is reported afresh.
+            ms.manifest_dir = str(tmp_path)
+            await reconcile_manifest_schedules()
+            ms.manifest_dir = str(not_a_dir)
+            await reconcile_manifest_schedules()
+        assert caplog.text.count("not a directory") == 2
+
+    def test_mtime_of_a_missing_file_is_zero(self, tmp_path):
+        assert server._mtime_ns(str(tmp_path / "gone.yml")) == 0
 
 
 class _FrozenClock:
