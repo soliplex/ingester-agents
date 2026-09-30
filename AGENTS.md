@@ -164,6 +164,8 @@ LANCEDB_DIR=/var/lib/lancedb                  # Interpolated by the haiku-rag co
 HAIKU_PATH=/etc/haiku                         # Base dir for haiku-rag config files
 # HAIKU_LOAD_COMMAND, HAIKU_DEFAULT_CONFIG, HAIKU_LOAD_TIMEOUT, HAIKU_LOAD_CWD also available
 # HAIKU_MAINTENANCE_COMMAND, HAIKU_MAINTENANCE_TIMEOUT for `manifest migrate` / `manifest vacuum`
+# HAIKU_OUTPUT_CHUNK_BYTES, HAIKU_OUTPUT_FLUSH_SECONDS, HAIKU_OUTPUT_MAX_BYTES shape how the
+# subprocess output is logged (in parts, inside the run's span)
 ```
 
 The haiku-rag config file needs its own set on top of these — haiku expands

@@ -192,6 +192,12 @@ HAIKU_PATH=/etc/haiku                  # base dir for haiku-rag config files
 # HAIKU_MAINTENANCE_COMMAND=haiku-rag --config={haiku_cfg} {verb}
 # HAIKU_MAINTENANCE_TIMEOUT=3600
 
+# haiku subprocess output (load and maintenance) is logged in parts, inside
+# the run's span: one record per chunk, split at a line break where possible
+# HAIKU_OUTPUT_CHUNK_BYTES=65536        # size of one logged part
+# HAIKU_OUTPUT_FLUSH_SECONDS=30         # log pending output at least this often
+# HAIKU_OUTPUT_MAX_BYTES=0              # cap on logged output per stream; 0 = none
+
 # S3-compatible storage. S3_ENDPOINT_URL is shared between urls_file reads
 # and the download store; the rest are the download store's credentials.
 S3_ENDPOINT_URL=https://minio.example.com:9000

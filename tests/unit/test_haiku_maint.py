@@ -142,7 +142,7 @@ class TestRunVerb:
         result = await haiku_maint.run_verb("src", "vacuum", haiku_cfg="/etc/my haiku/h.yaml", dry_run=True)
         assert "'--config=/etc/my haiku/h.yaml'" in result["command"]
 
-    async def test_success_buffers_and_reports(self, maint_env, caplog):
+    async def test_success_logs_output_in_parts_and_reports(self, maint_env, caplog):
         proc = _fake_proc(returncode=0, stdout_lines=[b"line1\n"], stderr_lines=[b"warn\n"])
         with caplog.at_level(logging.INFO), patch(_EXEC, new_callable=AsyncMock, return_value=proc) as mock_exec:
             result = await haiku_maint.run_verb("src", "migrate", haiku_cfg="/etc/h.yaml")
@@ -152,8 +152,8 @@ class TestRunVerb:
         assert result["stdout"] == "line1"
         assert result["stderr"] == "warn"
         assert result["db"].replace("\\", "/").endswith("src.lancedb")
-        # Output is buffered into the result, not logged line by line.
-        assert "line1" not in caplog.text
+        # Output is logged in one part per stream, not one record per line.
+        assert "haiku migrate src stdout part 1:\nline1" in caplog.text
         assert "haiku migrate for source 'src' completed" in caplog.text
         # cwd honours haiku_load_cwd (None here = inherit).
         assert mock_exec.call_args.kwargs["cwd"] is None

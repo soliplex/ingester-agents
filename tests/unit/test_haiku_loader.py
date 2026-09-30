@@ -161,9 +161,10 @@ class _RaisingTimeout:
 
 class TestRunLoad:
     @pytest.mark.asyncio
-    async def test_success_buffers_and_returns(self, haiku_env, caplog):
+    async def test_success_logs_output_in_parts_and_returns(self, haiku_env, caplog):
         proc = _fake_proc(returncode=0, stdout_lines=[b"step 1\n", b"done\n"])
-        with caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.haiku_loader"):
+        # Root level: the parts are logged by haiku_process, not haiku_loader.
+        with caplog.at_level(logging.INFO):
             with patch(
                 "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
@@ -175,8 +176,8 @@ class TestRunLoad:
         assert result["timed_out"] is False
         assert result["stdout"] == "step 1\ndone"
         assert result["db"].replace("\\", "/").endswith("composite-source.lancedb")
-        # Output is buffered into the result, not logged line by line.
-        assert "step 1" not in caplog.text
+        # Output is logged in one part per stream, not one record per line.
+        assert "haiku load composite source stdout part 1:\nstep 1\ndone" in caplog.text
         assert "haiku load for source 'composite source' completed" in caplog.text
 
         kwargs = mock_exec.call_args.kwargs
