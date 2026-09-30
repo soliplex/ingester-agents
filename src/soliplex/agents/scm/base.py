@@ -190,7 +190,7 @@ class BaseSCMProvider(ABC):
                     if response.status != 200:
                         if "errors" in items:
                             raise SCMException(str(items["errors"]))
-                        logger.error(f"Failed to fetch from {url}: {items}")
+                        logger.error("Failed to fetch from %s: %s", url, items)
                         raise APIFetchError
 
                     if process_response:
@@ -410,7 +410,7 @@ class BaseSCMProvider(ABC):
                 return parsed
 
         except Exception as e:
-            logger.exception(f"Error fetching from {url}")
+            logger.exception("Error fetching from %s", url)
             return {"error": str(e)}
 
     async def list_repo_files(
@@ -444,7 +444,7 @@ class BaseSCMProvider(ABC):
         async with self.get_session() as session:
             async with session.get(url) as response:
                 if response.content_type != "application/json":  # pragma: no cover
-                    logger.error(f"Unexpected response type: {response.content_type} - response: {response.text}")
+                    logger.error("Unexpected response type: %s - response: %s", response.content_type, response.text)
                 resp = await response.json()
 
                 # Handle empty repositories (no commits on branch yet)

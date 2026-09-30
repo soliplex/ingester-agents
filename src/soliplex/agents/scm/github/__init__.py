@@ -43,7 +43,7 @@ class GitHubProvider(BaseSCMProvider):
         if response.status != 200:
             if isinstance(resp, dict) and "message" in resp:
                 raise SCMException(str(resp["message"]))
-            logger.error(f"GitHub API error: status {response.status}")
+            logger.error("GitHub API error: status %s", response.status)
             raise GitHubAPIError
 
         if isinstance(resp, dict) and "errors" in resp:

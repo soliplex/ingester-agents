@@ -37,14 +37,15 @@ class ScheduleEntry:
 class ReconcileResult:
     """Actions the caller should take after a reconcile pass.
 
-    ``added``/``rescheduled`` carry entries (so the caller can log the cron
-    expression); ``removed`` carries ids. ``to_run`` lists the manifests
+    Every list carries entries: ``added``/``rescheduled`` so the caller can
+    log the cron expression, ``removed`` so it can tell, from the entry's
+    path, a deleted file from one that stopped loading. ``to_run`` lists the manifests
     that should be executed this cycle: scheduled manifests that are due,
     plus newly-seen unscheduled manifests (which run once).
     """
 
     added: list[ScheduleEntry] = field(default_factory=list)
-    removed: list[str] = field(default_factory=list)
+    removed: list[ScheduleEntry] = field(default_factory=list)
     rescheduled: list[ScheduleEntry] = field(default_factory=list)
     to_run: list[ScheduleEntry] = field(default_factory=list)
 
@@ -65,6 +66,10 @@ class ScheduleRegistry:
 
     def __init__(self) -> None:
         self._entries: dict[str, ScheduleEntry] = {}
+
+    def entry_for_path(self, path: str) -> ScheduleEntry | None:
+        """The registered entry loaded from *path*, if any."""
+        return next((e for e in self._entries.values() if e.path == path), None)
 
     def reconcile(
         self,
@@ -114,8 +119,7 @@ class ScheduleRegistry:
 
         for mid in list(self._entries):
             if mid not in seen:
-                del self._entries[mid]
-                result.removed.append(mid)
+                result.removed.append(self._entries.pop(mid))
 
         for entry in self._entries.values():
             if entry.cron_expr is not None and entry.next_run is not None and now >= entry.next_run:

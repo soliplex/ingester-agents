@@ -76,8 +76,17 @@ def test_removed_manifest_dropped():
 
     res = reg.reconcile(_pairs(("a", "0 0 * * *")), now + timedelta(minutes=1))
 
-    assert res.removed == ["b"]
+    assert [e.manifest_id for e in res.removed] == ["b"]
+    assert res.removed[0].path == "/manifests/b.yml"
     assert "b" not in reg._entries
+
+
+def test_entry_for_path():
+    reg = ScheduleRegistry()
+    reg.reconcile(_pairs(("a", None)), datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert reg.entry_for_path("/manifests/a.yml").manifest_id == "a"
+    assert reg.entry_for_path("/manifests/missing.yml") is None
 
 
 def test_cron_change_reschedules():

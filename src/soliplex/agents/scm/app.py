@@ -355,7 +355,10 @@ async def incremental_sync(
     changed_files = set()
     removed_files = set()
     file_data = []
-    fetch_errors = False
+    # Every failure lands here -- fetching a commit's file list, fetching a
+    # file, or writing one -- so a single check both holds the sync cursor and
+    # tells the manifest runner the component was not clean.
+    errors = []
 
     if content_filter in (ContentFilter.ALL, ContentFilter.FILES):
         new_commits = await impl.list_commits_since(repo_name, owner, since_commit_sha=last_commit_sha, branch=branch)
@@ -394,7 +397,10 @@ async def incremental_sync(
                             changed_files.add(file_path)
 
             except Exception as e:
-                logger.exception(f"Error processing commit {commit.get('sha')}", exc_info=e)
+                # Its changed files are unknown, so the cursor must not move
+                # past it: record the failure rather than skipping the commit.
+                logger.exception("Error processing commit %s", commit.get("sha"))
+                errors.append({"uri": f"commit:{commit.get('sha')}", "error": str(e), "stage": "commit"})
                 continue
 
         logger.info(f"Files changed: {len(changed_files)}, removed: {len(removed_files)}")
@@ -423,8 +429,8 @@ async def incremental_sync(
                 file = await impl.get_single_file(repo_name, owner, file_path, branch)
                 file_data.append(file)
             except Exception as e:
-                fetch_errors = True
-                logger.exception(f"Failed to fetch {file_path}", exc_info=e)
+                logger.exception("Failed to fetch %s", file_path)
+                errors.append({"uri": file_path, "error": str(e), "stage": "fetch"})
 
         # Drop fetched files whose detected content type isn't allowed.
         file_data = [f for f in file_data if mime.extension_allowed(_resolve_mime(f), allowed_extensions)]
@@ -442,7 +448,6 @@ async def incremental_sync(
         }
 
     # Write changed files and issues locally
-    errors = []
     rejected = []
     ingested = []
 
@@ -467,19 +472,17 @@ async def incremental_sync(
             logger.warning("Processor rejected %s: %s", uri, e)
             rejected.append({"uri": uri, "reason": str(e)})
         except Exception as e:
-            logger.exception(f"Failed to write {file.get('uri', 'unknown')}")
+            logger.exception("Failed to write %s", uri)
             errors.append({"uri": uri, "error": str(e)})
 
-    # Update sync state with latest commit only if no fetch/ingest errors
+    # Update sync state with latest commit only if nothing failed
     latest_commit_sha = last_commit_sha
-    has_sync_errors = fetch_errors or len(errors) > 0
-    if new_commits and not has_sync_errors:
+    if new_commits and not errors:
         latest_commit_sha = new_commits[0]["sha"]
-    elif has_sync_errors:
+    elif errors:
         logger.warning(
-            "Not advancing sync state past %s due to errors (fetch_errors=%s, ingest_errors=%d)",
+            "Not advancing sync state past %s due to %d errors",
             last_commit_sha,
-            fetch_errors,
             len(errors),
         )
     local_state.set_sync_meta(

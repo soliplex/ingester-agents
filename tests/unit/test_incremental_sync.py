@@ -546,3 +546,65 @@ async def test_rejection_does_not_block_delete_stale(local_env):
     assert result["rejected"]
     assert mock_list.called
     assert mock_prune.called
+
+
+def _failing_sync_provider(**overrides):
+    """A provider with one new commit touching one file, for failure tests."""
+    provider = MagicMock()
+    provider.list_commits_since = AsyncMock(return_value=[{"sha": "def456", "message": "Update file1.md"}])
+    provider.get_commit_details = AsyncMock(
+        return_value={"sha": "def456", "files": [{"filename": "file1.md", "status": "modified"}]}
+    )
+    provider.get_single_file = AsyncMock(
+        return_value={
+            "uri": "file1.md",
+            "file_bytes": b"x",
+            "content-type": "text/markdown",
+            "sha256": "aa",
+            "metadata": {},
+        }
+    )
+    provider.list_issues = AsyncMock(return_value=[])
+    for name, value in overrides.items():
+        setattr(provider, name, value)
+    return provider
+
+
+@pytest.mark.asyncio
+async def test_fetch_failure_is_reported_and_holds_the_cursor(local_env):
+    """A file that fails to fetch reaches `errors`, so the runner sees it."""
+    source = "gitea:admin:test:all"
+    local_state.set_sync_meta(source, "abc123", branch="main")
+    provider = _failing_sync_provider(get_single_file=AsyncMock(side_effect=RuntimeError("502 Bad Gateway")))
+
+    with (
+        patch("soliplex.agents.scm.app.get_scm", return_value=provider),
+        patch("soliplex.agents.scm.app.list_all_uris", AsyncMock(return_value=[])) as mock_list,
+    ):
+        result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin", delete_stale=True)
+
+    assert result["errors"] == [{"uri": "file1.md", "error": "502 Bad Gateway", "stage": "fetch"}]
+    assert result["new_commit_sha"] == "abc123"
+    assert local_state.get_sync_meta(source)["last_commit_sha"] == "abc123"
+    # A failed fetch leaves the inventory incomplete, so nothing is pruned.
+    assert not mock_list.called
+
+
+@pytest.mark.asyncio
+async def test_commit_failure_is_reported_and_does_not_skip_the_commit(local_env):
+    """A commit whose file list can't be read must not be advanced past.
+
+    Its changed files are unknown, so moving the cursor beyond it would lose
+    them for good: no later run would look at that commit again.
+    """
+    source = "gitea:admin:test:all"
+    local_state.set_sync_meta(source, "abc123", branch="main")
+    provider = _failing_sync_provider(get_commit_details=AsyncMock(side_effect=RuntimeError("timeout")))
+
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin")
+
+    assert result["errors"] == [{"uri": "commit:def456", "error": "timeout", "stage": "commit"}]
+    assert result["new_commit_sha"] == "abc123"
+    assert local_state.get_sync_meta(source)["last_commit_sha"] == "abc123"
+    provider.get_single_file.assert_not_awaited()
