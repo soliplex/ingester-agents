@@ -12,16 +12,16 @@ explicit ``SOURCE`` (the sanitized download-folder name) and
 ``DOWNLOAD_DIR`` so the config can locate the ingested documents.
 """
 
-import asyncio
 import logging
 import re
 import shlex
-import signal
 from pathlib import Path
 
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import settings
 from soliplex.agents.manifest.context import LoadContext
+from soliplex.agents.manifest.haiku_process import run_haiku
+from soliplex.agents.sidecar import kinds as sidecar_kinds
 
 logger = logging.getLogger(__name__)
 
@@ -113,26 +113,6 @@ def build_load_argv(haiku_cfg: str, db: str, source: str) -> list[str]:
     return [token.format(**substitutions) for token in shlex.split(settings.haiku_load_command)]
 
 
-async def _pump_stream(reader, log, source: str) -> str:
-    """Log each line from *reader* as it arrives; return the full text.
-
-    Args:
-        reader: An ``asyncio.StreamReader`` for the subprocess stdout/stderr.
-        log: A logger method (e.g. ``logger.info``) called per line.
-        source: Source identifier, included in each log line.
-
-    Returns:
-        The accumulated output, newline-joined, so callers can still
-        capture it in the result.
-    """
-    lines: list[str] = []
-    async for raw in reader:
-        line = raw.decode("utf-8", errors="replace").rstrip()
-        log("haiku[%s]: %s", source, line)
-        lines.append(line)
-    return "\n".join(lines)
-
-
 async def _run_post_process(manifest: Manifest, ingester_exit_code: int | None) -> list[dict]:
     """Run the manifest's post-process callbacks after a load.
 
@@ -146,99 +126,81 @@ async def _run_post_process(manifest: Manifest, ingester_exit_code: int | None) 
     return await post_process.run_post_process(manifest, ingester_exit_code=ingester_exit_code)
 
 
+async def _log_if_no_documents(manifest: Manifest, context: LoadContext) -> None:
+    """Log an error when the load is about to run over an empty download folder.
+
+    Checks the same location handed to the subprocess as ``DOWNLOAD_DIR`` /
+    ``DOWNLOAD_URI``, counting documents only -- a folder holding nothing but
+    sidecars still has nothing to index. The load itself still runs: this
+    only makes an empty source visible, it does not change what happens next.
+    A listing failure is logged and otherwise ignored, so the check can never
+    be what stops a load.
+    """
+    try:
+        keys = await context.store.list()
+    except Exception:
+        logger.exception(
+            "Could not list documents at %s for manifest '%s' before haiku load",
+            context.download_uri,
+            manifest.id,
+        )
+        return
+    sidecar_suffixes = tuple(kind.suffix for kind in sidecar_kinds().values())
+    if not any(not key.endswith(sidecar_suffixes) for key in keys):
+        logger.error(
+            "Manifest '%s' finished with no documents in %s; haiku load for source '%s' has nothing to index",
+            manifest.id,
+            context.download_uri,
+            manifest.source,
+        )
+
+
 async def run_load(manifest: Manifest) -> dict:
     """Run a single haiku-rag batch load for *manifest*.
 
     Spawns the configured load command with ``SOURCE`` set to the
     sanitized download-folder name and ``DOWNLOAD_DIR`` injected so the
-    haiku-rag config can locate the ingested documents. The subprocess's
-    stdout and stderr are streamed to the logger line by line as the load
-    progresses (``PYTHONUNBUFFERED`` is set so the child flushes promptly).
-    Failures and timeouts are logged and reported in the result rather than
-    raised.
+    haiku-rag config can locate the ingested documents. The subprocess runs
+    in a span of its own and its output is buffered, not streamed -- see
+    :mod:`.haiku_process`. Failures and timeouts are logged and reported in the
+    result rather than raised.
 
     Args:
         manifest: The manifest whose source should be loaded.
 
     Returns:
-        Dict with ``source``, ``db``, ``returncode``, ``timed_out`` and
-        (unless timed out) captured ``stdout``/``stderr``.
+        Dict with ``source``, ``db``, ``returncode`` (``None`` on timeout),
+        ``timed_out``, the captured ``stdout``/``stderr`` and ``post_process``.
     """
     source = manifest.source
     haiku_cfg = resolve_haiku_cfg(manifest)
     db = resolve_db_path(source)
     argv = build_load_argv(haiku_cfg, db, source)
 
-    env = LoadContext.for_source(source).env()
+    context = LoadContext.for_source(source)
+    env = context.env()
     env["OTEL_SERVICE_NAME"] = env.get("OTEL_SERVICE_NAME", "ingester-agent") + f".haiku-ingester.{source}"
-    # Force the (Python) child to flush stdout so we can stream it live.
+    # Flush promptly, so a timed-out child's last output is not lost in its buffer.
     env["PYTHONUNBUFFERED"] = "1"
     if settings.logfire_token is not None:
         env["LOGFIRE_TOKEN"] = settings.logfire_token.get_secret_value()
 
-    logger.info("Starting haiku load for source '%s' -> %s", source, db)
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        cwd=settings.haiku_load_cwd,
+    await _log_if_no_documents(manifest, context)
+    run = await run_haiku(
+        argv,
+        operation="load",
+        source=source,
         env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        cwd=settings.haiku_load_cwd,
+        timeout=settings.haiku_load_timeout,
+        attributes={"haiku.db": db, "haiku.config": haiku_cfg, "manifest.id": manifest.id},
     )
-    try:
-        async with asyncio.timeout(settings.haiku_load_timeout):
-            out, err = await asyncio.gather(
-                _pump_stream(proc.stdout, logger.info, source),
-                _pump_stream(proc.stderr, logger.info, source),
-            )
-            await proc.wait()
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        logger.error(  # noqa: TRY400 — timeout traceback adds no signal
-            "haiku load for source '%s' timed out after %ds",
-            source,
-            settings.haiku_load_timeout,
-        )
-        return {
-            "source": source,
-            "db": db,
-            "returncode": None,
-            "timed_out": True,
-            "post_process": await _run_post_process(manifest, None),
-        }
-
-    logger.info(
-        "haiku load subprocess for source '%s' exited with code %s",
-        source,
-        proc.returncode,
-    )
-    if proc.returncode == 0:
-        logger.info("haiku load for source '%s' completed", source)
-    elif proc.returncode < 0:
-        try:
-            signame = signal.Signals(-proc.returncode).name
-        except ValueError:  # pragma: no cover - signal set is platform-specific
-            signame = f"signal {-proc.returncode}"
-        logger.error(
-            "haiku load for source '%s' was killed by %s (rc=%s); a SIGKILL "
-            "usually means the container exceeded its memory limit -- raise the "
-            "memory limit or lower the haiku worker_count",
-            source,
-            signame,
-            proc.returncode,
-        )
-    else:
-        logger.error(
-            "haiku load for source '%s' failed (rc=%s)",
-            source,
-            proc.returncode,
-        )
     return {
         "source": source,
         "db": db,
-        "returncode": proc.returncode,
-        "stdout": out,
-        "stderr": err,
-        "timed_out": False,
-        "post_process": await _run_post_process(manifest, proc.returncode),
+        "returncode": run.returncode,
+        "stdout": run.stdout,
+        "stderr": run.stderr,
+        "timed_out": run.timed_out,
+        "post_process": await _run_post_process(manifest, run.returncode),
     }

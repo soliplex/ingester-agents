@@ -13,8 +13,8 @@ from soliplex.agents.config import ManifestConfig
 from soliplex.agents.config import settings
 from soliplex.agents.manifest import haiku_maint
 
-_EXEC = "soliplex.agents.manifest.haiku_maint.asyncio.create_subprocess_exec"
-_TIMEOUT = "soliplex.agents.manifest.haiku_maint.asyncio.timeout"
+_EXEC = "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec"
+_TIMEOUT = "soliplex.agents.manifest.haiku_process.asyncio.timeout"
 
 
 def _manifest(source="src", manifest_id="m", haiku_config=None):
@@ -29,18 +29,13 @@ def _manifest(source="src", manifest_id="m", haiku_config=None):
 
 
 class _FakeStream:
-    """Minimal async-iterable stand-in for asyncio.StreamReader."""
+    """Minimal stand-in for asyncio.StreamReader: one chunk per read, then EOF."""
 
-    def __init__(self, lines):
-        self._lines = list(lines)
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
 
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._lines:
-            raise StopAsyncIteration
-        return self._lines.pop(0)
+    async def read(self, n=-1):
+        return self._chunks.pop(0) if self._chunks else b""
 
 
 def _fake_proc(returncode=0, stdout_lines=(b"ok\n",), stderr_lines=()):
@@ -147,7 +142,7 @@ class TestRunVerb:
         result = await haiku_maint.run_verb("src", "vacuum", haiku_cfg="/etc/my haiku/h.yaml", dry_run=True)
         assert "'--config=/etc/my haiku/h.yaml'" in result["command"]
 
-    async def test_success_streams_and_reports(self, maint_env, caplog):
+    async def test_success_logs_output_in_parts_and_reports(self, maint_env, caplog):
         proc = _fake_proc(returncode=0, stdout_lines=[b"line1\n"], stderr_lines=[b"warn\n"])
         with caplog.at_level(logging.INFO), patch(_EXEC, new_callable=AsyncMock, return_value=proc) as mock_exec:
             result = await haiku_maint.run_verb("src", "migrate", haiku_cfg="/etc/h.yaml")
@@ -157,9 +152,9 @@ class TestRunVerb:
         assert result["stdout"] == "line1"
         assert result["stderr"] == "warn"
         assert result["db"].replace("\\", "/").endswith("src.lancedb")
-        # Output is streamed to the logger as it arrives.
-        assert "haiku[src]: line1" in caplog.text
-        assert "completed" in caplog.text
+        # Output is logged in one part per stream, not one record per line.
+        assert "haiku migrate src stdout part 1:\nline1" in caplog.text
+        assert "haiku migrate for source 'src' completed" in caplog.text
         # cwd honours haiku_load_cwd (None here = inherit).
         assert mock_exec.call_args.kwargs["cwd"] is None
 
@@ -200,6 +195,7 @@ class TestRunVerb:
         assert result["returncode"] == 2
         assert result["timed_out"] is False
         assert "failed (rc=2)" in caplog.text
+        assert "last stderr:\nboom" in caplog.text
 
     async def test_negative_exit_logs_signal(self, maint_env, caplog):
         proc = _fake_proc(returncode=-9)
@@ -222,7 +218,7 @@ class TestRunVerb:
         proc.wait.assert_awaited()
         assert result["returncode"] is None
         assert result["timed_out"] is True
-        assert "stdout" not in result
+        assert result["stdout"] == ""
         assert "timed out after 5s" in caplog.text
 
     async def test_explicit_timeout_overrides_setting(self, maint_env):
