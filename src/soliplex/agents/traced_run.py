@@ -23,13 +23,13 @@ this package, which it looks up by name among the ``console_scripts`` entry
 points.
 """
 
+import ntpath
 import os
 import sys
 from collections.abc import Mapping
 from collections.abc import Sequence
 from importlib.metadata import EntryPoint
 from importlib.metadata import entry_points
-from pathlib import Path
 
 from opentelemetry import context
 from opentelemetry import propagate
@@ -39,8 +39,13 @@ USAGE = "usage: python -m soliplex.agents.traced_run <console-script> [args...]"
 
 
 def script_name(command: str) -> str:
-    """The console-script name *command* invokes (``/venv/bin/haiku-ingester`` -> ``haiku-ingester``)."""
-    name = Path(command).name
+    """The console-script name *command* invokes (``/venv/bin/haiku-ingester`` -> ``haiku-ingester``).
+
+    ``ntpath`` rather than ``pathlib``: it splits on both ``/`` and ``\\`` on
+    every platform, so a Windows path gives the same name when read on Linux,
+    where ``Path`` treats a backslash as part of the filename.
+    """
+    name = ntpath.basename(command)
     return name[:-4] if name.lower().endswith(".exe") else name
 
 

@@ -35,7 +35,10 @@ def _current_ids():
     [
         ("haiku-ingester", "haiku-ingester"),
         ("/app/.venv/bin/haiku-ingester", "haiku-ingester"),
+        # Windows paths, on any platform: CI reads them on Linux, where
+        # pathlib would treat the backslashes as part of the name.
         (r"C:\app\.venv\Scripts\haiku-ingester.EXE", "haiku-ingester"),
+        ("C:/app/.venv/Scripts/haiku-ingester.exe", "haiku-ingester"),
     ],
 )
 def test_script_name(command, name):
