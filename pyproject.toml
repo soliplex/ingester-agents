@@ -37,6 +37,7 @@ dependencies = [
     "pypdfium2>=4.0",
     "puremagic>=2.2.0",
     "obstore>=0.9.5",
+    "opentelemetry-api>=1.44.0",
 ]
 
 
@@ -48,6 +49,7 @@ dev = [
     "faker>=40.8.0",
     "httpx>=0.28.0",
     "opendal>=0.46.0",
+    "opentelemetry-sdk>=1.44.0",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",

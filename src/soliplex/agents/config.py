@@ -150,6 +150,13 @@ class Settings(BaseSettings):
     haiku_load_timeout: int = 1800  # Timeout for a single load subprocess (seconds)
     haiku_load_cwd: str | None = None  # Working dir for the load subprocess (default: inherit)
 
+    # haiku subprocess output (load and maintenance), forwarded to the log in
+    # parts: one record per chunk, split at a line break where possible, and
+    # at least every flush interval while output is pending.
+    haiku_output_chunk_bytes: int = Field(default=64 * 1024, gt=0)
+    haiku_output_flush_seconds: float = Field(default=30.0, gt=0)
+    haiku_output_max_bytes: int = Field(default=0, ge=0)  # logged per stream; 0 = unlimited
+
     # haiku-rag maintenance settings (`manifest migrate` / `manifest vacuum`)
     # Placeholders: {verb} {haiku_cfg} {db} {source} {lancedb_dir} {haiku_path}
     haiku_maintenance_command: str = "haiku-rag --config={haiku_cfg} {verb}"
