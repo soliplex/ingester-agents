@@ -13,6 +13,7 @@ from fastapi import APIRouter
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from soliplex.agents import telemetry
 from soliplex.agents.config import configure_logging
 from soliplex.agents.config import settings
 from soliplex.agents.manifest.schedule_registry import ScheduleRegistry
@@ -164,42 +165,46 @@ async def reconcile_manifest_schedules() -> None:
         await manifest_queue.enqueue_manifest(entry.manifest_id, entry.path)
 
 
+# Requests that get no span. The health check is polled every 30s by the
+# container HEALTHCHECK (and by any orchestrator probe), so tracing it would
+# bury real requests. Anchored on the end of the path because the route sits
+# under `api_prefix` and, behind a proxy, `root_path`. These are regexes
+# searched against the request URL; no commas, which OpenTelemetry splits on.
+_UNTRACED_URLS = [r"/health/?(\?.*)?$"]
+
+
 def configure_logfire(app: FastAPI) -> None:
-    """Configure Pydantic Logfire for the server process.
+    """Configure Pydantic Logfire for the server process and trace its requests.
 
     Only active when a token is available (read from
-    ``/run/secrets/logfire_token`` or the ``LOGFIRE_TOKEN`` env var). When
-    enabled it instruments the FastAPI app and routes stdlib logging to
-    Logfire. Any failure is logged and swallowed so observability never
-    blocks the server.
+    ``/run/secrets/logfire_token`` or the ``LOGFIRE_TOKEN`` env var); the setup
+    shared with the CLI lives in :func:`soliplex.agents.telemetry.configure`.
+    Any failure is logged and swallowed so observability never blocks the
+    server.
+
+    Called at import, right after the app is created, **not** from the
+    lifespan. ``instrument_fastapi`` only wraps ``build_middleware_stack``, and
+    Starlette builds the stack on the app's first call -- the lifespan's
+    startup -- so instrumenting from inside the lifespan produced no request
+    spans at all.
     """
-    if settings.logfire_token is None:
+    if not telemetry.configure():
         logger.info("No Logfire token configured; skipping Logfire setup")
         return
     try:
         import logfire
 
-        logfire.configure(
-            token=settings.logfire_token.get_secret_value(),
-            service_name=settings.logfire_service_name,
-            send_to_logfire=True,
-            console=False,
-        )
-        logfire.instrument_fastapi(app, capture_headers=True)
-        logging.getLogger().addHandler(logfire.LogfireLoggingHandler())
-        logger.info(
-            "Logfire configured (service=%s)",
-            settings.logfire_service_name,
-        )
+        logfire.instrument_fastapi(app, capture_headers=True, excluded_urls=_UNTRACED_URLS)
     except Exception:
-        logger.exception("Failed to configure Logfire; continuing without it")
+        logger.exception("Failed to instrument FastAPI for Logfire; continuing without request spans")
 
 
 async def lifespan(app: FastAPI):
     """Manage app lifecycle."""
 
     configure_logging()
-    configure_logfire(app)
+    # configure_logging() replaced the root handlers; put Logfire's back.
+    telemetry.configure()
     logger.info("Starting soliplex-agents server")
     if settings.api_prefix:
         logger.info(f"API prefix: {settings.api_prefix}")
@@ -235,6 +240,7 @@ app = FastAPI(
     lifespan=lifespan,
     root_path=settings.root_path or "",
 )
+configure_logfire(app)
 
 # CORS middleware
 app.add_middleware(

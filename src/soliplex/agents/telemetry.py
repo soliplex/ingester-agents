@@ -22,7 +22,10 @@ The trace a server run produces::
                                                under the manifest's context
 """
 
+import logging
+import sys
 from collections.abc import Iterator
+from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -31,7 +34,14 @@ from opentelemetry.trace import Span
 from opentelemetry.trace import Status
 from opentelemetry.trace import StatusCode
 
+from soliplex.agents.config import settings
+
+logger = logging.getLogger(__name__)
+
 tracer = trace.get_tracer("soliplex.agents")
+
+# Whether this process has configured Logfire (see `configure`).
+_configured = False
 
 # Attribute names, defined once so queries and tests don't drift.
 MANIFEST_ID = "manifest.id"
@@ -45,6 +55,113 @@ COMPONENT_TYPE = "component.type"
 POST_PROCESS_METHOD = "post_process.method"
 POST_PROCESS_INDEX = "post_process.index"
 INGESTER_EXIT_CODE = "haiku.returncode"
+
+
+CLI_COMMAND = "cli.command"
+CLI_EXIT_CODE = "cli.exit_code"
+
+
+def configure() -> bool:
+    """Configure Logfire for this process and route stdlib logging to it.
+
+    Shared by the server and the CLI. Only acts when a Logfire token is
+    available (``/run/secrets/logfire_token`` or ``LOGFIRE_TOKEN``), and never
+    raises: a failure is logged and the process carries on untraced.
+
+    Safe to call repeatedly. Logfire itself is configured the first time
+    only; the log handler is attached whenever the root logger lacks one,
+    because ``configure_logging()`` clears the root handlers -- so call this
+    again after it. Attaching only when missing is what keeps a second call
+    from sending every record twice.
+
+    Returns:
+        Whether Logfire is active in this process.
+    """
+    global _configured
+    if settings.logfire_token is None:
+        return False
+    try:
+        import logfire
+
+        if not _configured:
+            logfire.configure(
+                token=settings.logfire_token.get_secret_value(),
+                service_name=settings.logfire_service_name,
+                send_to_logfire=True,
+                console=False,
+            )
+            _configured = True
+            logger.info("Logfire configured (service=%s)", settings.logfire_service_name)
+        root = logging.getLogger()
+        if not any(isinstance(handler, logfire.LogfireLoggingHandler) for handler in root.handlers):
+            root.addHandler(logfire.LogfireLoggingHandler())
+    except Exception:
+        logger.exception("Failed to configure Logfire; continuing without it")
+        return False
+    return True
+
+
+def command_path(root, argv: Sequence[str]) -> str:
+    """The subcommand names in *argv*, walked against the command tree *root*.
+
+    Only tokens that name a command are kept, so option values never make it
+    into a span: ``webdav run --password hunter2`` is ``webdav run``.
+
+    Args:
+        root: The root ``click.Group`` (a Typer app's command).
+        argv: The arguments after the program name.
+    """
+    path: list[str] = []
+    command = root
+    for token in argv:
+        commands = getattr(command, "commands", None)
+        if commands is None:
+            break
+        if token in commands:
+            path.append(token)
+            command = commands[token]
+    return " ".join(path)
+
+
+def _exit_code(error: BaseException | None) -> int:
+    """The exit code a CLI command is leaving with."""
+    if error is None:
+        return 0
+    # click.exceptions.Exit / ClickException carry `exit_code`; sys.exit a `code`.
+    code = getattr(error, "exit_code", None)
+    if code is None and isinstance(error, SystemExit):
+        code = error.code
+    if code is None:
+        return 1
+    return code if isinstance(code, int) else 1
+
+
+class CliSpan:
+    """The root span for one CLI command, entered from the Typer callback.
+
+    It is registered with ``ctx.with_resource``, so Click closes it when the
+    command finishes. Click closes resources with no exception details, so the
+    outcome comes from ``sys.exc_info()`` instead, which still holds the
+    exception while Click's context is exiting with it. ``typer.Exit(0)`` counts
+    as success; any other exit code, or an exception, fails the span.
+    """
+
+    def __init__(self, command: str) -> None:
+        self._context = span("cli", f"si-agent {command}".rstrip(), {CLI_COMMAND: command})
+        self.span: Span | None = None
+
+    def __enter__(self) -> Span:
+        self.span = self._context.__enter__()
+        return self.span
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        error = exc or sys.exc_info()[1]
+        code = _exit_code(error)
+        self.span.set_attribute(CLI_EXIT_CODE, code)
+        if code:
+            is_exit = hasattr(error, "exit_code") or isinstance(error, SystemExit)
+            fail(self.span, f"exited with code {code}", None if is_exit else error)
+        self._context.__exit__(None, None, None)
 
 
 @contextmanager

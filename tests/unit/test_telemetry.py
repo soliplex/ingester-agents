@@ -1,10 +1,146 @@
 """Tests for the shared span helpers — 100% branch coverage required."""
 
+import logging
+
+import logfire
 import pytest
+import typer
 from opentelemetry.trace import StatusCode
+from pydantic import SecretStr
 
 from soliplex.agents import telemetry
+from soliplex.agents.cli import cli as root_cli
 from soliplex.agents.config import Manifest
+from soliplex.agents.config import settings
+
+
+class _FakeLogfireHandler(logging.Handler):
+    def emit(self, record):
+        pass
+
+
+@pytest.fixture
+def fake_logfire(monkeypatch):
+    """Stand in for logfire.configure / its handler: nothing is exported."""
+    calls = []
+    monkeypatch.setattr(logfire, "configure", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(logfire, "LogfireLoggingHandler", _FakeLogfireHandler)
+    monkeypatch.setattr(telemetry, "_configured", False)
+    monkeypatch.setattr(settings, "logfire_token", SecretStr("tok"), raising=False)
+    root = logging.getLogger()
+    yield calls
+    for handler in [h for h in root.handlers if isinstance(h, _FakeLogfireHandler)]:
+        root.removeHandler(handler)
+
+
+def _fake_handlers():
+    return [h for h in logging.getLogger().handlers if isinstance(h, _FakeLogfireHandler)]
+
+
+class TestConfigure:
+    def test_no_token_is_a_noop(self, fake_logfire, monkeypatch):
+        monkeypatch.setattr(settings, "logfire_token", None, raising=False)
+        assert telemetry.configure() is False
+        assert fake_logfire == []
+        assert _fake_handlers() == []
+
+    def test_configures_once_and_attaches_one_handler(self, fake_logfire):
+        assert telemetry.configure() is True
+        assert telemetry.configure() is True
+        assert len(fake_logfire) == 1
+        assert fake_logfire[0]["token"] == "tok"
+        assert fake_logfire[0]["service_name"] == settings.logfire_service_name
+        # A second call must not add a second handler: every record would be sent twice.
+        assert len(_fake_handlers()) == 1
+
+    def test_reattaches_the_handler_after_configure_logging_clears_it(self, fake_logfire):
+        telemetry.configure()
+        for handler in _fake_handlers():
+            logging.getLogger().removeHandler(handler)
+        telemetry.configure()
+        assert len(fake_logfire) == 1
+        assert len(_fake_handlers()) == 1
+
+    def test_a_failure_is_logged_not_raised(self, fake_logfire, monkeypatch, caplog):
+        def boom(**kwargs):
+            raise RuntimeError("bad token")
+
+        monkeypatch.setattr(logfire, "configure", boom)
+        with caplog.at_level(logging.ERROR, logger="soliplex.agents.telemetry"):
+            assert telemetry.configure() is False
+        assert "Failed to configure Logfire" in caplog.text
+
+
+class TestCommandPath:
+    @pytest.fixture
+    def root(self):
+        return typer.main.get_command(root_cli)
+
+    def test_keeps_command_names_only(self, root):
+        argv = ["--otel", "webdav", "run-inventory", "/docs", "--webdav-password", "hunter2"]
+        assert telemetry.command_path(root, argv) == "webdav run-inventory"
+
+    def test_option_values_between_commands_are_skipped(self, root):
+        assert telemetry.command_path(root, ["manifest", "--bogus", "x", "run", "a.yml"]) == "manifest run"
+
+    def test_no_command(self, root):
+        assert telemetry.command_path(root, ["--otel"]) == ""
+
+
+class TestCliSpan:
+    def test_success(self, spans):
+        with telemetry.CliSpan("manifest run"):
+            pass
+        (span,) = spans.named("cli")
+        assert span.attributes["logfire.msg"] == "si-agent manifest run"
+        assert span.attributes[telemetry.CLI_COMMAND] == "manifest run"
+        assert span.attributes[telemetry.CLI_EXIT_CODE] == 0
+        assert span.status.status_code is StatusCode.UNSET
+
+    def test_an_exception_fails_it_with_the_exception(self, spans):
+        with pytest.raises(RuntimeError), telemetry.CliSpan("fs run"):
+            raise RuntimeError("boom")
+        (span,) = spans.named("cli")
+        assert span.attributes[telemetry.CLI_EXIT_CODE] == 1
+        assert span.status.description == "exited with code 1"
+        assert span.events[0].name == "exception"
+
+    @pytest.mark.parametrize(
+        "error, code",
+        [(SystemExit(2), 2), (typer.Exit(3), 3), (SystemExit("message"), 1), (SystemExit(None), 1)],
+    )
+    def test_a_non_zero_exit_fails_it_without_an_exception_event(self, spans, error, code):
+        with pytest.raises(type(error)), telemetry.CliSpan("x"):
+            raise error
+        (span,) = spans.named("cli")
+        assert span.attributes[telemetry.CLI_EXIT_CODE] == code
+        assert span.status.status_code is StatusCode.ERROR
+        assert span.events == ()
+
+    def test_exit_zero_is_success(self, spans):
+        with pytest.raises(typer.Exit), telemetry.CliSpan("x"):
+            raise typer.Exit(0)
+        assert spans.named("cli")[0].status.status_code is StatusCode.UNSET
+
+    def test_outcome_read_while_click_is_exiting_with_an_exception(self, spans):
+        # Click closes resources with no exception details; the span must
+        # still see the exception that is propagating.
+        def exit_four():
+            raise typer.Exit(4)
+
+        cli_span = telemetry.CliSpan("x")
+        cli_span.__enter__()
+        try:
+            exit_four()
+        except typer.Exit:
+            cli_span.__exit__(None, None, None)
+        assert spans.named("cli")[0].attributes[telemetry.CLI_EXIT_CODE] == 4
+
+
+def test_empty_command_message(spans):
+    with telemetry.CliSpan(""):
+        pass
+    assert spans.named("cli")[0].attributes["logfire.msg"] == "si-agent"
 
 
 def _manifest():
