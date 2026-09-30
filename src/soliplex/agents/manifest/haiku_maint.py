@@ -15,18 +15,16 @@ Running out-of-process keeps LanceDB's async runtime out of the agent's event
 loop (avoiding an in-process deadlock) and makes a stuck compaction killable.
 """
 
-import asyncio
 import logging
 import shlex
-import signal
 
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import settings
 from soliplex.agents.manifest.context import LoadContext
-from soliplex.agents.manifest.haiku_loader import _pump_stream
 from soliplex.agents.manifest.haiku_loader import resolve_db_path
 from soliplex.agents.manifest.haiku_loader import resolve_haiku_cfg
 from soliplex.agents.manifest.haiku_loader import slugify_source
+from soliplex.agents.manifest.haiku_process import run_haiku
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +73,7 @@ def _maintenance_env(source: str, verb: str) -> dict[str, str]:
     """
     env = LoadContext.for_source(source).env()
     env["OTEL_SERVICE_NAME"] = env.get("OTEL_SERVICE_NAME", "ingester-agent") + f".haiku-rag.{verb}.{source}"
-    # Force the (Python) child to flush stdout so we can stream it live.
+    # Flush promptly, so a timed-out child's last output is not lost in its buffer.
     env["PYTHONUNBUFFERED"] = "1"
     if settings.logfire_token is not None:
         env["LOGFIRE_TOKEN"] = settings.logfire_token.get_secret_value()
@@ -92,8 +90,8 @@ async def run_verb(
 ) -> dict:
     """Run one haiku-rag maintenance verb against one source's database.
 
-    The subprocess's stdout and stderr are streamed to the logger line by
-    line as the operation progresses. Failures and timeouts are logged and
+    The subprocess runs in a span of its own and its output is buffered, not
+    streamed -- see :mod:`.haiku_process`. Failures and timeouts are logged and
     reported in the result rather than raised, so a caller iterating over
     manifests can keep going.
 
@@ -110,7 +108,7 @@ async def run_verb(
         Dict with ``source``, ``verb``, ``db``, ``argv``, ``command`` and the
         resolved ``timeout``, plus either ``dry_run`` (when *dry_run*) or
         ``returncode`` / ``timed_out`` / ``stdout`` / ``stderr``. On timeout
-        ``returncode`` is ``None`` and no output is captured.
+        ``returncode`` is ``None`` and the output is whatever arrived first.
 
     Raises:
         ValueError: If ``settings.lancedb_dir`` is unset.
@@ -130,59 +128,20 @@ async def run_verb(
     if dry_run:
         return result | {"dry_run": True}
 
-    logger.info("Starting haiku %s for source '%s' -> %s", verb, source, db)
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        cwd=settings.haiku_load_cwd,
+    run = await run_haiku(
+        argv,
+        operation=verb,
+        source=source,
         env=_maintenance_env(source, verb),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        cwd=settings.haiku_load_cwd,
+        timeout=timeout,
+        attributes={"haiku.db": db, "haiku.config": haiku_cfg or ""},
     )
-    try:
-        async with asyncio.timeout(timeout):
-            out, err = await asyncio.gather(
-                _pump_stream(proc.stdout, logger.info, source),
-                _pump_stream(proc.stderr, logger.info, source),
-            )
-            await proc.wait()
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        logger.error(  # noqa: TRY400 — timeout traceback adds no signal
-            "haiku %s for source '%s' timed out after %ss",
-            verb,
-            source,
-            timeout,
-        )
-        return result | {"returncode": None, "timed_out": True}
-
-    if proc.returncode == 0:
-        logger.info("haiku %s for source '%s' completed", verb, source)
-    elif proc.returncode < 0:
-        try:
-            signame = signal.Signals(-proc.returncode).name
-        except ValueError:  # pragma: no cover - signal set is platform-specific
-            signame = f"signal {-proc.returncode}"
-        logger.error(
-            "haiku %s for source '%s' was killed by %s (rc=%s); a SIGKILL "
-            "usually means the container exceeded its memory limit",
-            verb,
-            source,
-            signame,
-            proc.returncode,
-        )
-    else:
-        logger.error(
-            "haiku %s for source '%s' failed (rc=%s)",
-            verb,
-            source,
-            proc.returncode,
-        )
     return result | {
-        "returncode": proc.returncode,
-        "timed_out": False,
-        "stdout": out,
-        "stderr": err,
+        "returncode": run.returncode,
+        "timed_out": run.timed_out,
+        "stdout": run.stdout,
+        "stderr": run.stderr,
     }
 
 

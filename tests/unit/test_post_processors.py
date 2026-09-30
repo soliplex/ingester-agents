@@ -9,24 +9,19 @@ import pytest
 from soliplex.agents.config import settings
 from soliplex.agents.manifest import post_processors
 
-# `vacuum` delegates to haiku_maint.run_verb, which owns the subprocess.
-_EXEC = "soliplex.agents.manifest.haiku_maint.asyncio.create_subprocess_exec"
-_TIMEOUT = "soliplex.agents.manifest.haiku_maint.asyncio.timeout"
+# `vacuum` delegates to haiku_maint.run_verb, whose subprocess haiku_process runs.
+_EXEC = "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec"
+_TIMEOUT = "soliplex.agents.manifest.haiku_process.asyncio.timeout"
 
 
 class _FakeStream:
-    """Minimal async-iterable stand-in for asyncio.StreamReader."""
+    """Minimal stand-in for asyncio.StreamReader: one chunk per read, then EOF."""
 
-    def __init__(self, lines):
-        self._lines = list(lines)
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
 
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._lines:
-            raise StopAsyncIteration
-        return self._lines.pop(0)
+    async def read(self, n=-1):
+        return self._chunks.pop(0) if self._chunks else b""
 
 
 def _fake_proc(returncode=0, stdout_lines=(b"ok\n",), stderr_lines=()):
