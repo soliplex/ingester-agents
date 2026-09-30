@@ -269,7 +269,7 @@ class GitCliWrapper:
         returncode, stdout, stderr = await self._run_command(cmd)
 
         if returncode != 0:
-            logger.error(f"Clone failed: {stderr}")
+            logger.error("Clone failed: %s", stderr)
             raise GitCloneError(f"git clone failed with exit code {returncode}: {stderr}")
 
         logger.info(f"Successfully cloned {owner}/{repo}")
@@ -286,7 +286,7 @@ class GitCliWrapper:
             True if pull succeeded, False otherwise
         """
         if not repo_dir.exists():
-            logger.warning(f"Repository directory does not exist: {repo_dir}")
+            logger.warning("Repository directory does not exist: %s", repo_dir)
             return False
 
         cmd = ["git", "pull", "--ff-only"]
@@ -296,7 +296,7 @@ class GitCliWrapper:
         returncode, stdout, stderr = await self._run_command(cmd, cwd=repo_dir)
 
         if returncode != 0:
-            logger.warning(f"Pull failed: {stderr}")
+            logger.warning("Pull failed: %s", stderr)
             return False
 
         logger.info("Successfully pulled updates")
@@ -458,7 +458,7 @@ class GitCliWrapper:
         returncode, stdout, stderr = await self._run_command(cmd, cwd=repo_dir)
 
         if returncode != 0:
-            logger.error(f"git log failed: {stderr}")
+            logger.error("git log failed: %s", stderr)
             return []
 
         commits = []
@@ -486,7 +486,7 @@ class GitCliWrapper:
         returncode, stdout, stderr = await self._run_command(cmd, cwd=repo_dir)
 
         if returncode != 0:
-            logger.error(f"git show failed: {stderr}")
+            logger.error("git show failed: %s", stderr)
             return {"sha": commit_sha, "files": []}
 
         files = []
@@ -697,7 +697,7 @@ class GitCliDecorator(BaseSCMProvider):
                 file_data = await self._read_local_file(repo_dir, rel_path)
                 files.append(file_data)
             except Exception as e:
-                logger.warning(f"Failed to read {rel_path}: {e}")
+                logger.warning("Failed to read %s: %s", rel_path, e)
 
         logger.info(f"Found {len(files)} files in local clone of {owner}/{repo}")
         return files
@@ -718,7 +718,7 @@ class GitCliDecorator(BaseSCMProvider):
                 try:
                     yield await self._read_local_file(repo_dir, rel_path)
                 except Exception as e:
-                    logger.warning(f"Failed to read {rel_path}: {e}")
+                    logger.warning("Failed to read %s: %s", rel_path, e)
 
     async def get_single_file(
         self,

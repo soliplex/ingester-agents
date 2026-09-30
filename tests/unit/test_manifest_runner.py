@@ -373,6 +373,107 @@ class TestRunManifest:
         result = await runner.run_manifest(m)
         assert "error" in result["results"][0]
         assert "Unknown component type" in result["results"][0]["error"]
+        assert result["summary"]["component_errors"] == 1
+
+
+# --- run summary: what the run reports about itself ---
+
+
+def _two_component_manifest(delete_stale=False):
+    return Manifest(
+        id="docs-site",
+        name="Docs",
+        source="docs-src",
+        config={"delete_stale": delete_stale},
+        components=[
+            {"type": "fs", "name": "wiki", "path": "/wiki"},
+            {"type": "fs", "name": "notes", "path": "/notes"},
+        ],
+    )
+
+
+def _finished_record(caplog):
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("Manifest 'docs-site' finished")]
+    return record
+
+
+class TestRunSummary:
+    @pytest.mark.asyncio
+    async def test_clean_run_logs_info_and_counts(self, caplog):
+        handler = AsyncMock(return_value={"ingested": ["a", "b"], "errors": [], "rejected": [{"uri": "c"}]})
+        with caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.runner"):
+            with patch.dict(runner._DISPATCH, {FSComponent: handler}):
+                result = await runner.run_manifest(_two_component_manifest())
+
+        assert result["summary"] == {
+            "components": 2,
+            "component_errors": 0,
+            "components_with_file_errors": 0,
+            "file_errors": 0,
+            "ingested": 4,
+            "not_found": 0,
+            "rejected": 2,
+            "deleted": 0,
+            "delete_stale_skipped": False,
+        }
+        assert caplog.text.count("completed successfully") == 2
+        assert _finished_record(caplog).levelno == logging.INFO
+
+    @pytest.mark.asyncio
+    async def test_file_errors_are_not_reported_as_success(self, caplog):
+        # The 'wiki' component returns 3 failed files; 'notes' is clean.
+        failed = {"ingested": ["a"], "errors": [{"uri": u, "error": "502"} for u in ("x", "y", "z")]}
+        handler = AsyncMock(side_effect=[failed, {"ingested": ["b"], "errors": []}])
+        with caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.runner"):
+            with patch.dict(runner._DISPATCH, {FSComponent: handler}):
+                result = await runner.run_manifest(_two_component_manifest(delete_stale=True))
+
+        summary = result["summary"]
+        assert summary["file_errors"] == 3
+        assert summary["components_with_file_errors"] == 1
+        assert summary["component_errors"] == 0
+        assert summary["delete_stale_skipped"] is True
+        warning = next(r for r in caplog.records if "file errors" in r.getMessage() and r.name.endswith("runner"))
+        assert warning.levelno == logging.WARNING
+        assert warning.getMessage() == "Component 'wiki' finished with 3 file errors"
+        assert "Component 'wiki' completed successfully" not in caplog.text
+        assert "Component 'notes' completed successfully" in caplog.text
+        finished = _finished_record(caplog)
+        assert finished.levelno == logging.ERROR
+        assert "0 component errors, 3 file errors" in finished.getMessage()
+
+    @pytest.mark.asyncio
+    async def test_raised_component_is_an_error_with_a_stable_template(self, caplog):
+        handler = AsyncMock(side_effect=[RuntimeError("boom"), {"ingested": [], "errors": []}])
+        with caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.runner"):
+            with patch.dict(runner._DISPATCH, {FSComponent: handler}):
+                result = await runner.run_manifest(_two_component_manifest())
+
+        assert result["summary"]["component_errors"] == 1
+        raised = next(r for r in caplog.records if r.getMessage() == "Error running component wiki")
+        # %-style arguments, so Logfire groups every component's failure together.
+        assert raised.msg == "Error running component %s"
+        assert raised.exc_info is not None
+        assert _finished_record(caplog).levelno == logging.ERROR
+
+    @pytest.mark.asyncio
+    async def test_counts_deleted_and_not_found(self):
+        handler = AsyncMock(
+            return_value={"inventory": [{"path": "keep.md", "sha256": "1"}], "not_found": ["gone.md"], "errors": []}
+        )
+        with (
+            patch.dict(runner._DISPATCH, {FSComponent: handler}),
+            patch(
+                "soliplex.agents.local_state.reconcile_documents",
+                AsyncMock(return_value=["old.md", "gone.md"]),
+            ) as mock_reconcile,
+        ):
+            result = await runner.run_manifest(_two_component_manifest(delete_stale=True))
+
+        mock_reconcile.assert_awaited_once_with("docs-src", {"keep.md"})
+        assert result["summary"]["deleted"] == 2
+        assert result["summary"]["not_found"] == 1
+        assert result["summary"]["delete_stale_skipped"] is False
 
 
 # --- dispatch helpers ---

@@ -600,7 +600,7 @@ async def recursive_listdir_webdav(
                     rec[key] = resource.get(key)
                 file_list.append(rec)
     except _LISTING_FATAL:
-        logger.exception(f"Connection error listing {path}")
+        logger.exception("Connection error listing %s", path)
         raise
     except Exception:
         logger.error(
@@ -770,7 +770,7 @@ async def _load_inventory(
             logger.error("Failed to write %s", uri, exc_info=res)
             errors.append({"uri": uri, "error": str(res)})
         elif "error" in res:
-            logger.error(f"Error writing {uri}: {res['error']}")
+            logger.error("Error writing %s: %s", uri, res["error"])
             errors.append({"uri": uri, "error": res["error"]})
         elif res.get("not_found"):
             # Definitive removal, not a blocking error: excluded from the
@@ -858,7 +858,7 @@ async def do_ingest(
         logger.info("source file gone (404): %s", uri)
         return {"not_found": True, "uri": uri}
     except Exception as e:
-        logger.exception(f"Error downloading {uri} from WebDAV")
+        logger.exception("Error downloading %s from WebDAV", uri)
         return {"error": str(e)}
 
     # Resolve the final type: server GET header wins, then content sniffing,

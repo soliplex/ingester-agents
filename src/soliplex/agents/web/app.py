@@ -112,7 +112,7 @@ async def load_inventory(
             )
             fetched[url] = (content_bytes, content_type)
         except Exception as e:
-            logger.exception(f"Error fetching {url}")
+            logger.exception("Error fetching %s", url)
             file_info.append(
                 {
                     "path": url,
@@ -144,7 +144,7 @@ async def load_inventory(
             local_state.upsert_file(source, url, row.get("sha256"), size=len(content_bytes), mime_type=content_type)
             ingested.append(url)
         except Exception as e:
-            logger.exception(f"Error writing {url}")
+            logger.exception("Error writing %s", url)
             errors.append({"uri": url, "error": str(e)})
 
     delete_stale_result = None
