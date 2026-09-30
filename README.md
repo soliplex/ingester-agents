@@ -198,6 +198,11 @@ HAIKU_PATH=/etc/haiku                  # base dir for haiku-rag config files
 # HAIKU_OUTPUT_FLUSH_SECONDS=30         # log pending output at least this often
 # HAIKU_OUTPUT_MAX_BYTES=0              # cap on logged output per stream; 0 = none
 
+# Tracing (see Tracing with Logfire below)
+# LOGFIRE_TOKEN=...                     # or /run/secrets/logfire_token
+# LOGFIRE_SERVICE_NAME=ingester-agents
+# HAIKU_TRACE_WRAPPER=false             # join haiku-ingester's spans to the agent's trace
+
 # S3-compatible storage. S3_ENDPOINT_URL is shared between urls_file reads
 # and the download store; the rest are the download store's credentials.
 S3_ENDPOINT_URL=https://minio.example.com:9000
@@ -215,6 +220,44 @@ haiku-rag config file needs a further set of its own — model and service
 endpoints, and the bucket variables in S3 mode — which fail the load when
 unset; see [Variables the haiku-rag config
 needs](#variables-the-haiku-rag-config-needs).
+
+### Tracing with Logfire
+
+With a Logfire token (`LOGFIRE_TOKEN`, or the `logfire_token` secret at
+`/run/secrets/logfire_token`), **the server** sends its logs and traces to
+Logfire. Without one, nothing is sent, and the spans below cost nothing.
+
+- Each HTTP request is a span, except `/health`, which the container
+  healthcheck polls.
+- Each manifest run is one trace: a `manifest run` span with a `component`
+  span per component, plus `list scm uris` / `delete stale` when they run.
+  Every log line an agent writes nests under the component that wrote it,
+  so every error from one run can be found under that run.
+- The haiku load that a run queues stays in the run's trace: a `haiku load`
+  span with the exact command, exit status and time spent in the queue, and
+  a `post-process` span per step. The subprocess output is logged in parts
+  (`haiku load <source> stderr output part <n>`) inside it.
+
+**The CLI is opt-in:** pass `--otel` before the command.
+
+```bash
+si-agent --otel manifest vacuum /manifests/test.yaml
+```
+
+The whole command becomes one trace under a `cli` span, whose message is
+the command line (`si-agent manifest vacuum /manifests/test.yaml`).
+Password-like option values are recorded as `[redacted]`. Without `--otel`,
+the CLI sends nothing even with a token. `serve` ignores `--otel`: the
+server always configures itself when a token is available.
+
+**haiku-ingester's own spans.** The agent always passes its trace context
+to haiku subprocesses as `TRACEPARENT` / `TRACESTATE`. A haiku-rag that
+reads it joins the agent's trace by itself. For one that doesn't, set
+`HAIKU_TRACE_WRAPPER=true`. The agent then starts a console-script command
+through `python -m soliplex.agents.traced_run`, which attaches the context
+before the CLI runs. It only works when haiku-rag is installed in the same
+environment as the agent, and a command that isn't a console script there
+runs unchanged.
 
 ### Object Storage
 

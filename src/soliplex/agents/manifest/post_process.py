@@ -32,6 +32,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from inspect import Parameter
 
+from soliplex.agents import telemetry
 from soliplex.agents.config import Manifest
 from soliplex.agents.manifest.context import LoadContext
 from soliplex.agents.manifest.haiku_loader import resolve_haiku_cfg
@@ -112,31 +113,41 @@ async def run_post_process(
     results: list[dict] = []
     context = LoadContext.for_source(manifest.source)
     with _load_env(manifest, context):
-        for step in manifest.config.post_process:
-            logger.info(
-                "Running post-process '%s' for source '%s'",
-                step.method,
-                manifest.source,
-            )
-            try:
-                method = _resolve_method(step.method)
-                kwargs = dict(step.kwargs)
-                if "config" not in kwargs and _accepts_kwarg(method, "config"):
-                    kwargs["config"] = resolve_haiku_cfg(manifest)
-                if "ingester_exit_code" not in kwargs and _accepts_kwarg(method, "ingester_exit_code"):
-                    kwargs["ingester_exit_code"] = ingester_exit_code
-                if "context" not in kwargs and _accepts_kwarg(method, "context"):
-                    kwargs["context"] = context
-                value = method(manifest.source, **kwargs)
-                if inspect.isawaitable(value):
-                    await value
-            except Exception:
-                logger.exception(
-                    "Post-process '%s' failed for source '%s'; terminating",
+        for index, step in enumerate(manifest.config.post_process):
+            attributes = {
+                telemetry.POST_PROCESS_METHOD: step.method,
+                telemetry.POST_PROCESS_INDEX: index,
+                telemetry.MANIFEST_ID: manifest.id,
+                telemetry.MANIFEST_SOURCE: manifest.source,
+                telemetry.INGESTER_EXIT_CODE: ingester_exit_code,
+            }
+            # A step that raises leaves the span with the exception, which marks
+            # it as failed; no later step gets a span, since none runs.
+            with telemetry.span("post-process", f"post-process {step.method}", attributes):
+                logger.info(
+                    "Running post-process '%s' for source '%s'",
                     step.method,
                     manifest.source,
                 )
-                raise
-            logger.info("Post-process '%s' completed", step.method)
+                try:
+                    method = _resolve_method(step.method)
+                    kwargs = dict(step.kwargs)
+                    if "config" not in kwargs and _accepts_kwarg(method, "config"):
+                        kwargs["config"] = resolve_haiku_cfg(manifest)
+                    if "ingester_exit_code" not in kwargs and _accepts_kwarg(method, "ingester_exit_code"):
+                        kwargs["ingester_exit_code"] = ingester_exit_code
+                    if "context" not in kwargs and _accepts_kwarg(method, "context"):
+                        kwargs["context"] = context
+                    value = method(manifest.source, **kwargs)
+                    if inspect.isawaitable(value):
+                        await value
+                except Exception:
+                    logger.exception(
+                        "Post-process '%s' failed for source '%s'; terminating",
+                        step.method,
+                        manifest.source,
+                    )
+                    raise
+                logger.info("Post-process '%s' completed", step.method)
             results.append({"method": step.method, "ok": True, "error": None})
     return results

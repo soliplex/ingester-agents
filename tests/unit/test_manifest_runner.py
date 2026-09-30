@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from opentelemetry.trace import StatusCode
 from pydantic import ValidationError
 
 from soliplex.agents.config import FSComponent
@@ -803,7 +804,7 @@ class TestRunManifests:
         """)
         )
         with patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock:
-            mock.return_value = {"manifest_id": "test", "results": []}
+            mock.return_value = {"manifest_id": "test", "results": [], "summary": {}}
             results = await runner.run_manifests(str(f))
         assert len(results) == 1
 
@@ -822,7 +823,7 @@ class TestRunManifests:
             """)
             )
         with patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock:
-            mock.return_value = {"manifest_id": "x", "results": []}
+            mock.return_value = {"manifest_id": "x", "results": [], "summary": {}}
             results = await runner.run_manifests(str(tmp_path))
         assert len(results) == 2
 
@@ -847,7 +848,7 @@ class TestRunManifests:
                 new_callable=AsyncMock,
             ) as mock_load,
         ):
-            mock_run.return_value = {"manifest_id": "test", "results": []}
+            mock_run.return_value = {"manifest_id": "test", "results": [], "summary": {}}
             mock_load.return_value = {"source": "src", "returncode": 0}
             results = await runner.run_manifests(str(f), load=True)
         mock_load.assert_awaited_once()
@@ -868,7 +869,7 @@ class TestRunManifests:
             """)
             )
         with patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock:
-            mock.side_effect = [RuntimeError("boom"), {"manifest_id": "b", "results": []}]
+            mock.side_effect = [RuntimeError("boom"), {"manifest_id": "b", "results": [], "summary": {}}]
             results = await runner.run_manifests(str(tmp_path))
         # First manifest failed, but the second still ran.
         assert len(results) == 2
@@ -893,7 +894,7 @@ class TestRunManifests:
             patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run,
             patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock) as mock_load,
         ):
-            mock_run.return_value = {"manifest_id": "test", "results": []}
+            mock_run.return_value = {"manifest_id": "test", "results": [], "summary": {}}
             mock_load.side_effect = RuntimeError("load boom")
             results = await runner.run_manifests(str(f), load=True)
         # Component result preserved; the load failure is recorded, not raised.
@@ -1628,3 +1629,147 @@ async def test_migrate_store_without_state_reports_it(migration):
     result = await runner.migrate_store(manifest)
     assert result["copied"] == 2
     assert result["state_copied"] is False
+
+
+# --- spans ---
+
+
+class TestComponentSpans:
+    @pytest.mark.asyncio
+    async def test_clean_component_span_carries_counts(self, spans):
+        handler = AsyncMock(return_value={"ingested": ["a", "b"], "errors": [], "not_found": ["c"], "rejected": []})
+        with patch.dict(runner._DISPATCH, {FSComponent: handler}):
+            await runner.run_manifest(_two_component_manifest())
+
+        wiki, notes = spans.named("component")
+        assert wiki.attributes["logfire.msg"] == "component wiki (fs)"
+        assert wiki.attributes["component.name"] == "wiki"
+        assert wiki.attributes["component.type"] == "fs"
+        assert wiki.attributes["manifest.id"] == "docs-site"
+        assert wiki.attributes["component.ingested"] == 2
+        assert wiki.attributes["component.errors"] == 0
+        assert wiki.attributes["component.not_found"] == 1
+        assert wiki.attributes["component.rejected"] == 0
+        assert wiki.status.status_code is StatusCode.UNSET
+        assert notes.attributes["component.name"] == "notes"
+
+    @pytest.mark.asyncio
+    async def test_file_errors_fail_the_component_span(self, spans):
+        failed = {"ingested": [], "errors": [{"uri": u, "error": "502"} for u in ("x", "y", "z")]}
+        handler = AsyncMock(side_effect=[failed, {"ingested": [], "errors": []}])
+        with patch.dict(runner._DISPATCH, {FSComponent: handler}):
+            await runner.run_manifest(_two_component_manifest())
+
+        wiki, notes = spans.named("component")
+        assert wiki.status.status_code is StatusCode.ERROR
+        assert wiki.status.description == "3 file errors"
+        assert wiki.attributes["component.errors"] == 3
+        assert notes.status.status_code is StatusCode.UNSET
+
+    @pytest.mark.asyncio
+    async def test_a_raised_component_fails_its_span_and_the_next_still_runs(self, spans):
+        handler = AsyncMock(side_effect=[RuntimeError("boom"), {"ingested": [], "errors": []}])
+        with patch.dict(runner._DISPATCH, {FSComponent: handler}):
+            await runner.run_manifest(_two_component_manifest())
+
+        wiki, notes = spans.named("component")
+        assert wiki.status.description == "component failed: RuntimeError"
+        assert wiki.events[0].name == "exception"
+        assert notes.status.status_code is StatusCode.UNSET
+
+    @pytest.mark.asyncio
+    async def test_unknown_component_type_fails_its_span(self, spans):
+        m = _two_component_manifest()
+        m.components[0] = MagicMock()
+        m.components[0].name = "mystery"
+        with patch.dict(runner._DISPATCH, {FSComponent: AsyncMock(return_value={"errors": []})}):
+            await runner.run_manifest(m)
+
+        mystery = spans.named("component")[0]
+        assert mystery.attributes["component.type"] == "MagicMock"
+        assert mystery.status.description == "unknown component type"
+
+    @pytest.mark.asyncio
+    async def test_delete_stale_span(self, spans):
+        handler = AsyncMock(return_value={"inventory": [{"path": "keep.md", "sha256": "1"}], "errors": []})
+        with (
+            patch.dict(runner._DISPATCH, {FSComponent: handler}),
+            patch("soliplex.agents.local_state.reconcile_documents", AsyncMock(return_value=["old.md"])),
+        ):
+            await runner.run_manifest(_two_component_manifest(delete_stale=True))
+
+        (stale,) = spans.named("delete stale")
+        assert stale.attributes["logfire.msg"] == "delete stale docs-src"
+        assert stale.attributes["manifest.deleted"] == 1
+
+    @pytest.mark.asyncio
+    async def test_list_scm_uris_span(self, spans):
+        m = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            config={"delete_stale": True},
+            components=[
+                {"type": "scm", "name": "r", "platform": "github", "owner": "o", "repo": "r", "incremental": True},
+            ],
+        )
+        with (
+            patch.dict(runner._DISPATCH, {SCMComponent: AsyncMock(return_value={"ingested": [], "errors": []})}),
+            patch("soliplex.agents.manifest.runner._list_scm_all_uris", AsyncMock(return_value=[])),
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents", AsyncMock(return_value=[])),
+        ):
+            await runner.run_manifest(m)
+
+        (listing,) = spans.named("list scm uris")
+        assert listing.attributes["component.name"] == "r"
+        assert listing.attributes["manifest.id"] == "t"
+
+
+class TestRunManifestsSpans:
+    """The CLI path opens the same manifest span the server's queue does."""
+
+    @staticmethod
+    def _write(tmp_path, *ids):
+        for mid in ids:
+            (tmp_path / f"{mid}.yml").write_text(
+                f"id: {mid}\nname: M{mid}\nsource: src-{mid}\ncomponents:\n  - type: fs\n    name: c\n    path: /data\n"
+            )
+
+    @pytest.mark.asyncio
+    async def test_one_span_per_manifest_with_its_outcome(self, tmp_path, spans):
+        self._write(tmp_path, "a", "b")
+        failed = {"manifest_id": "b", "results": [], "summary": {"component_errors": 0, "file_errors": 2}}
+        clean = {"manifest_id": "a", "results": [], "summary": {"component_errors": 0, "file_errors": 0}}
+        with patch("soliplex.agents.manifest.runner.run_manifest", AsyncMock(side_effect=[clean, failed])):
+            await runner.run_manifests(str(tmp_path))
+
+        a, b = spans.named("manifest run")
+        assert a.attributes["manifest.id"] == "a"
+        assert a.attributes["manifest.source"] == "src-a"
+        assert a.status.status_code is StatusCode.UNSET
+        assert b.attributes["manifest.file_errors"] == 2
+        assert b.status.status_code is StatusCode.ERROR
+
+    @pytest.mark.asyncio
+    async def test_a_raised_run_fails_its_span(self, tmp_path, spans):
+        self._write(tmp_path, "a")
+        with patch("soliplex.agents.manifest.runner.run_manifest", AsyncMock(side_effect=RuntimeError("boom"))):
+            await runner.run_manifests(str(tmp_path))
+
+        (run,) = spans.named("manifest run")
+        assert run.status.description == "manifest run failed: RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_haiku_load_fails_the_span(self, tmp_path, spans):
+        self._write(tmp_path, "a")
+        with (
+            patch(
+                "soliplex.agents.manifest.runner.run_manifest",
+                AsyncMock(return_value={"manifest_id": "a", "results": [], "summary": {}}),
+            ),
+            patch("soliplex.agents.manifest.haiku_loader.run_load", AsyncMock(side_effect=OSError("no binary"))),
+        ):
+            await runner.run_manifests(str(tmp_path), load=True)
+
+        (run,) = spans.named("manifest run")
+        assert run.status.description == "haiku load failed: OSError"

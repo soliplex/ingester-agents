@@ -1,4 +1,5 @@
 import logging
+import sys
 
 import typer
 
@@ -6,13 +7,39 @@ import soliplex.agents.fs.cli as fs
 import soliplex.agents.manifest.cli as manifest
 import soliplex.agents.scm.cli as scm
 import soliplex.agents.webdav.cli as webdav
+from soliplex.agents import telemetry
 from soliplex.agents.config import configure_logging
 
 logger = logging.getLogger(__name__)
 
 
-def init():
+def init(
+    ctx: typer.Context,
+    otel: bool = typer.Option(
+        False,
+        "--otel",
+        help=(
+            "Send this command's traces and logs to Logfire. Needs a Logfire token "
+            "(LOGFIRE_TOKEN or /run/secrets/logfire_token). Ignored by `serve`, "
+            "which configures Logfire whenever a token is available."
+        ),
+    ),
+):
     configure_logging()
+    # `serve` configures Logfire itself, at import: with --reload the app runs
+    # in a child process that never passes through this callback.
+    if not otel or ctx.invoked_subcommand == "serve":
+        return
+    if not telemetry.configure():
+        logger.warning(
+            "--otel given but no Logfire token is configured (LOGFIRE_TOKEN or /run/secrets/logfire_token); not tracing"
+        )
+        return
+    # One root span for the whole command, closed by Click when it finishes.
+    # sys.argv is what Click parses. The message is the command line with any
+    # secret option values redacted; `cli.command` keeps just the command path.
+    root, argv = ctx.find_root().command, sys.argv[1:]
+    ctx.with_resource(telemetry.CliSpan(telemetry.command_path(root, argv), telemetry.command_args(root, argv)))
 
 
 cli = typer.Typer(no_args_is_help=True, callback=init)
