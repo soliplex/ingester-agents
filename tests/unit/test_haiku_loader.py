@@ -13,6 +13,8 @@ from soliplex.agents.config import ManifestConfig
 from soliplex.agents.config import PostProcessStep
 from soliplex.agents.config import settings
 from soliplex.agents.manifest import haiku_loader
+from soliplex.agents.sidecar import META_SUFFIX
+from soliplex.agents.store import reset_store_cache
 
 
 def _manifest(source="src", haiku_config=None):
@@ -125,18 +127,13 @@ class TestBuildLoadArgv:
 
 
 class _FakeStream:
-    """Minimal async-iterable stand-in for asyncio.StreamReader."""
+    """Minimal stand-in for asyncio.StreamReader: one chunk per read, then EOF."""
 
-    def __init__(self, lines):
-        self._lines = list(lines)
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
 
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._lines:
-            raise StopAsyncIteration
-        return self._lines.pop(0)
+    async def read(self, n=-1):
+        return self._chunks.pop(0) if self._chunks else b""
 
 
 def _fake_proc(returncode=0, stdout_lines=(b"ok\n",), stderr_lines=()):
@@ -164,11 +161,11 @@ class _RaisingTimeout:
 
 class TestRunLoad:
     @pytest.mark.asyncio
-    async def test_success_streams_and_returns(self, haiku_env, caplog):
+    async def test_success_buffers_and_returns(self, haiku_env, caplog):
         proc = _fake_proc(returncode=0, stdout_lines=[b"step 1\n", b"done\n"])
         with caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.haiku_loader"):
             with patch(
-                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
                 return_value=proc,
             ) as mock_exec:
@@ -178,9 +175,9 @@ class TestRunLoad:
         assert result["timed_out"] is False
         assert result["stdout"] == "step 1\ndone"
         assert result["db"].replace("\\", "/").endswith("composite-source.lancedb")
-        # Each stdout line was streamed to the log as it arrived.
-        assert "haiku[composite source]: step 1" in caplog.text
-        assert "haiku[composite source]: done" in caplog.text
+        # Output is buffered into the result, not logged line by line.
+        assert "step 1" not in caplog.text
+        assert "haiku load for source 'composite source' completed" in caplog.text
 
         kwargs = mock_exec.call_args.kwargs
         # SOURCE matches the sanitized download-folder name (spaces preserved).
@@ -194,7 +191,7 @@ class TestRunLoad:
         monkeypatch.setattr(settings, "logfire_token", SecretStr("lf-secret"), raising=False)
         proc = _fake_proc(returncode=0)
         with patch(
-            "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+            "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
             new_callable=AsyncMock,
             return_value=proc,
         ) as mock_exec:
@@ -202,19 +199,18 @@ class TestRunLoad:
         assert mock_exec.call_args.kwargs["env"]["LOGFIRE_TOKEN"] == "lf-secret"
 
     @pytest.mark.asyncio
-    async def test_nonzero_returncode_streams_stderr_and_logs(self, haiku_env, caplog):
+    async def test_nonzero_returncode_quotes_stderr(self, haiku_env, caplog):
         proc = _fake_proc(returncode=2, stdout_lines=[], stderr_lines=[b"boom\n"])
         with caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.haiku_loader"):
             with patch(
-                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
                 return_value=proc,
             ):
                 result = await haiku_loader.run_load(_manifest())
         assert result["returncode"] == 2
         assert result["stderr"] == "boom"
-        assert "haiku[src]: boom" in caplog.text  # stderr streamed
-        assert "failed" in caplog.text
+        assert "failed (rc=2); last stderr:\nboom" in caplog.text
 
     @pytest.mark.asyncio
     async def test_signal_kill_reports_oom_hint(self, haiku_env, caplog):
@@ -222,7 +218,7 @@ class TestRunLoad:
         proc = _fake_proc(returncode=-9)
         with caplog.at_level(logging.ERROR, logger="soliplex.agents.manifest.haiku_loader"):
             with patch(
-                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
                 return_value=proc,
             ):
@@ -238,12 +234,12 @@ class TestRunLoad:
         proc = _fake_proc(returncode=0)
         with (
             patch(
-                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
                 return_value=proc,
             ),
             patch(
-                "soliplex.agents.manifest.haiku_loader.asyncio.timeout",
+                "soliplex.agents.manifest.haiku_process.asyncio.timeout",
                 _RaisingTimeout,
             ),
         ):
@@ -269,7 +265,7 @@ class TestRunLoad:
         proc = _fake_proc(returncode=0)
         with (
             patch(
-                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
                 return_value=proc,
             ),
@@ -290,7 +286,7 @@ class TestRunLoad:
         proc = _fake_proc(returncode=1, stdout_lines=[], stderr_lines=[b"x\n"])
         with (
             patch(
-                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
                 return_value=proc,
             ),
@@ -310,12 +306,12 @@ class TestRunLoad:
         proc = _fake_proc(returncode=0)
         with (
             patch(
-                "soliplex.agents.manifest.haiku_loader.asyncio.create_subprocess_exec",
+                "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
                 return_value=proc,
             ),
             patch(
-                "soliplex.agents.manifest.haiku_loader.asyncio.timeout",
+                "soliplex.agents.manifest.haiku_process.asyncio.timeout",
                 _RaisingTimeout,
             ),
             patch(
@@ -328,3 +324,68 @@ class TestRunLoad:
         mock_pp.assert_awaited_once_with(manifest, ingester_exit_code=None)
         assert result["timed_out"] is True
         assert result["post_process"] == [{"method": "pkg:fn", "ok": True, "error": None}]
+
+
+# --- empty download folder check ---
+
+
+class TestLogIfNoDocuments:
+    _LOGGER = "soliplex.agents.manifest.haiku_loader"
+    _EMPTY = "finished with no documents"
+
+    @pytest.fixture
+    def source_dir(self, haiku_env, monkeypatch, tmp_path):
+        """A real, local download folder for source 'src'."""
+        monkeypatch.setattr(settings, "download_dir", str(tmp_path), raising=False)
+        monkeypatch.setattr(settings, "download_s3_bucket", None, raising=False)
+        reset_store_cache()
+        yield tmp_path / "src"
+        reset_store_cache()
+
+    @staticmethod
+    async def _run(caplog):
+        with (
+            caplog.at_level(logging.INFO, logger=TestLogIfNoDocuments._LOGGER),
+            patch(
+                "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=_fake_proc(returncode=0),
+            ) as mock_exec,
+        ):
+            await haiku_loader.run_load(_manifest())
+        return mock_exec
+
+    @pytest.mark.asyncio
+    async def test_missing_folder_logs_error_and_still_loads(self, source_dir, caplog):
+        mock_exec = await self._run(caplog)
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR and self._EMPTY in r.getMessage()]
+        assert len(errors) == 1
+        assert "Manifest 'm'" in errors[0].getMessage()
+        assert "source 'src'" in errors[0].getMessage()
+        mock_exec.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_only_sidecars_counts_as_empty(self, source_dir, caplog):
+        source_dir.mkdir(parents=True)
+        (source_dir / f"doc.md{META_SUFFIX}").write_text("{}", encoding="utf-8")
+        await self._run(caplog)
+        assert self._EMPTY in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_document_present_logs_nothing(self, source_dir, caplog):
+        (source_dir / "nested").mkdir(parents=True)
+        (source_dir / "nested" / "doc.md").write_text("# hi", encoding="utf-8")
+        await self._run(caplog)
+        assert self._EMPTY not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_listing_failure_is_logged_and_load_continues(self, source_dir, caplog):
+        with patch(
+            "soliplex.agents.store.LocalDocumentStore.list",
+            new_callable=AsyncMock,
+            side_effect=OSError("bucket unreachable"),
+        ):
+            mock_exec = await self._run(caplog)
+        assert "Could not list documents" in caplog.text
+        assert self._EMPTY not in caplog.text
+        mock_exec.assert_awaited_once()
