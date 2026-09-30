@@ -5,8 +5,36 @@ from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from soliplex.agents import local_state
+from soliplex.agents import telemetry
+
+
+@pytest.fixture
+def spans(monkeypatch):
+    """Route :mod:`soliplex.agents.telemetry` spans to an in-memory exporter.
+
+    Returns a helper with ``all()`` (finished spans, in finish order) and
+    ``named(name)`` (those with that span name).
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(telemetry, "tracer", provider.get_tracer("test"))
+
+    class _Spans:
+        @staticmethod
+        def all():
+            return list(exporter.get_finished_spans())
+
+        @staticmethod
+        def named(name):
+            return [s for s in exporter.get_finished_spans() if s.name == name]
+
+    return _Spans()
 
 
 @pytest.fixture(autouse=True)

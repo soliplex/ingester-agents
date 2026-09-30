@@ -226,3 +226,40 @@ def test_routes_work_with_valid_api_key():
                 headers={"Authorization": "Bearer valid-test-key"},
             )
             assert response.status_code == 200
+
+
+class TestUntracedUrls:
+    """The health check gets no request span; everything else still does."""
+
+    @pytest.fixture
+    def excluded(self):
+        from opentelemetry.util.http import parse_excluded_urls
+
+        from soliplex.agents import server
+
+        # Parsed exactly as FastAPIInstrumentor parses it (a comma-joined string).
+        return parse_excluded_urls(",".join(server._UNTRACED_URLS))
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost:8001/health",
+            "http://localhost:8001/health/",
+            "http://localhost:8001/health?probe=1",
+            "https://example.org/ingester-agent/health",
+        ],
+    )
+    def test_health_is_untraced(self, excluded, url):
+        assert excluded.url_disabled(url)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost:8001/healthz",
+            "http://localhost:8001/api/v1/manifest/health-report",
+            "http://localhost:8001/api/v1/fs/run",
+            "http://localhost:8001/openapi.json",
+        ],
+    )
+    def test_other_routes_are_traced(self, excluded, url):
+        assert not excluded.url_disabled(url)

@@ -15,7 +15,11 @@ faster than its own runs cannot grow a backlog.
 
 import asyncio
 import logging
+import time
 
+from opentelemetry import trace
+
+from soliplex.agents import telemetry
 from soliplex.agents.config import settings
 
 from .haiku_queue import enqueue_load
@@ -52,7 +56,7 @@ async def enqueue_manifest(manifest_id: str, path: str) -> None:
         )
         return
     _pending.add(manifest_id)
-    await _queue.put((manifest_id, path))
+    await _queue.put((manifest_id, path, time.monotonic()))
     logger.info(
         "Queued manifest '%s' (queue size=%d)",
         manifest_id,
@@ -68,7 +72,10 @@ def pending_manifests() -> frozenset[str]:
 async def run_manifest_now(manifest_id: str, path: str) -> None:
     """Load *path* fresh and execute it, then queue its haiku load.
 
-    Raises on failure; the worker owns the logging and recovery.
+    Raises on failure; the worker owns the logging and recovery. Runs inside
+    the worker's manifest span, which it describes once the file has loaded
+    and finishes with the run's outcome counts. The haiku load is queued from
+    inside that span, so the load's spans join the same trace.
 
     Args:
         manifest_id: The manifest's id (for logging).
@@ -76,8 +83,11 @@ async def run_manifest_now(manifest_id: str, path: str) -> None:
     """
     from soliplex.agents.manifest import runner as manifest_runner
 
+    span = trace.get_current_span()
     loaded = manifest_runner.load_manifest(path)
+    telemetry.describe_manifest(span, loaded)
     result = await manifest_runner.run_manifest(loaded)
+    telemetry.record_summary(span, result["summary"])
     logger.info(
         "Manifest '%s' completed: %d components",
         manifest_id,
@@ -91,11 +101,17 @@ async def _worker() -> None:
     """Drain the queue, running one manifest at a time."""
     assert _queue is not None
     while True:
-        manifest_id, path = await _queue.get()
+        manifest_id, path, enqueued_at = await _queue.get()
         try:
-            await run_manifest_now(manifest_id, path)
-        except Exception:
-            logger.exception("Error running manifest '%s'", manifest_id)
+            attributes = {telemetry.MANIFEST_PATH: path, telemetry.QUEUE_WAIT: time.monotonic() - enqueued_at}
+            with telemetry.manifest_span(manifest_id, attributes) as span:
+                try:
+                    await run_manifest_now(manifest_id, path)
+                except Exception as e:
+                    # Caught to keep draining, so the span must be failed by
+                    # hand: the exception never leaves it.
+                    logger.exception("Error running manifest '%s'", manifest_id)
+                    telemetry.fail(span, f"manifest run failed: {type(e).__name__}", e)
         finally:
             # Clear the id before task_done so a manifest that is due again
             # can be re-queued as soon as this run is off the queue.

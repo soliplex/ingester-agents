@@ -166,7 +166,15 @@ HAIKU_PATH=/etc/haiku                         # Base dir for haiku-rag config fi
 # HAIKU_MAINTENANCE_COMMAND, HAIKU_MAINTENANCE_TIMEOUT for `manifest migrate` / `manifest vacuum`
 # HAIKU_OUTPUT_CHUNK_BYTES, HAIKU_OUTPUT_FLUSH_SECONDS, HAIKU_OUTPUT_MAX_BYTES shape how the
 # subprocess output is logged (in parts, inside the run's span)
+# HAIKU_TRACE_WRAPPER=true runs haiku commands via `python -m soliplex.agents.traced_run`,
+# so haiku-ingester's spans join the agent's trace (TRACEPARENT is always exported)
 ```
+
+Tracing: the server sends traces and logs to Logfire whenever a token is set
+(`LOGFIRE_TOKEN` / `/run/secrets/logfire_token`); the CLI only with
+`si-agent --otel <command>`. Spans are created through `soliplex.agents.telemetry`
+(OpenTelemetry API, so they're no-ops when Logfire isn't configured); tests
+capture them with the `spans` fixture in `tests/unit/conftest.py`.
 
 The haiku-rag config file needs its own set on top of these — haiku expands
 `${VAR}` eagerly when the file is read, so one that is unset **or empty** fails

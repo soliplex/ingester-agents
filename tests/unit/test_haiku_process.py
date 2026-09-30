@@ -9,9 +9,6 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
 from soliplex.agents.config import settings
@@ -44,16 +41,6 @@ def _fake_proc(returncode=0, stdout=(b"ok\n",), stderr=(), hang=False):
     proc.kill = MagicMock()
     proc.wait = AsyncMock()
     return proc
-
-
-@pytest.fixture
-def spans(monkeypatch):
-    """Route the module's spans to an in-memory exporter."""
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(haiku_process, "_tracer", provider.get_tracer("test"))
-    return exporter
 
 
 def _stream(chunk_bytes=16, flush_seconds=1000.0, max_bytes=0):
@@ -111,7 +98,7 @@ class TestStreamLog:
             stream.add(b"one\ntwo\n")
             assert _parts(caplog) == []
             stream.flush(final=True)
-        assert _parts(caplog) == [("haiku load src stderr part 1:", "one\ntwo")]
+        assert _parts(caplog) == [("haiku load src stderr output part 1:", "one\ntwo")]
         assert stream.parts == 1
         assert stream.logged_bytes == 8
 
@@ -186,7 +173,7 @@ class TestStreamLog:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
         assert warnings[0].getMessage() == (
-            "haiku load src stderr exceeded 8 bytes of output; the rest is counted but not logged"
+            "haiku load src stderr output exceeded 8 bytes; the rest is counted but not logged"
         )
         assert stream.dropped_bytes == 6
         assert stream.total == 14
@@ -227,11 +214,13 @@ class TestRunHaiku:
         assert run == haiku_process.HaikuRun(returncode=0, timed_out=False, stdout="step 1\ndone", stderr="note")
         assert mock_exec.call_args.args == ("haiku-ingester", "--config=/my cfg.yaml", "run-batch")
         assert sorted(_parts(caplog)) == [
-            ("haiku load src stderr part 1:", "note"),
-            ("haiku load src stdout part 1:", "step 1\ndone"),
+            ("haiku load src stderr output part 1:", "note"),
+            ("haiku load src stdout output part 1:", "step 1\ndone"),
         ]
-        (span,) = spans.get_finished_spans()
-        assert span.name == "haiku load src"
+        (span,) = spans.all()
+        assert span.name == "haiku load"
+        assert span.attributes["logfire.msg"] == "haiku load src"
+        assert span.attributes["haiku.trace_wrapper"] is False
         assert span.attributes["haiku.cli"] == "haiku-ingester '--config=/my cfg.yaml' run-batch"
         assert span.attributes["haiku.operation"] == "load"
         assert span.attributes["haiku.source"] == "src"
@@ -257,7 +246,7 @@ class TestRunHaiku:
         with caplog.at_level(logging.INFO, logger=_LOGGER):
             await _run(proc)
         assert [body for _, body in _parts(caplog)] == ["aaa", "bbb"]
-        (span,) = spans.get_finished_spans()
+        (span,) = spans.all()
         assert span.attributes["haiku.stdout_parts"] == 2
         assert span.attributes["haiku.output_dropped_bytes"] == 4
 
@@ -269,7 +258,7 @@ class TestRunHaiku:
 
         assert run.returncode == 3
         assert "haiku vacuum for source 'src' failed (rc=3); last stderr:\nTraceback\nKeyError: x" in caplog.text
-        (span,) = spans.get_finished_spans()
+        (span,) = spans.all()
         assert span.status.status_code is StatusCode.ERROR
         assert span.status.description == "exited with code 3"
 
@@ -288,7 +277,7 @@ class TestRunHaiku:
         signame = "SIGKILL" if hasattr(signal, "SIGKILL") else "signal 9"
         assert f"was killed by {signame} (rc=-9)" in caplog.text
         assert "memory limit" in caplog.text
-        (span,) = spans.get_finished_spans()
+        (span,) = spans.all()
         assert span.status.description == f"killed by {signame}"
         assert span.attributes["haiku.signal"] == signame
 
@@ -302,9 +291,9 @@ class TestRunHaiku:
         proc.wait.assert_awaited_once()
         assert run == haiku_process.HaikuRun(returncode=None, timed_out=True, stdout="halfway", stderr="slow step")
         # Read before the cancellation, so logged rather than lost.
-        assert ("haiku load src stdout part 1:", "halfway") in _parts(caplog)
+        assert ("haiku load src stdout output part 1:", "halfway") in _parts(caplog)
         assert "timed out after 0.05s; last stderr:\nslow step" in caplog.text
-        (span,) = spans.get_finished_spans()
+        (span,) = spans.all()
         assert span.attributes["haiku.timed_out"] is True
         assert "haiku.returncode" not in span.attributes
         assert span.status.status_code is StatusCode.ERROR
@@ -320,7 +309,7 @@ class TestRunHaiku:
                 cwd=None,
                 timeout=30,
             )
-        (span,) = spans.get_finished_spans()
+        (span,) = spans.all()
         assert span.status.status_code is StatusCode.ERROR
         assert span.events[0].name == "exception"
 
@@ -345,3 +334,98 @@ class TestRunHaiku:
         bodies = [body for _, body in _parts(caplog)]
         assert len(bodies) >= 3
         assert sum(body.count("x" * 100) for body in bodies) == 2000
+
+
+class TestTraceContextExport:
+    """The haiku span's context reaches the child as TRACEPARENT, always."""
+
+    @pytest.mark.asyncio
+    async def test_the_child_env_names_the_haiku_span(self, spans):
+        _, mock_exec = await _run(_fake_proc(), env={"KEEP": "1", "TRACESTATE": "stale=1"})
+
+        (span,) = spans.all()
+        env = mock_exec.call_args.kwargs["env"]
+        ctx = span.get_span_context()
+        # version-trace_id-parent_id-flags; the flags vary by SDK version.
+        version, trace_id, parent_id, _flags = env["TRACEPARENT"].split("-")
+        assert (version, trace_id, parent_id) == ("00", f"{ctx.trace_id:032x}", f"{ctx.span_id:016x}")
+        assert env["KEEP"] == "1"
+        # A tracestate from some other trace is not passed on.
+        assert "TRACESTATE" not in env
+
+    @pytest.mark.asyncio
+    async def test_an_inherited_env_is_copied_before_adding_to_it(self, spans, monkeypatch):
+        monkeypatch.setenv("FROM_PARENT", "yes")
+        _, mock_exec = await _run(_fake_proc(), env=None)
+        env = mock_exec.call_args.kwargs["env"]
+        assert env["FROM_PARENT"] == "yes"
+        assert "TRACEPARENT" in env
+
+    def test_tracestate_is_passed_on_when_there_is_one(self, monkeypatch):
+        def inject(carrier):
+            carrier.update(traceparent="00-" + "1" * 32 + "-" + "2" * 16 + "-01", tracestate="vendor=x")
+
+        monkeypatch.setattr(haiku_process.propagate, "inject", inject)
+        env = haiku_process._with_trace_context({})
+        assert env["TRACESTATE"] == "vendor=x"
+
+    def test_without_an_active_span_the_env_is_untouched(self):
+        env = {"A": "1"}
+        assert haiku_process._with_trace_context(env) is env
+        assert haiku_process._with_trace_context(None) is None
+
+
+class TestTraceWrapper:
+    """HAIKU_TRACE_WRAPPER runs a console script through traced_run; off by default."""
+
+    @pytest.mark.asyncio
+    async def test_off_by_default(self, spans):
+        _, mock_exec = await _run(_fake_proc())
+        assert mock_exec.call_args.args == ("haiku-ingester", "--config=/my cfg.yaml", "run-batch")
+
+    @pytest.mark.asyncio
+    async def test_a_console_script_is_wrapped(self, spans, monkeypatch):
+        monkeypatch.setattr(settings, "haiku_trace_wrapper", True, raising=False)
+        with patch(_EXEC, new_callable=AsyncMock, return_value=_fake_proc()) as mock_exec:
+            await haiku_process.run_haiku(
+                ["/venv/bin/si-agent", "manifest", "vacuum"],
+                operation="vacuum",
+                source="src",
+                env={},
+                cwd=None,
+                timeout=30,
+            )
+        assert mock_exec.call_args.args == (
+            sys.executable,
+            "-m",
+            "soliplex.agents.traced_run",
+            "/venv/bin/si-agent",
+            "manifest",
+            "vacuum",
+        )
+        (span,) = spans.all()
+        assert span.attributes["haiku.trace_wrapper"] is True
+        # The span still names the command as configured, not the wrapper.
+        assert span.attributes["haiku.cli"] == "/venv/bin/si-agent manifest vacuum"
+
+    @pytest.mark.asyncio
+    async def test_a_command_that_isnt_a_console_script_runs_unwrapped(self, spans, monkeypatch, caplog):
+        monkeypatch.setattr(settings, "haiku_trace_wrapper", True, raising=False)
+        with (
+            caplog.at_level(logging.DEBUG, logger=_LOGGER),
+            patch(_EXEC, new_callable=AsyncMock, return_value=_fake_proc()) as mock_exec,
+        ):
+            await haiku_process.run_haiku(
+                ["/opt/custom/load.sh", "--db=/db"], operation="load", source="src", env={}, cwd=None, timeout=30
+            )
+        assert mock_exec.call_args.args == ("/opt/custom/load.sh", "--db=/db")
+        assert "is not a console script in this environment; running it unwrapped" in caplog.text
+        assert spans.all()[0].attributes["haiku.trace_wrapper"] is False
+
+
+@pytest.mark.asyncio
+async def test_none_attributes_are_left_off_the_span(spans):
+    await _run(_fake_proc(), attributes={"haiku.queue_wait_s": None, "haiku.db": "/db"})
+    (span,) = spans.all()
+    assert "haiku.queue_wait_s" not in span.attributes
+    assert span.attributes["haiku.db"] == "/db"

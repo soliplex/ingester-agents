@@ -153,7 +153,7 @@ class TestRunVerb:
         assert result["stderr"] == "warn"
         assert result["db"].replace("\\", "/").endswith("src.lancedb")
         # Output is logged in one part per stream, not one record per line.
-        assert "haiku migrate src stdout part 1:\nline1" in caplog.text
+        assert "haiku migrate src stdout output part 1:\nline1" in caplog.text
         assert "haiku migrate for source 'src' completed" in caplog.text
         # cwd honours haiku_load_cwd (None here = inherit).
         assert mock_exec.call_args.kwargs["cwd"] is None

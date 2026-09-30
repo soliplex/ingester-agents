@@ -11,6 +11,11 @@ configured Logfire it is the global tracer provider, so the span reaches
 Logfire, while CLI runs -- which never configure it -- get a no-op span
 instead of a ``LogfireNotConfiguredWarning``.
 
+The span's context is exported to the subprocess as ``TRACEPARENT`` /
+``TRACESTATE``, so a child that reads it joins this trace. With
+``HAIKU_TRACE_WRAPPER`` on, a console-script command runs through
+:mod:`soliplex.agents.traced_run`, which reads it on the child's behalf.
+
 Output is forwarded to the log in *parts*: one record per
 ``settings.haiku_output_chunk_bytes`` (split at a line break where there is
 one), and at least every ``settings.haiku_output_flush_seconds`` while output
@@ -30,20 +35,22 @@ log record's formatted message intact.
 import asyncio
 import codecs
 import logging
+import os
 import shlex
 import signal
+import sys
 import time
 from dataclasses import dataclass
 
-from opentelemetry import trace
+from opentelemetry import propagate
 from opentelemetry.trace import Status
 from opentelemetry.trace import StatusCode
 
+from soliplex.agents import telemetry
+from soliplex.agents import traced_run
 from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
-
-_tracer = trace.get_tracer("soliplex.agents.haiku")
 
 # Bytes of each stream kept in memory for the result and the failure quote;
 # the full output is in the logged parts.
@@ -151,7 +158,7 @@ class _StreamLog:
         if self.dropped_bytes or (self._max_bytes and self.logged_bytes + len(data) > self._max_bytes):
             if not self.dropped_bytes:
                 logger.warning(
-                    "haiku %s %s %s exceeded %d bytes of output; the rest is counted but not logged",
+                    "haiku %s %s %s output exceeded %d bytes; the rest is counted but not logged",
                     *self._label,
                     self._max_bytes,
                 )
@@ -163,7 +170,9 @@ class _StreamLog:
             return
         self.parts += 1
         self.logged_bytes += len(data)
-        logger.info("haiku %s %s %s part %d:\n%s", *self._label, self.parts, text)
+        # "output" marks these as the agent's copy of the subprocess output, not
+        # records haiku-ingester sent itself -- both can land in one trace.
+        logger.info("haiku %s %s %s output part %d:\n%s", *self._label, self.parts, text)
 
 
 async def _drain(reader, stream: _StreamLog, flush_seconds: float) -> None:
@@ -182,6 +191,51 @@ async def _drain(reader, stream: _StreamLog, flush_seconds: float) -> None:
 def tail(text: str, lines: int = TAIL_LINES) -> str:
     """The last *lines* lines of *text*."""
     return "\n".join(text.splitlines()[-lines:])
+
+
+def _with_trace_context(env: dict[str, str] | None) -> dict[str, str] | None:
+    """*env* plus ``TRACEPARENT`` / ``TRACESTATE`` naming the current span.
+
+    Always exported, whatever the child: a child that doesn't read them is
+    unaffected, and one that does -- haiku-rag once it reads ``TRACEPARENT``,
+    or any command run through :mod:`soliplex.agents.traced_run` -- joins
+    this trace. With no active span (tracing off) nothing is added and *env*
+    is returned as given; ``None`` still means "inherit ours".
+    """
+    carrier: dict[str, str] = {}
+    propagate.inject(carrier)
+    if "traceparent" not in carrier:
+        return env
+    env = dict(os.environ if env is None else env)
+    env["TRACEPARENT"] = carrier["traceparent"]
+    if "tracestate" in carrier:
+        env["TRACESTATE"] = carrier["tracestate"]
+    else:
+        # Don't pass on a tracestate that belongs to some other trace.
+        env.pop("TRACESTATE", None)
+    return env
+
+
+def _with_trace_wrapper(argv: list[str]) -> tuple[list[str], bool]:
+    """Route *argv* through :mod:`soliplex.agents.traced_run` when asked to.
+
+    Only with ``HAIKU_TRACE_WRAPPER`` on, and only for a console script
+    installed in this environment -- the wrapper runs its entry point
+    in-process. Anything else, including a custom command template that
+    isn't Python, runs unchanged.
+
+    Returns:
+        The argv to execute, and whether it was wrapped.
+    """
+    if not settings.haiku_trace_wrapper:
+        return argv, False
+    if traced_run.find_entry_point(traced_run.script_name(argv[0])) is None:
+        logger.debug(
+            "HAIKU_TRACE_WRAPPER is on, but %s is not a console script in this environment; running it unwrapped",
+            argv[0],
+        )
+        return argv, False
+    return [sys.executable, "-m", "soliplex.agents.traced_run", *argv], True
 
 
 @dataclass(frozen=True)
@@ -230,19 +284,24 @@ async def run_haiku(
         A :class:`HaikuRun`.
     """
     cli = shlex.join(argv)
+    exec_argv, wrapped = _with_trace_wrapper(argv)
     span_attributes = {
         "haiku.operation": operation,
         "haiku.source": source,
         "haiku.cli": cli,
         "haiku.timeout": timeout,
+        "haiku.trace_wrapper": wrapped,
         **(attributes or {}),
     }
-    with _tracer.start_as_current_span(f"haiku {operation} {source}", attributes=span_attributes) as span:
+    span_attributes = {key: value for key, value in span_attributes.items() if value is not None}
+    span_attributes["logfire.msg"] = f"haiku {operation} {source}"
+    # Looked up on the module at call time, so tests can route it elsewhere.
+    with telemetry.tracer.start_as_current_span(f"haiku {operation}", attributes=span_attributes) as span:
         logger.info("Starting haiku %s for source '%s': %s", operation, source, cli)
         proc = await asyncio.create_subprocess_exec(
-            *argv,
+            *exec_argv,
             cwd=cwd,
-            env=env,
+            env=_with_trace_context(env),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

@@ -155,7 +155,7 @@ async def _log_if_no_documents(manifest: Manifest, context: LoadContext) -> None
         )
 
 
-async def run_load(manifest: Manifest) -> dict:
+async def run_load(manifest: Manifest, *, queue_wait_s: float | None = None) -> dict:
     """Run a single haiku-rag batch load for *manifest*.
 
     Spawns the configured load command with ``SOURCE`` set to the
@@ -167,6 +167,8 @@ async def run_load(manifest: Manifest) -> dict:
 
     Args:
         manifest: The manifest whose source should be loaded.
+        queue_wait_s: Seconds the load waited in the haiku queue, recorded on
+            the load's span (``None`` when it wasn't queued, as from the CLI).
 
     Returns:
         Dict with ``source``, ``db``, ``returncode`` (``None`` on timeout),
@@ -193,7 +195,12 @@ async def run_load(manifest: Manifest) -> dict:
         env=env,
         cwd=settings.haiku_load_cwd,
         timeout=settings.haiku_load_timeout,
-        attributes={"haiku.db": db, "haiku.config": haiku_cfg, "manifest.id": manifest.id},
+        attributes={
+            "haiku.db": db,
+            "haiku.config": haiku_cfg,
+            "manifest.id": manifest.id,
+            "haiku.queue_wait_s": queue_wait_s,
+        },
     )
     return {
         "source": source,
