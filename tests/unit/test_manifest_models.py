@@ -4,12 +4,12 @@ import os
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from soliplex.agents import ValidationError
 from soliplex.agents import store as agent_store
 from soliplex.agents.config import SCM
 from soliplex.agents.config import ContentFilter
-from soliplex.agents.config import DownloadStoreConfig
 from soliplex.agents.config import FSComponent
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import ManifestConfig
@@ -372,19 +372,16 @@ class TestManifest:
 # --- get_download_target --------------------------------------------------
 
 
-def _manifest(source="src", store=None):
-    config = ManifestConfig(download_store=store) if store is not None else None
+def _manifest(source="src"):
     return Manifest(
         id="m",
         name="M",
         source=source,
-        config=config,
         components=[{"type": "fs", "name": "c", "path": "/data"}],
     )
 
 
-def test_download_target_inherits_the_installation(monkeypatch, tmp_path):
-    """No override block -> whatever the settings say."""
+def test_download_target_is_the_installation(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
     monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
     agent_store.reset_store_cache()
@@ -393,7 +390,7 @@ def test_download_target_inherits_the_installation(monkeypatch, tmp_path):
     assert target.root == tmp_path / "dl" / "src"
 
 
-def test_download_target_inherits_an_s3_installation(monkeypatch):
+def test_download_target_is_an_s3_installation(monkeypatch):
     monkeypatch.setattr(agent_store.settings, "download_s3_bucket", "inherited")
     monkeypatch.setattr(agent_store.settings, "download_dir", "dl")
     monkeypatch.setattr(agent_store, "_make_s3_store", lambda bucket, options: None)
@@ -401,40 +398,76 @@ def test_download_target_inherits_an_s3_installation(monkeypatch):
     assert _manifest().get_download_target().base_uri == "s3://inherited/dl/src"
 
 
-def test_download_target_override_forces_s3(monkeypatch):
+def test_download_target_dir_argument_wins(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
-    target = _manifest(store=DownloadStoreConfig(target="s3", bucket="b", dir="over")).get_download_target()
-    assert target.base_uri == "s3://b/over/src"
-
-
-def test_download_target_override_forces_local(monkeypatch, tmp_path):
-    """The third state: pin a source local while the installation is S3.
-
-    This is what a rollback needs, and what `bucket: null` could not express.
-    """
-    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", "installation-wide")
-    monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
-    target = _manifest(store=DownloadStoreConfig(target="fs")).get_download_target()
-    assert target.is_local is True
-    assert target.root == tmp_path / "dl" / "src"
-
-
-def test_download_target_override_falls_back_to_settings_bucket(monkeypatch):
-    """An override may name only the target, taking the bucket from settings."""
-    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", "from-settings")
-    monkeypatch.setattr(agent_store.settings, "download_dir", "dl")
-    target = _manifest(store=DownloadStoreConfig(target="s3")).get_download_target()
-    assert target.base_uri == "s3://from-settings/dl/src"
-
-
-def test_download_target_s3_without_a_bucket_raises(monkeypatch):
-    """Failing loudly beats silently writing to local disk."""
-    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
-    with pytest.raises(ValueError, match="no bucket is configured"):
-        _manifest(store=DownloadStoreConfig(target="s3")).get_download_target()
-
-
-def test_download_target_dir_override_wins(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
-    target = _manifest(store=DownloadStoreConfig(target="fs")).get_download_target(download_dir=str(tmp_path / "explicit"))
+    agent_store.reset_store_cache()
+    target = _manifest().get_download_target(download_dir=str(tmp_path / "explicit"))
     assert target.root == tmp_path / "explicit" / "src"
+
+
+# --- unknown keys are rejected -----------------------------------------------
+
+
+def _raw(**overrides):
+    raw = {
+        "id": "m",
+        "name": "M",
+        "source": "src",
+        "components": [{"type": "fs", "name": "c", "path": "/data"}],
+    }
+    raw.update(overrides)
+    return raw
+
+
+@pytest.mark.parametrize(
+    "raw, location",
+    [
+        (_raw(bogus=1), ("bogus",)),
+        (_raw(config={"extentions": ["md"]}), ("config", "extentions")),
+        (_raw(schedule={"cron": "* * * * *", "timezone": "UTC"}), ("schedule", "timezone")),
+        (_raw(config={"post_process": [{"method": "m:f", "args": []}]}), ("config", "post_process", 0, "args")),
+        (
+            _raw(components=[{"type": "fs", "name": "c", "path": "/d", "extentions": ["md"]}]),
+            ("components", 0, "fs", "extentions"),
+        ),
+        (
+            _raw(components=[{"type": "scm", "name": "c", "platform": "github", "owner": "o", "repo": "r", "token": "x"}]),
+            ("components", 0, "scm", "token"),
+        ),
+        (
+            _raw(components=[{"type": "webdav", "name": "c", "url": "http://dav", "path": "/", "pasword": "x"}]),
+            ("components", 0, "webdav", "pasword"),
+        ),
+        (_raw(components=[{"type": "web", "name": "c", "url": "http://x", "depth": 2}]), ("components", 0, "web", "depth")),
+    ],
+)
+def test_unknown_keys_are_rejected(raw, location):
+    """A typo is an error, not a setting silently left at its default."""
+    with pytest.raises(PydanticValidationError) as excinfo:
+        Manifest(**raw)
+    errors = excinfo.value.errors()
+    assert [e["loc"] for e in errors if e["type"] == "extra_forbidden"] == [location]
+
+
+def test_free_form_fields_still_accept_any_keys():
+    manifest = Manifest(
+        **_raw(
+            config={"metadata": {"anything": "x"}, "post_process": [{"method": "m:f", "kwargs": {"any": 1}}]},
+            components=[{"type": "fs", "name": "c", "path": "/d", "metadata": {"whatever": "y"}}],
+        )
+    )
+    assert manifest.config.metadata == {"anything": "x"}
+    assert manifest.config.post_process[0].kwargs == {"any": 1}
+    assert manifest.components[0].metadata == {"whatever": "y"}
+
+
+def test_download_store_is_rejected_with_an_explanation():
+    """The removed override gets a message pointing at what replaced it."""
+    expected = "download_store is no longer supported: storage is chosen per installation"
+    with pytest.raises(PydanticValidationError, match=expected):
+        Manifest(**_raw(config={"download_store": {"target": "s3"}}))
+
+
+def test_haiku_config_override_is_still_supported():
+    manifest = Manifest(**_raw(config={"haiku_config": "haiku.rag.s3.yaml"}))
+    assert manifest.config.haiku_config == "haiku.rag.s3.yaml"

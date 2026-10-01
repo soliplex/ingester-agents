@@ -291,8 +291,10 @@ source under `STATE_DIR`. Content hashes recorded in sync state enable
 incremental ingestion (only new/changed files are written).
 
 Where that is depends on the resolved **download target** (`store.py`): the
-local filesystem, or an S3 bucket when `DOWNLOAD_S3_BUCKET` is set, or
-whatever a manifest's `config.download_store` overrides it to. Nothing outside
+local filesystem, or an S3 bucket when `DOWNLOAD_S3_BUCKET` is set. It is
+chosen per installation, never per manifest: nothing may rewrite the
+download settings mid-process, because the haiku load and its callbacks
+resolve the target again later, on another task. Nothing outside
 `store.py` branches on the backend -- callers pass source-relative keys and the
 target owns every layer of prefixing.
 
