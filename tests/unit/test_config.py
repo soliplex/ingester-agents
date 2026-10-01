@@ -9,7 +9,6 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from soliplex.agents.config import DownloadStoreConfig
 from soliplex.agents.config import JsonFormatter
 from soliplex.agents.config import ManifestConfig
 from soliplex.agents.config import Settings
@@ -317,23 +316,12 @@ class TestDownloadBucketSpelling:
 
         assert Settings().download_s3_bucket == "s3://my-bucket/ingester"
 
-    def test_blank_override_bucket_falls_back_to_the_setting(self):
-        assert DownloadStoreConfig(target="s3", bucket="").bucket is None
-
     def test_unset_stays_unset(self):
         assert Settings().download_s3_bucket is None
 
     def test_rejects_a_non_s3_scheme(self):
         with pytest.raises(ValidationError, match="s3:// URI or a bare bucket name"):
             Settings(download_s3_bucket="https://bucket/p")
-
-    def test_override_accepts_an_s3_uri(self):
-        override = DownloadStoreConfig(target="s3", bucket="s3://bucket/ingester")
-        assert override.bucket == "s3://bucket/ingester"
-
-    def test_override_rejects_a_non_s3_scheme(self):
-        with pytest.raises(ValidationError, match="s3:// URI or a bare bucket name"):
-            DownloadStoreConfig(target="s3", bucket="ftp://bucket")
 
     @pytest.mark.parametrize("value", ["s3://my-bucket/ingester", "my-bucket", "", "   "])
     def test_package_imports_with_the_variable_set(self, value):
@@ -354,6 +342,3 @@ class TestDownloadBucketSpelling:
         )
 
         assert result.returncode == 0, result.stderr
-
-    def test_override_bucket_may_be_omitted(self):
-        assert DownloadStoreConfig(target="s3").bucket is None

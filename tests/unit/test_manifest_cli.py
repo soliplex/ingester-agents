@@ -86,6 +86,18 @@ class TestRun:
         assert result.exit_code == 1
         assert "Validation error:" in result.output
 
+    def test_run_rejects_a_manifest_with_an_unknown_key(self, tmp_path):
+        """Unmocked: the manifest itself fails to load, before anything runs."""
+        path = tmp_path / "typo.yml"
+        path.write_text(
+            "id: m\nname: M\nsource: s\nconfig:\n  extentions: [md]\n"
+            "components:\n  - type: fs\n    name: c\n    path: /data\n"
+        )
+        result = runner.invoke(cli, ["run", str(path), "--no-load"])
+        assert result.exit_code == 1
+        assert "Validation error:" in result.output
+        assert "extentions" in result.output
+
 
 _MAINT = "soliplex.agents.manifest.haiku_maint.run_maintenance"
 
