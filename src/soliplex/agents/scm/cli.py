@@ -1,10 +1,8 @@
 import asyncio
 import json
 import logging
-import sys
 from typing import Annotated
 
-import aiohttp
 import typer
 
 from .. import local_state
@@ -73,115 +71,6 @@ def get_repo(
     """
     owner, repo_name = parse_repo(repo)
     print(asyncio.run(app.get_scm(scm).list_repo_files(repo_name, owner, settings.extensions)))
-
-
-@cli.command("run-inventory")
-def run_inventory(
-    scm: Annotated[SCM, typer.Argument(help="scm provider")],
-    repo: Annotated[str, typer.Argument(help="repository in owner/repo format")],
-    do_json: Annotated[bool, typer.Option(help="output json")] = False,
-    content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
-    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
-):
-    """
-    Run full inventory sync for a repository.
-
-    Example:
-        si-agent scm run-inventory gitea admin/myrepo
-        si-agent scm run-inventory github myorg/myrepo
-        si-agent scm run-inventory github myorg/myrepo --content-filter files
-    """
-    owner, repo_name = parse_repo(repo)
-    extra_metadata = json.loads(metadata) if metadata else None
-    try:
-        res = asyncio.run(
-            app.load_inventory(
-                scm,
-                repo_name,
-                owner,
-                content_filter=content_filter,
-                extra_metadata=extra_metadata,
-            )
-        )
-    except (aiohttp.ClientError, ConnectionError) as e:
-        print(f"Connection error: Could not connect to server: {e}", file=sys.stderr)
-        raise SystemExit(1) from None
-    except ValueError as e:
-        print(f"Configuration error: {e}", file=sys.stderr)
-        raise SystemExit(1) from None
-    if do_json:
-        print(json.dumps(res, indent=2))
-    else:
-        if "errors" in res and len(res["errors"]) > 0:
-            print(f"found {len(res['errors'])} errors:")
-            for err in res["errors"]:
-                print(err)
-        else:
-            print("no errors found")
-            print(f"found {len(res['inventory'])} files")
-            print(f"found {len(res['to_process'])} to process")
-            if "ingested" in res and len(res["ingested"]) > 0:
-                print(f"{len(res['ingested'])} ingested")
-            else:
-                print("no ingested files")
-
-
-@cli.command("run-incremental")
-def run_incremental(
-    scm: Annotated[SCM, typer.Argument(help="scm provider")],
-    repo: Annotated[str, typer.Argument(help="repository in owner/repo format")],
-    branch: Annotated[str, typer.Option(help="branch name")] = "main",
-    do_json: Annotated[bool, typer.Option(help="output json")] = False,
-    content_filter: Annotated[ContentFilter, typer.Option(help="filter content: all, files, issues")] = ContentFilter.ALL,
-    metadata: Annotated[str, typer.Option(help="JSON string of extra metadata to attach to all documents")] = None,
-):
-    """
-    Run incremental sync based on commit history.
-
-    Only processes files that changed since last sync.
-    Falls back to full sync if no sync state exists.
-
-    Example:
-        si-agent scm run-incremental gitea admin/myrepo
-        si-agent scm run-incremental github myorg/myrepo --branch main
-        si-agent scm run-incremental github myorg/myrepo --content-filter issues
-    """
-    owner, repo_name = parse_repo(repo)
-    extra_metadata = json.loads(metadata) if metadata else None
-    try:
-        res = asyncio.run(
-            app.incremental_sync(
-                scm,
-                repo_name,
-                owner,
-                branch=branch,
-                content_filter=content_filter,
-                extra_metadata=extra_metadata,
-            )
-        )
-    except (aiohttp.ClientError, ConnectionError) as e:
-        print(f"Connection error: Could not connect to server: {e}", file=sys.stderr)
-        raise SystemExit(1) from None
-    except ValueError as e:
-        print(f"Configuration error: {e}", file=sys.stderr)
-        raise SystemExit(1) from None
-
-    if do_json:
-        print(json.dumps(res, indent=2))
-    else:
-        print(f"Status: {res.get('status', 'unknown')}")
-        print(f"Commits processed: {res.get('commits_processed', 0)}")
-        print(f"Files changed: {res.get('files_changed', 0)}")
-        print(f"Files removed: {res.get('files_removed', 0)}")
-        print(f"Files ingested: {len(res.get('ingested', []))}")
-
-        if res.get("errors"):
-            print(f"\nErrors: {len(res['errors'])}")
-            for err in res["errors"]:
-                print(f"  - {err.get('uri', 'unknown')}: {err.get('error', 'unknown error')}")
-
-        if res.get("new_commit_sha"):
-            print(f"\nSync state updated to: {res['new_commit_sha']}")
 
 
 @cli.command("reset-sync")

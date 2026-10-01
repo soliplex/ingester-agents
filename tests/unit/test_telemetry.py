@@ -77,8 +77,8 @@ class TestCommandPath:
         return typer.main.get_command(root_cli)
 
     def test_keeps_command_names_only(self, root):
-        argv = ["--otel", "webdav", "run-inventory", "/docs", "--webdav-password", "hunter2"]
-        assert telemetry.command_path(root, argv) == "webdav run-inventory"
+        argv = ["--otel", "webdav", "check-status", "/docs", "src", "--webdav-password", "hunter2"]
+        assert telemetry.command_path(root, argv) == "webdav check-status"
 
     def test_option_values_between_commands_are_skipped(self, root):
         assert telemetry.command_path(root, ["manifest", "--bogus", "x", "run", "a.yml"]) == "manifest run"
@@ -97,9 +97,9 @@ class TestCommandArgs:
         assert telemetry.command_args(root, argv) == "manifest vacuum /manifests/test.yaml"
 
     def test_secret_option_values_are_redacted(self, root):
-        argv = ["webdav", "run-inventory", "/docs", "--webdav-password", "hunter2", "--webdav-username", "bob"]
+        argv = ["webdav", "check-status", "/docs", "src", "--webdav-password", "hunter2", "--webdav-username", "bob"]
         assert telemetry.command_args(root, argv) == (
-            "webdav run-inventory /docs --webdav-password '[redacted]' --webdav-username bob"
+            "webdav check-status /docs src --webdav-password '[redacted]' --webdav-username bob"
         )
 
     def test_the_equals_form_is_redacted_too(self, root):

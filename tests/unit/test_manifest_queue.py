@@ -47,7 +47,8 @@ class TestEnqueue:
     @pytest.mark.asyncio
     async def test_warns_and_drops_when_worker_not_started(self, caplog):
         with caplog.at_level(logging.WARNING):
-            await manifest_queue.enqueue_manifest("x", "/nope.yml")
+            result = await manifest_queue.enqueue_manifest("x", "/nope.yml")
+        assert result is manifest_queue.EnqueueResult.NOT_STARTED
         assert "queue not started" in caplog.text
 
     @pytest.mark.asyncio
@@ -64,8 +65,10 @@ class TestEnqueue:
             caplog.at_level(logging.INFO),
         ):
             ms.haiku_load_enabled = False
-            await manifest_queue.enqueue_manifest("dup", "/a.yml")
-            await manifest_queue.enqueue_manifest("dup", "/a.yml")
+            first = await manifest_queue.enqueue_manifest("dup", "/a.yml")
+            second = await manifest_queue.enqueue_manifest("dup", "/a.yml")
+            assert first is manifest_queue.EnqueueResult.QUEUED
+            assert second is manifest_queue.EnqueueResult.COALESCED
             assert manifest_queue.pending_manifests() == frozenset({"dup"})
         assert "coalescing this run" in caplog.text
 

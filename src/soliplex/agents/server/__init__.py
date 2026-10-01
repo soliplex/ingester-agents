@@ -1,7 +1,10 @@
 """
 FastAPI server for Soliplex Agents.
 
-Provides REST API endpoints for filesystem, SCM, and WebDAV ingestion agents.
+Ingestion runs only through manifests: the cron scheduler and
+``POST /api/v1/manifest/run`` both feed the single manifest run queue
+(:mod:`.manifest_queue`). The filesystem, SCM, and WebDAV routes are
+read-only inspection helpers.
 """
 
 import logging
@@ -23,7 +26,6 @@ from . import manifest_queue
 from .routes.fs import fs_router
 from .routes.manifest import manifest_router
 from .routes.scm import scm_router
-from .routes.web import web_router
 from .routes.webdav import webdav_router
 
 logger = logging.getLogger(__name__)
@@ -214,10 +216,13 @@ async def lifespan(app: FastAPI):
     if settings.haiku_load_enabled:
         haiku_queue.start_worker()
 
+    # The run queue is started whether or not the scheduler is, so
+    # `POST /api/v1/manifest/run` can queue manifests either way. It must be
+    # draining before the first reconcile, or that pass would have nowhere
+    # to enqueue its due manifests.
+    manifest_queue.start_worker()
+
     if settings.scheduler_enabled:
-        # The worker must be draining before the first reconcile, or that
-        # pass would have nowhere to enqueue its due manifests.
-        manifest_queue.start_worker()
         # Run one reconcile immediately so schedules register and
         # unscheduled manifests run at startup; the reconciler cron picks
         # up changes on every subsequent tick.
@@ -226,8 +231,7 @@ async def lifespan(app: FastAPI):
     yield
     # Stop the manifest worker first: it feeds the haiku queue, so draining
     # it in the other order could enqueue a load onto a stopped worker.
-    if settings.scheduler_enabled:
-        await manifest_queue.stop_worker()
+    await manifest_queue.stop_worker()
     if settings.haiku_load_enabled:
         await haiku_queue.stop_worker()
     logger.info("soliplex-agents server stopped")
@@ -235,7 +239,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Soliplex Agents API",
-    description="REST API for Soliplex document ingestion agents",
+    description="REST API for Soliplex manifest-driven document ingestion",
     version="0.1.0",
     lifespan=lifespan,
     root_path=settings.root_path or "",
@@ -258,7 +262,6 @@ api_router = APIRouter(prefix=settings.api_prefix or "")
 api_router.include_router(fs_router)
 api_router.include_router(manifest_router)
 api_router.include_router(scm_router)
-api_router.include_router(web_router)
 api_router.include_router(webdav_router)
 
 
