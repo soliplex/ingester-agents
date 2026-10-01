@@ -223,6 +223,22 @@ class TestReconcileReportsProblemsOnce:
         assert "file removed" not in caplog.text
 
     @pytest.mark.asyncio
+    async def test_a_manifest_still_using_download_store_is_reported_once(self, tmp_path, reconcile, caplog):
+        _write_manifest(tmp_path, "m.yml", "m", schedule="*/5 * * * *")
+        await reconcile()
+        override = "config:\n  download_store:\n    target: s3\ncomponents:"
+        (tmp_path / "m.yml").write_text((tmp_path / "m.yml").read_text().replace("components:", override))
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            await reconcile(times=3)
+
+        errors = _messages(caplog, logging.ERROR)
+        assert len(errors) == 2  # the invalid file, then the unregistration it causes
+        assert "(id m) is invalid" in errors[0]
+        assert "download_store is no longer supported" in errors[0]
+        assert errors[1] == f"Unregistered manifest 'm': {tmp_path / 'm.yml'} is invalid"
+
+    @pytest.mark.asyncio
     async def test_fixed_file_is_reported_valid_again(self, tmp_path, reconcile, caplog):
         (tmp_path / "a.yml").write_text(":::invalid:::")
         await reconcile()

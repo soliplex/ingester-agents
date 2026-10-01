@@ -1,33 +1,22 @@
-# Writing one source's documents to object storage while others stay local.
+# A source on an installation whose download store is object storage.
 #
-# The installation default is whatever DOWNLOAD_S3_BUCKET / DOWNLOAD_DIR say;
-# this block overrides it for this source alone, which is how a migration is
-# done one source at a time.
+# Where documents go is chosen per installation, not per manifest: set
+#   DOWNLOAD_S3_BUCKET=s3://my-documents/ingester
+#   DOWNLOAD_DIR=downloads
+# and every source's documents land at
+#   s3://my-documents/ingester/downloads/<source>/
+# (see "Object Storage" in the README). Nothing in this file selects the store.
 #
-# Before the first run:
-#   si-agent manifest migrate-store example-manifests/s3-download-store.yml --dry-run
-#   si-agent manifest migrate-store example-manifests/s3-download-store.yml
-# (skip that to re-fetch from upstream instead -- both work.)
+# What a manifest does choose is the haiku-rag config its load uses. An S3
+# install needs one whose source stanza is `type: s3`, either for every
+# manifest via HAIKU_DEFAULT_CONFIG=haiku.rag.s3.yaml, or per manifest with
+# `haiku_config`, as below.
 id: s3-download-store
 name: S3 Download Store
-source: migrated-docs
+source: s3-docs
 
 config:
-  download_store:
-    # "s3" forces object storage; "fs" forces local disk even when the
-    # installation default is S3, which is how a source is pinned or rolled
-    # back. Omit the whole block to inherit the default.
-    target: s3
-    # A bare name or a full s3://bucket/prefix URI; a prefix here nests `dir`
-    # beneath it, so this is the same target as bucket: my-documents with
-    # dir: ingester/downloads.
-    bucket: s3://my-documents/ingester   # optional; defaults to DOWNLOAD_S3_BUCKET
-    dir: downloads                       # optional; defaults to DOWNLOAD_DIR
-
-  # A source on object storage needs a haiku-rag config whose source stanza is
-  # `type: s3` with `uri: ${DOWNLOAD_URI}`. DOWNLOAD_URI is injected
-  # for every load and holds the resolved base URI in both modes, so one config
-  # form works either way.
+  # Absolute paths are used as-is; a bare filename resolves under HAIKU_PATH.
   haiku_config: haiku.rag.s3.yaml
 
 components:
