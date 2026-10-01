@@ -88,13 +88,17 @@ async def run_manifest_now(manifest_id: str, path: str) -> None:
     telemetry.describe_manifest(span, loaded)
     result = await manifest_runner.run_manifest(loaded)
     telemetry.record_summary(span, result["summary"])
+    if result.get("skipped"):
+        # A pre-run step called the run off: nothing ran, so nothing to load.
+        logger.info("Manifest '%s' skipped by pre-run; no haiku load queued", manifest_id)
+        return
     logger.info(
         "Manifest '%s' completed: %d components",
         manifest_id,
         len(result.get("results", [])),
     )
     if settings.haiku_load_enabled:
-        await enqueue_load(loaded)
+        await enqueue_load(loaded, run_result=result)
 
 
 async def _worker() -> None:

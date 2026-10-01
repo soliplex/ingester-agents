@@ -15,53 +15,40 @@ Three things a step does not have to arrange for itself:
   :class:`~soliplex.agents.manifest.context.LoadContext` for the source: the
   resolved download target, store, and sidecar facade. A callback that needs
   storage does not have to rediscover it from the environment;
-* **outcome auto-inject** -- likewise for ``ingester_exit_code``, the load's
-  exit code (``None`` on timeout). Callbacks fire whatever the load did, so a
-  step that only makes sense after a clean load has to be able to ask.
+* **outcome auto-inject** -- likewise for ``ingester``, the load's
+  :class:`~soliplex.agents.manifest.haiku_process.HaikuRun` (exit code,
+  ``timed_out``, and the last part of its stdout / stderr), and for
+  ``ingester_exit_code``, just the exit code (``None`` on timeout). Callbacks
+  fire whatever the load did, so a step that only makes sense after a clean
+  load has to be able to ask;
+* **run auto-inject** -- likewise for ``run_result``, the result of the
+  manifest run that queued this load (``None`` when the load was started
+  without one). Under the server, loads are queued, so a later run of the
+  same manifest may already have started by the time this one's callbacks
+  fire.
 
 A step that raises stops the chain: the exception is logged and propagates, and
 the steps after it do not run. See :func:`run_post_process`, and the README's
 "Post-process callbacks" for the configuration side.
 """
 
-import importlib
-import inspect
 import logging
 import os
-from collections.abc import Callable
 from contextlib import contextmanager
-from inspect import Parameter
 
 from soliplex.agents import telemetry
 from soliplex.agents.config import Manifest
+from soliplex.agents.manifest import callables
 from soliplex.agents.manifest.context import LoadContext
 from soliplex.agents.manifest.haiku_loader import resolve_haiku_cfg
+from soliplex.agents.manifest.haiku_process import HaikuRun
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_method(spec: str) -> Callable:
-    """Import a dotted-path callable.
-
-    Accepts ``"pkg.mod:func"`` (module / attribute split on ``:``) and, as a
-    fallback, ``"pkg.mod.func"`` (split on the last ``.``).
-    """
-    module_name, sep, attr = spec.partition(":")
-    if not sep:
-        module_name, _, attr = spec.rpartition(".")
-    module = importlib.import_module(module_name)
-    return getattr(module, attr)
-
-
-def _accepts_kwarg(method: Callable, name: str) -> bool:
-    """Whether ``method`` accepts ``name`` as a keyword (named or via ``**kwargs``)."""
-    try:
-        params = inspect.signature(method).parameters
-    except (TypeError, ValueError):  # pragma: no cover - builtins without signatures
-        return False
-    if name in params:
-        return True
-    return any(p.kind is Parameter.VAR_KEYWORD for p in params.values())
+# Module-level names so a test can swap the import for a registry.
+_resolve_method = callables.resolve_method
+_accepts_kwarg = callables.accepts_kwarg
 
 
 @contextmanager
@@ -93,14 +80,16 @@ def _load_env(manifest: Manifest, context: LoadContext):
 async def run_post_process(
     manifest: Manifest,
     *,
-    ingester_exit_code: int | None = None,
+    ingester: HaikuRun | None = None,
+    run_result: dict | None = None,
 ) -> list[dict]:
     """Run ``manifest.config.post_process`` callbacks in order.
 
-    ``ingester_exit_code`` is the haiku-ingester load's exit code (``None`` on
-    timeout). Callbacks run regardless of it, so a step can inspect the outcome;
-    it is auto-injected as an ``ingester_exit_code`` kwarg for callables that
-    accept one.
+    ``ingester`` is the haiku-ingester load's outcome. Callbacks run regardless
+    of it, so a step can inspect it: it is auto-injected as ``ingester``, and
+    its exit code (``None`` on timeout, or when there is no load) as
+    ``ingester_exit_code``, for callables that accept them. ``run_result`` --
+    the manifest run that queued the load -- is injected the same way.
 
     Runs the steps in order and **terminates on the first error**: a step that
     raises is logged and the exception propagates, so the remaining steps do not
@@ -112,6 +101,13 @@ async def run_post_process(
 
     results: list[dict] = []
     context = LoadContext.for_source(manifest.source)
+    ingester_exit_code = ingester.returncode if ingester is not None else None
+    available = {
+        "ingester": ingester,
+        "ingester_exit_code": ingester_exit_code,
+        "run_result": run_result,
+        "context": context,
+    }
     with _load_env(manifest, context):
         for index, step in enumerate(manifest.config.post_process):
             attributes = {
@@ -132,15 +128,13 @@ async def run_post_process(
                 try:
                     method = _resolve_method(step.method)
                     kwargs = dict(step.kwargs)
+                    # Resolved only when wanted: it raises without HAIKU_PATH.
                     if "config" not in kwargs and _accepts_kwarg(method, "config"):
                         kwargs["config"] = resolve_haiku_cfg(manifest)
-                    if "ingester_exit_code" not in kwargs and _accepts_kwarg(method, "ingester_exit_code"):
-                        kwargs["ingester_exit_code"] = ingester_exit_code
-                    if "context" not in kwargs and _accepts_kwarg(method, "context"):
-                        kwargs["context"] = context
-                    value = method(manifest.source, **kwargs)
-                    if inspect.isawaitable(value):
-                        await value
+                    kwargs = callables.inject(method, kwargs, available)
+                    # Inline, not in a thread: existing callbacks may expect
+                    # to run on the event loop's thread.
+                    await callables.invoke(method, manifest.source, kwargs=kwargs, in_thread=False)
                 except Exception:
                     logger.exception(
                         "Post-process '%s' failed for source '%s'; terminating",

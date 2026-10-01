@@ -21,8 +21,11 @@ _queue: asyncio.Queue | None = None
 _worker_task: asyncio.Task | None = None
 
 
-async def enqueue_load(manifest: Manifest) -> None:
+async def enqueue_load(manifest: Manifest, run_result: dict | None = None) -> None:
     """Queue a haiku-rag load for *manifest*.
+
+    *run_result* -- the manifest run that asked for the load -- travels with it
+    and reaches post-process callbacks that accept ``run_result``.
 
     No-op (with a warning) if the worker has not been started, so manifest
     runs never fail just because loads are disabled.
@@ -37,7 +40,7 @@ async def enqueue_load(manifest: Manifest) -> None:
             manifest.source,
         )
         return
-    await _queue.put((manifest, otel_context.get_current(), time.monotonic()))
+    await _queue.put((manifest, run_result, otel_context.get_current(), time.monotonic()))
     logger.info(
         "Queued haiku load for source '%s' (queue size=%d)",
         manifest.source,
@@ -49,7 +52,7 @@ async def _worker() -> None:
     """Drain the queue, running one load at a time."""
     assert _queue is not None
     while True:
-        manifest, parent, enqueued_at = await _queue.get()
+        manifest, run_result, parent, enqueued_at = await _queue.get()
         token = otel_context.attach(parent)
         try:
             queue_wait_s = time.monotonic() - enqueued_at
@@ -58,7 +61,7 @@ async def _worker() -> None:
                 manifest.source,
                 queue_wait_s,
             )
-            await haiku_loader.run_load(manifest, queue_wait_s=queue_wait_s)
+            await haiku_loader.run_load(manifest, queue_wait_s=queue_wait_s, run_result=run_result)
         except Exception:
             logger.exception(
                 "Unhandled error during haiku load for '%s'",

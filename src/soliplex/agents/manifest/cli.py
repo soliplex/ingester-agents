@@ -43,6 +43,11 @@ def run(
     else:
         for manifest_result in results:
             print(f"\nManifest: {manifest_result['manifest_name']} ({manifest_result['manifest_id']})")
+            skipped = manifest_result.get("skipped")
+            if skipped:
+                reason = f": {skipped['message']}" if skipped.get("message") else ""
+                print(f"  SKIPPED by {skipped['method']}{reason}")
+                continue
             for comp in manifest_result.get("results", []):
                 name = comp["component"]
                 if "error" in comp:
@@ -57,6 +62,15 @@ def run(
             deleted = manifest_result.get("delete_stale_result")
             if deleted is not None:
                 print(f"  deleted (stale): {len(deleted)}")
+            pre = manifest_result.get("pre_process")
+            if pre and pre["checked"]:
+                print(
+                    f"  pre-process: {pre['checked']} checked, {len(pre['skipped'])} skipped, "
+                    f"{len(pre['modified'])} modified, {len(pre['errors'])} errors"
+                )
+                for item in pre["skipped"]:
+                    reason = f": {item['message']}" if item.get("message") else ""
+                    print(f"    skipped {item['uri']}{reason}")
 
 
 _PATH_HELP = "Manifest YAML file, directory of manifests, or 'all' for every manifest in MANIFEST_DIR"
@@ -194,3 +208,88 @@ def vacuum(
 ):
     """Optimize and compact each manifest source's haiku-rag database."""
     _maintenance("vacuum", path, do_json, timeout, dry_run)
+
+
+def _resolve(path: str) -> list:
+    try:
+        return runner.resolve_manifests(path)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        raise SystemExit(1) from None
+    except ValueError as e:
+        print(f"Validation error: {e}")
+        raise SystemExit(1) from None
+
+
+@cli.command("pre-process-report")
+def pre_process_report(
+    path: str = typer.Argument(runner.ALL_MANIFESTS, help=_PATH_HELP),
+    status: str = typer.Option(None, "--status", help="Only this outcome: continue, modified, skip or error"),
+    message: str = typer.Option(None, "--message", help="Only outcomes whose message contains this text"),
+    changed_since: str = typer.Option(None, "--changed-since", help="Only documents whose hash changed since (ISO 8601)"),
+    do_json: bool = typer.Option(False, "--json", help="Output results as JSON"),
+) -> None:
+    """List the latest pre-process outcome per document."""
+    report = {
+        m.id: runner.pre_process_report(m, status=status, message=message, changed_since=changed_since)
+        for m in _resolve(path)
+    }
+    if do_json:
+        print(json.dumps(report, indent=2))
+        return
+    for manifest_id, rows in report.items():
+        print(f"\nManifest: {manifest_id} ({len(rows)} document(s))")
+        for row in rows:
+            by = f" by {row['method']}" if row["method"] else ""
+            reason = f": {row['message']}" if row["message"] else ""
+            print(
+                f"  {row['status']:<8} {row['uri']}{by}{reason} "
+                f"[sha {row['input_sha256'][:12]}, changed {row['hash_changed_at']}]"
+            )
+
+
+@cli.command("pre-run-report")
+def pre_run_report(
+    path: str = typer.Argument(runner.ALL_MANIFESTS, help=_PATH_HELP),
+    status: str = typer.Option(None, "--status", help="Only this outcome: continue, skip or error"),
+    since: str = typer.Option(None, "--since", help="Only runs started since (ISO 8601)"),
+    do_json: bool = typer.Option(False, "--json", help="Output results as JSON"),
+) -> None:
+    """List recorded pre-run outcomes, newest run first."""
+    report = {m.id: runner.pre_run_report(m, status=status, since=since) for m in _resolve(path)}
+    if do_json:
+        print(json.dumps(report, indent=2))
+        return
+    for manifest_id, rows in report.items():
+        print(f"\nManifest: {manifest_id}")
+        for row in rows:
+            reason = f": {row['message']}" if row["message"] else ""
+            print(f"  {row['started_at']} {row['status']:<8} {row['method']}{reason} ({row['duration_s']:.2f}s)")
+
+
+@cli.command("reprocess")
+def reprocess(
+    path: str = typer.Argument(runner.ALL_MANIFESTS, help=_PATH_HELP),
+    status: str = typer.Option(
+        "skip", "--status", help="Documents with this outcome (continue, modified, skip, error), or 'all'"
+    ),
+    method: str = typer.Option(None, "--method", help="Only documents this pre-process method ran on"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="List the documents without changing anything"),
+    do_json: bool = typer.Option(False, "--json", help="Output results as JSON"),
+) -> None:
+    """Make the next run re-fetch documents and run their pre-process steps again.
+
+    Use after changing a pre-process step: by default the documents it
+    skipped are forgotten, so the next run fetches and checks them again.
+    For an incremental SCM source this also costs one full listing.
+    """
+    selected = None if status == "all" else status
+    results = [runner.reprocess(m, status=selected, method=method, dry_run=dry_run) for m in _resolve(path)]
+    if do_json:
+        print(json.dumps(results, indent=2))
+        return
+    verb = "would re-fetch" if dry_run else "will re-fetch"
+    for res in results:
+        print(f"{res['manifest_id']}: {verb} {len(res['uris'])} document(s)")
+        for uri in res["uris"]:
+            print(f"  {uri}")

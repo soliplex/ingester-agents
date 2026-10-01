@@ -197,14 +197,26 @@ async def write_document(
         download_dir: Override for ``settings.download_dir`` (mainly for tests).
 
     Returns:
-        The path of the written document.
+        The path of the written document (where it would have been, when
+        pre-processing skipped it).
 
     Note:
         The sidecar's ``downloaded_time`` is stamped here, so it marks when
         the document was last *written*. A document that passes its source's
         freshness check never reaches this function, so its existing sidecar
         -- and its original timestamp -- are left untouched.
+
+        Inside a manifest run, the manifest's pre-process steps run here first
+        (see :mod:`soliplex.agents.manifest.pre_process`). A document they
+        skip is not written -- any version already stored at its key is
+        removed instead -- and a document they modify is stored, and described
+        by its sidecar, as modified.
+
+    Raises:
+        PreProcessFailed: when a pre-process step fails under
+            ``on_error: fail``; nothing is written.
     """
+    from soliplex.agents.manifest import pre_process
     from soliplex.agents.sidecar import DocumentWrite
     from soliplex.agents.sidecar import Sidecars
     from soliplex.agents.store import get_document_store
@@ -216,6 +228,18 @@ async def write_document(
     target = store.target.root / rel
 
     data = content.encode("utf-8") if isinstance(content, str) else content
+
+    run = pre_process.current()
+    if run is not None and run.matching(mime_type):
+        outcome = await run.process(source=source, uri=uri, key=key, mime_type=mime_type, data=data)
+        if outcome.skipped:
+            # The previous version (if any) would otherwise stay indexed with
+            # content that no longer matches upstream.
+            await asyncio.gather(store.delete(key), Sidecars(store).delete_all(key))
+            return target
+        data = outcome.data
+        if outcome.metadata:
+            metadata = {**(metadata or {}), "pre_process": outcome.metadata}
     # The document and its sidecars occupy distinct keys, so they go together:
     # against object storage each is a round trip, and a document costs one
     # instead of one-per-object. The consequence is that a failed document

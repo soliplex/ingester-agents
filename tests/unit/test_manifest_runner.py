@@ -401,7 +401,7 @@ def _finished_record(caplog):
 class TestRunSummary:
     @pytest.mark.asyncio
     async def test_clean_run_logs_info_and_counts(self, caplog):
-        handler = AsyncMock(return_value={"ingested": ["a", "b"], "errors": [], "rejected": [{"uri": "c"}]})
+        handler = AsyncMock(return_value={"ingested": ["a", "b"], "errors": []})
         with caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.runner"):
             with patch.dict(runner._DISPATCH, {FSComponent: handler}):
                 result = await runner.run_manifest(_two_component_manifest())
@@ -413,8 +413,11 @@ class TestRunSummary:
             "file_errors": 0,
             "ingested": 4,
             "not_found": 0,
-            "rejected": 2,
             "deleted": 0,
+            "pre_process_checked": 0,
+            "pre_process_skipped": 0,
+            "pre_process_modified": 0,
+            "pre_process_errors": 0,
             "delete_stale_skipped": False,
         }
         assert caplog.text.count("completed successfully") == 2
@@ -1637,7 +1640,7 @@ async def test_migrate_store_without_state_reports_it(migration):
 class TestComponentSpans:
     @pytest.mark.asyncio
     async def test_clean_component_span_carries_counts(self, spans):
-        handler = AsyncMock(return_value={"ingested": ["a", "b"], "errors": [], "not_found": ["c"], "rejected": []})
+        handler = AsyncMock(return_value={"ingested": ["a", "b"], "errors": [], "not_found": ["c"]})
         with patch.dict(runner._DISPATCH, {FSComponent: handler}):
             await runner.run_manifest(_two_component_manifest())
 
@@ -1649,7 +1652,6 @@ class TestComponentSpans:
         assert wiki.attributes["component.ingested"] == 2
         assert wiki.attributes["component.errors"] == 0
         assert wiki.attributes["component.not_found"] == 1
-        assert wiki.attributes["component.rejected"] == 0
         assert wiki.status.status_code is StatusCode.UNSET
         assert notes.attributes["component.name"] == "notes"
 

@@ -10,6 +10,19 @@ with two tables:
 * ``sync`` — a single row holding the SCM commit marker, branch and
   last-sync timestamp for incremental syncs.
 
+Three more record what the manifest hooks decided (see
+:mod:`soliplex.agents.manifest.pre_process` and
+:mod:`soliplex.agents.manifest.pre_run`):
+
+* ``pre_process_documents`` — the latest pre-process outcome per document,
+  with the hash of the bytes it saw, so a changed document can be told apart
+  from an identical re-fetch;
+* ``pre_process`` — the latest outcome per (document, step);
+* ``pre_run`` — append-only pre-run outcomes, capped per source.
+
+Rows in the two ``pre_process`` tables live and die with the document's
+``files`` row: :func:`delete_file` and :func:`prune_files` remove them too.
+
 Connections are cached per state file and run in WAL mode. Both parts are
 needed together: reopening the database for every document costs far more
 than the commit does, and WAL only pays off once the connection outlives a
@@ -47,6 +60,27 @@ _CREATE_SYNC = (
     "(id INTEGER PRIMARY KEY CHECK (id = 1), last_commit_sha TEXT, "
     "branch TEXT, last_sync_date TEXT, metadata TEXT)"
 )
+
+_CREATE_PRE_PROCESS_DOCUMENTS = (
+    "CREATE TABLE IF NOT EXISTS pre_process_documents ("
+    "uri TEXT PRIMARY KEY, input_sha256 TEXT NOT NULL, output_sha256 TEXT, "
+    "previous_input_sha256 TEXT, status TEXT NOT NULL, method TEXT, message TEXT, "
+    "hash_changed_at TEXT NOT NULL, run_at TEXT NOT NULL)"
+)
+_CREATE_PRE_PROCESS = (
+    "CREATE TABLE IF NOT EXISTS pre_process ("
+    "uri TEXT NOT NULL, step INTEGER NOT NULL, method TEXT NOT NULL, status TEXT NOT NULL, "
+    "message TEXT, input_sha256 TEXT NOT NULL, output_sha256 TEXT NOT NULL, run_at TEXT NOT NULL, "
+    "PRIMARY KEY (uri, step))"
+)
+_CREATE_PRE_RUN = (
+    "CREATE TABLE IF NOT EXISTS pre_run ("
+    "started_at TEXT NOT NULL, step INTEGER NOT NULL, method TEXT NOT NULL, status TEXT NOT NULL, "
+    "message TEXT, duration_s REAL NOT NULL, PRIMARY KEY (started_at, step))"
+)
+
+# Pre-run history kept per source, in runs.
+PRE_RUN_HISTORY = 100
 
 STATUS_NEW = "new"
 STATUS_MISMATCH = "mismatch"
@@ -99,6 +133,9 @@ def _prepare(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute(_CREATE_FILES)
     conn.execute(_CREATE_SYNC)
+    conn.execute(_CREATE_PRE_PROCESS_DOCUMENTS)
+    conn.execute(_CREATE_PRE_PROCESS)
+    conn.execute(_CREATE_PRE_RUN)
 
 
 def close_state_connections(path: Path | None = None) -> None:
@@ -186,10 +223,12 @@ def upsert_file(
 
 
 def delete_file(source: str, uri: str) -> None:
-    """Remove the cached state for a single document URI."""
+    """Remove the cached state for a single document URI, and its pre-process audit."""
     with _get_connection(source) as conn:
         with conn:
             conn.execute("DELETE FROM files WHERE uri = ?", (uri,))
+            conn.execute("DELETE FROM pre_process_documents WHERE uri = ?", (uri,))
+            conn.execute("DELETE FROM pre_process WHERE uri = ?", (uri,))
 
 
 def prune_files(source: str, current_uris: set[str]) -> list[str]:
@@ -205,9 +244,14 @@ def prune_files(source: str, current_uris: set[str]) -> list[str]:
     with _get_connection(source) as conn:
         rows = conn.execute("SELECT uri FROM files").fetchall()
         removed = [r[0] for r in rows if r[0] not in current_uris]
-        if removed:
-            with conn:
+        with conn:
+            if removed:
                 conn.executemany("DELETE FROM files WHERE uri = ?", [(u,) for u in removed])
+            # Audit rows follow their document. This also drops rows for a
+            # document whose write failed (no `files` row was ever recorded),
+            # which the next run rewrites when it retries.
+            conn.execute("DELETE FROM pre_process_documents WHERE uri NOT IN (SELECT uri FROM files)")
+            conn.execute("DELETE FROM pre_process WHERE uri NOT IN (SELECT uri FROM files)")
     return removed
 
 
@@ -517,3 +561,185 @@ def reset_state(source: str) -> bool:
     except FileNotFoundError:
         return False
     return True
+
+
+# --- pre-process audit ---------------------------------------------------------
+
+_PRE_PROCESS_DOCUMENT_COLUMNS = (
+    "uri",
+    "input_sha256",
+    "output_sha256",
+    "previous_input_sha256",
+    "status",
+    "method",
+    "message",
+    "hash_changed_at",
+    "run_at",
+)
+_PRE_PROCESS_STEP_COLUMNS = ("uri", "step", "method", "status", "message", "input_sha256", "output_sha256", "run_at")
+
+
+def get_pre_process_document(source: str, uri: str) -> dict | None:
+    """The latest pre-process outcome recorded for *uri*, or None."""
+    with _get_connection(source) as conn:
+        row = conn.execute(
+            f"SELECT {', '.join(_PRE_PROCESS_DOCUMENT_COLUMNS)} FROM pre_process_documents WHERE uri = ?",
+            (uri,),
+        ).fetchone()
+    return dict(zip(_PRE_PROCESS_DOCUMENT_COLUMNS, row, strict=True)) if row else None
+
+
+def get_pre_process_steps(source: str, uri: str) -> list[dict]:
+    """The step rows recorded for *uri*'s latest write, in step order."""
+    with _get_connection(source) as conn:
+        rows = conn.execute(
+            f"SELECT {', '.join(_PRE_PROCESS_STEP_COLUMNS)} FROM pre_process WHERE uri = ? ORDER BY step",
+            (uri,),
+        ).fetchall()
+    return [dict(zip(_PRE_PROCESS_STEP_COLUMNS, row, strict=True)) for row in rows]
+
+
+def record_pre_process(source: str, document: dict, steps: list[dict]) -> None:
+    """Replace a document's pre-process audit with this write's outcome.
+
+    One transaction: the document row is replaced and its step rows are
+    rewritten, so the tables always describe the latest write and a step
+    removed from the manifest leaves nothing behind.
+
+    Args:
+        source: Source identifier.
+        document: A ``pre_process_documents`` row (every column).
+        steps: ``pre_process`` rows (every column but ``uri``, which is taken
+            from *document*).
+    """
+    uri = document["uri"]
+    with _get_connection(source) as conn:
+        with conn:
+            conn.execute(
+                f"INSERT OR REPLACE INTO pre_process_documents ({', '.join(_PRE_PROCESS_DOCUMENT_COLUMNS)}) "
+                f"VALUES ({', '.join('?' for _ in _PRE_PROCESS_DOCUMENT_COLUMNS)})",
+                tuple(document[c] for c in _PRE_PROCESS_DOCUMENT_COLUMNS),
+            )
+            conn.execute("DELETE FROM pre_process WHERE uri = ?", (uri,))
+            conn.executemany(
+                f"INSERT INTO pre_process ({', '.join(_PRE_PROCESS_STEP_COLUMNS)}) "
+                f"VALUES ({', '.join('?' for _ in _PRE_PROCESS_STEP_COLUMNS)})",
+                [tuple(uri if c == "uri" else row[c] for c in _PRE_PROCESS_STEP_COLUMNS) for row in steps],
+            )
+
+
+def list_pre_process(
+    source: str,
+    *,
+    status: str | None = None,
+    message: str | None = None,
+    changed_since: str | None = None,
+) -> list[dict]:
+    """Latest pre-process outcome per document, optionally filtered.
+
+    Args:
+        source: Source identifier.
+        status: Only documents whose outcome is this status.
+        message: Only documents whose message contains this substring.
+        changed_since: Only documents whose hash changed at or after this
+            ISO 8601 timestamp.
+
+    Returns:
+        ``pre_process_documents`` rows, ordered by URI.
+    """
+    clauses: list[str] = []
+    params: list[str] = []
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if message is not None:
+        clauses.append("instr(coalesce(message, ''), ?) > 0")
+        params.append(message)
+    if changed_since is not None:
+        clauses.append("hash_changed_at >= ?")
+        params.append(changed_since)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    with _get_connection(source) as conn:
+        rows = conn.execute(
+            f"SELECT {', '.join(_PRE_PROCESS_DOCUMENT_COLUMNS)} FROM pre_process_documents{where} ORDER BY uri",
+            params,
+        ).fetchall()
+    return [dict(zip(_PRE_PROCESS_DOCUMENT_COLUMNS, row, strict=True)) for row in rows]
+
+
+def reprocess(source: str, *, status: str | None = None, method: str | None = None, dry_run: bool = False) -> list[str]:
+    """Forget documents' state so the next run re-fetches and re-pre-processes them.
+
+    Selects documents from the pre-process audit -- by outcome *status*
+    (``None`` = any) and by a *method* that ran on them (``None`` = any) --
+    then, unless *dry_run*, drops their ``files`` and audit rows and clears
+    the incremental SCM cursor. Without the cursor reset an incremental sync
+    would never fetch a document no new commit touched; with it, the next run
+    costs one full listing.
+
+    Returns:
+        The selected URIs, sorted.
+    """
+    query = "SELECT DISTINCT d.uri FROM pre_process_documents d"
+    clauses: list[str] = []
+    params: list[str] = []
+    if method is not None:
+        query += " JOIN pre_process p ON p.uri = d.uri"
+        clauses.append("p.method = ?")
+        params.append(method)
+    if status is not None:
+        clauses.append("d.status = ?")
+        params.append(status)
+    if clauses:
+        query += f" WHERE {' AND '.join(clauses)}"
+    with _get_connection(source) as conn:
+        uris = sorted(row[0] for row in conn.execute(query, params).fetchall())
+    if dry_run or not uris:
+        return uris
+    for uri in uris:
+        delete_file(source, uri)
+    clear_sync_cursor(source)
+    logger.info("reprocess %s: %d document(s) will be re-fetched on the next run", source, len(uris))
+    return uris
+
+
+# --- pre-run audit -------------------------------------------------------------
+
+_PRE_RUN_COLUMNS = ("started_at", "step", "method", "status", "message", "duration_s")
+
+
+def record_pre_run(source: str, rows: list[dict], *, keep: int = PRE_RUN_HISTORY) -> None:
+    """Append one run's pre-run outcomes, keeping only the last *keep* runs."""
+    if not rows:
+        return
+    with _get_connection(source) as conn:
+        with conn:
+            conn.executemany(
+                f"INSERT OR REPLACE INTO pre_run ({', '.join(_PRE_RUN_COLUMNS)}) "
+                f"VALUES ({', '.join('?' for _ in _PRE_RUN_COLUMNS)})",
+                [tuple(row[c] for c in _PRE_RUN_COLUMNS) for row in rows],
+            )
+            conn.execute(
+                "DELETE FROM pre_run WHERE started_at NOT IN "
+                "(SELECT DISTINCT started_at FROM pre_run ORDER BY started_at DESC LIMIT ?)",
+                (keep,),
+            )
+
+
+def list_pre_run(source: str, *, status: str | None = None, since: str | None = None) -> list[dict]:
+    """Recorded pre-run outcomes, newest run first, optionally filtered."""
+    clauses: list[str] = []
+    params: list[str] = []
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if since is not None:
+        clauses.append("started_at >= ?")
+        params.append(since)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    with _get_connection(source) as conn:
+        rows = conn.execute(
+            f"SELECT {', '.join(_PRE_RUN_COLUMNS)} FROM pre_run{where} ORDER BY started_at DESC, step",
+            params,
+        ).fetchall()
+    return [dict(zip(_PRE_RUN_COLUMNS, row, strict=True)) for row in rows]

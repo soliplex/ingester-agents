@@ -11,6 +11,7 @@ from soliplex.agents.config import ManifestConfig
 from soliplex.agents.config import PostProcessStep
 from soliplex.agents.manifest import post_process
 from soliplex.agents.manifest.context import LoadContext
+from soliplex.agents.manifest.haiku_process import HaikuRun
 
 
 def _manifest(steps=None, *, with_config=True, source="src"):
@@ -131,7 +132,9 @@ async def test_injects_ingester_exit_code_when_accepted(monkeypatch):
         PostProcessStep(method="b"),
         PostProcessStep(method="c"),
     ]
-    await post_process.run_post_process(_manifest(steps=steps), ingester_exit_code=2)
+    await post_process.run_post_process(
+        _manifest(steps=steps), ingester=HaikuRun(returncode=2, timed_out=False, stdout="", stderr="")
+    )
 
     assert calls == [("named", 2), ("kwargs", 2), ("none", None)]
 
@@ -166,7 +169,9 @@ async def test_each_step_gets_a_span(monkeypatch, spans):
     monkeypatch.setattr(post_process, "resolve_haiku_cfg", lambda manifest: "CFG")
     steps = [PostProcessStep(method="pkg:first"), PostProcessStep(method="pkg:second")]
 
-    await post_process.run_post_process(_manifest(steps=steps), ingester_exit_code=0)
+    await post_process.run_post_process(
+        _manifest(steps=steps), ingester=HaikuRun(returncode=0, timed_out=False, stdout="", stderr="")
+    )
 
     first, second = spans.named("post-process")
     assert first.attributes["logfire.msg"] == "post-process pkg:first"
@@ -231,3 +236,37 @@ def test_load_env_sanitizes_source(monkeypatch):
     manifest = _manifest(source="gitea:admin:repo")
     with post_process._load_env(manifest, LoadContext.for_source(manifest.source)):
         assert os.environ["SOURCE"] == "gitea_admin_repo"  # ':' -> '_'
+
+
+@pytest.mark.asyncio
+async def test_injects_ingester_and_run_result(monkeypatch):
+    seen = {}
+    run = HaikuRun(returncode=1, timed_out=False, stdout="out", stderr="boom")
+
+    def wants_both(source, *, ingester=None, run_result=None):
+        seen["ingester"] = ingester
+        seen["run_result"] = run_result
+
+    def explicit(source, *, run_result=None):
+        seen["explicit"] = run_result
+
+    registry = {"a": wants_both, "b": explicit}
+    monkeypatch.setattr(post_process, "_resolve_method", lambda spec: registry[spec])
+    steps = [PostProcessStep(method="a"), PostProcessStep(method="b", kwargs={"run_result": "mine"})]
+
+    await post_process.run_post_process(_manifest(steps=steps), ingester=run, run_result={"manifest_id": "m"})
+
+    assert seen == {"ingester": run, "run_result": {"manifest_id": "m"}, "explicit": "mine"}
+
+
+@pytest.mark.asyncio
+async def test_no_ingester_means_no_exit_code(monkeypatch):
+    seen = {}
+
+    def wants_code(source, *, ingester_exit_code="unset", ingester="unset"):
+        seen["code"] = ingester_exit_code
+        seen["ingester"] = ingester
+
+    monkeypatch.setattr(post_process, "_resolve_method", lambda spec: wants_code)
+    await post_process.run_post_process(_manifest(steps=[PostProcessStep(method="a")]))
+    assert seen == {"code": None, "ingester": None}

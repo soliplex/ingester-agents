@@ -5,11 +5,13 @@ from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
+from obstore.store import MemoryStore
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from soliplex.agents import local_state
+from soliplex.agents import store as agent_store
 from soliplex.agents import telemetry
 
 
@@ -49,6 +51,20 @@ def _close_state_connections():
     local_state.close_state_connections()
     yield
     local_state.close_state_connections()
+
+
+@pytest.fixture
+def memory_store(monkeypatch):
+    """Swap the obstore S3Store for one shared in-process MemoryStore.
+
+    `_make_s3_store` exists as its own function so this is the only seam a test
+    needs; nothing else about S3DocumentStore is mocked. One instance per test,
+    so two stores resolved for the same target see the same objects -- which is
+    what a real bucket does.
+    """
+    shared = MemoryStore()
+    monkeypatch.setattr(agent_store, "_make_s3_store", lambda bucket, options: shared)
+    return shared
 
 
 def create_async_context_manager(return_value):

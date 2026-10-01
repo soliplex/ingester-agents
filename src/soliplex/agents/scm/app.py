@@ -8,7 +8,6 @@ from soliplex.agents.scm.base import passes_extension_prefilter
 
 from .. import local_state
 from .. import local_store
-from ..common import processors
 from ..config import SCM
 from ..config import ContentFilter
 from ..config import settings
@@ -112,13 +111,11 @@ async def load_inventory(
     to_process = local_state.compute_to_process(data, source)
     ingested = []
     errors = []
-    rejected = []
     ret = {
         "inventory": data,
         "to_process": to_process,
         "ingested": ingested,
         "errors": errors,
-        "rejected": rejected,
     }
     logger.info(f"found {len(to_process)} to process")
 
@@ -127,20 +124,13 @@ async def load_inventory(
         try:
             mime_type = _resolve_mime(row)
             meta = _doc_meta(row, extra_metadata)
-            doc_bytes = processors.run_processors(row["file_bytes"], mime_type)
+            doc_bytes = row["file_bytes"]
             logger.info(f"writing {uri}")
             await local_store.write_document(
                 source, uri, doc_bytes, mime_type, meta, ingestion_type="scm", source_url=_source_url(row)
             )
             local_state.upsert_file(source, uri, row.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
             ingested.append(uri)
-        except processors.ProcessorRejected as e:
-            # A rejection is a decision about the content, not a failure to
-            # reach it: replaying it cannot change the outcome. Kept out of
-            # `errors` so one undesirable document does not indefinitely
-            # suppress the reconcile (and with it the relocation repair).
-            logger.warning("Processor rejected %s: %s", uri, e)
-            rejected.append({"uri": uri, "reason": str(e)})
         except Exception as e:
             logger.exception("Failed to write %s", uri)
             errors.append({"uri": uri, "error": str(e)})
@@ -371,7 +361,6 @@ async def incremental_sync(
                 "files_changed": 0,
                 "ingested": [],
                 "errors": [],
-                "rejected": [],
             }
 
         logger.info(f"Found {len(new_commits)} new commits to process")
@@ -444,11 +433,9 @@ async def incremental_sync(
             "files_changed": 0,
             "ingested": [],
             "errors": [],
-            "rejected": [],
         }
 
     # Write changed files and issues locally
-    rejected = []
     ingested = []
 
     file_data.extend(issues)
@@ -458,19 +445,13 @@ async def incremental_sync(
         try:
             mime_type = _resolve_mime(file)
             meta = _doc_meta(file, extra_metadata)
-            doc_bytes = processors.run_processors(file["file_bytes"], mime_type)
+            doc_bytes = file["file_bytes"]
             await local_store.write_document(
                 source, uri, doc_bytes, mime_type, meta, ingestion_type="scm", source_url=_source_url(file)
             )
             local_state.upsert_file(source, uri, file.get("sha256"), size=len(doc_bytes), mime_type=mime_type)
             ingested.append(uri)
             logger.info(f"wrote {uri}")
-        except processors.ProcessorRejected as e:
-            # Not an error: see the note in `load_inventory`. Recorded apart
-            # from `errors` so it neither pins the sync cursor nor blocks the
-            # reconcile, both of which would replay it on every run forever.
-            logger.warning("Processor rejected %s: %s", uri, e)
-            rejected.append({"uri": uri, "reason": str(e)})
         except Exception as e:
             logger.exception("Failed to write %s", uri)
             errors.append({"uri": uri, "error": str(e)})
@@ -518,7 +499,6 @@ async def incremental_sync(
         "files_removed": len(removed_files),
         "ingested": ingested,
         "errors": errors,
-        "rejected": rejected,
         "new_commit_sha": latest_commit_sha,
         "delete_stale_result": delete_stale_result,
     }

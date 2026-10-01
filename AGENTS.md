@@ -57,8 +57,16 @@ src/soliplex/agents/
 ├── webdav/             # WebDAV agent (cli.py + app.py + async_client.py)
 ├── web/                # Web agent (app.py)
 ├── manifest/           # Declarative multi-source runner
-│   ├── cli.py          # `manifest run` / `migrate` / `vacuum` commands
+│   ├── cli.py          # `manifest run` / `migrate` / `vacuum` / `reprocess` / reports
 │   ├── runner.py       # resolve_manifests / run_manifest dispatch
+│   ├── callables.py    # Shared hook plumbing: resolve, inject, invoke, normalize
+│   ├── pre_run.py      # pre_run hook: once per run, may SKIP it
+│   ├── pre_run_steps.py    # Built-in pre-run steps (notify_webhook, check_free_space)
+│   ├── pre_process.py  # pre_process hook: per document, inside write_document
+│   ├── pre_processors.py   # Built-in pre-process steps (check_pdf_password, fix_asciidoc)
+│   ├── post_process.py # post_process hook: after the haiku load
+│   ├── post_processors.py  # Built-in post-process callbacks (vacuum, notify_webhook)
+│   ├── webhook.py      # JSON POST helper shared by both notify_webhook steps
 │   ├── haiku_loader.py # haiku-rag batch load subprocess
 │   └── haiku_maint.py  # haiku-rag migrate/vacuum subprocesses
 └── server/             # FastAPI REST API
@@ -356,6 +364,27 @@ callbacks fire, and `--dry-run` prints the command lines without spawning.
 `post_processors.vacuum` delegates to the same `run_verb` code path but
 raises on failure, because the post-process chain stops on the first error.
 
+### Manifest Hooks
+
+A manifest has three optional, ordered hooks (README "Manifest hooks"):
+
+- `pre_run` (`manifest/pre_run.py`) -- once, before any component, inside
+  `runner.run_manifest`. SKIP returns a result with `skipped` set; callers
+  (`runner.run_manifests`, `server/manifest_queue.run_manifest_now`) must not
+  load a skipped run.
+- `pre_process` (`manifest/pre_process.py`) -- per new or changed document,
+  inside `local_store.write_document`, the one call every agent makes. The run
+  installs a `PreProcessRun` in a ContextVar (`pre_process.activate`); outside
+  a manifest run there is none and writes are unchanged. SKIP writes nothing
+  and deletes any stored version; MODIFIED stores the new bytes.
+- `post_process` (`manifest/post_process.py`) -- after the haiku load, with the
+  load's `HaikuRun` (`ingester`) and the queuing run's result (`run_result`).
+
+All three resolve dotted paths and inject keywords through
+`manifest/callables.py`. Outcomes are audited in the source's state DB
+(`pre_run`, `pre_process`, `pre_process_documents` tables in
+`local_state.py`); the `pre_process*` rows follow the document's `files` row.
+
 ### Incremental Sync (SCM)
 
 Commit-based tracking for efficient syncing:
@@ -383,6 +412,15 @@ When adding features:
 - Only one haiku-rag load runs at a time (capacity constraint)
 - WebDAV requires SSL verification by default
 - SCM providers must implement `BaseSCMProvider` interface
+- Content checks and rewrites belong in pre-process steps, not in agents; the
+  only pre-process call site is `local_store.write_document`
+- A pre-process SKIP must still let the agent record the state row, or the
+  document is re-fetched (and re-skipped) on every full run
+- Pre-process steps receive a spooled local file and never open stores, so
+  they behave the same on the local and S3 backends
+- A run skipped by `pre_run` must not queue a haiku load
+- Notification steps should use `on_error: continue`, so a webhook outage
+  cannot block ingestion
 
 ## Authentication Priority
 
