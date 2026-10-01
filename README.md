@@ -319,75 +319,39 @@ Whitespace counts as blank, so a stray trailing space disables the store
 rather than failing the boot. Leading and trailing space is stripped from a
 real value for the same reason.
 
-A manifest that explicitly sets `download_store.target: s3` is the exception:
-that is a direct request for object storage, so it raises rather than quietly
-falling back to disk when no bucket is configured anywhere. Blanking the
-variable disables the installation default; pinning a manifest to `s3`
-overrides that and must be edited too.
-
 **`STATE_DIR` stays local.** The per-source SQLite files hold the content
 hashes that drive incremental ingestion, and SQLite cannot live on object
 storage. Moving documents to S3 does not by itself make the agent stateless: a
 persistent volume is still required for state.
 
-#### Per-manifest override
+#### Switching an installation
 
-A manifest can choose its own store, so sources migrate one at a time rather
-than all at once:
+Where documents go is chosen **per installation**, not per manifest: every
+source in an installation uses the same store. To move an installation to
+object storage, set `DOWNLOAD_S3_BUCKET` and point the haiku-rag load at a
+config whose source stanza reads from S3, either for the whole installation
+with `HAIKU_DEFAULT_CONFIG=haiku.rag.s3.yaml` or for one manifest with its
+`haiku_config`. `DOWNLOAD_URI` is injected for every load and holds the
+resolved base URI in both modes, so a source stanza with `uri:
+${DOWNLOAD_URI}` works either way.
 
-```yaml
-config:
-  download_store:
-    target: s3              # "fs" | "s3"
-    bucket: my-documents    # optional; defaults to DOWNLOAD_S3_BUCKET
-                            # (an s3://bucket/prefix URI works here too)
-    dir: ingester/downloads # optional; defaults to DOWNLOAD_DIR
-```
-
-`target` is required because there are three states, not two:
-
-| Configuration | Effect |
-|---|---|
-| no `download_store` block | inherit the installation default |
-| `target: s3` | force object storage for this source |
-| `target: fs` | force local disk, *even when the installation default is S3* |
-
-The third is how a source is pinned while it is not ready, and how one is
-rolled back after a bad migration. `target: s3` with no bucket configured
-anywhere raises rather than silently writing to local disk.
-
-#### Migrating a source
-
-A source's SQLite state file is qualified by its target, so flipping
-`download_store` opens fresh state and every document re-fetches from upstream
-into the new location. That is correct but slow, and it re-hits SCM and WebDAV
-rate limits. `migrate-store` copies the objects sideways instead:
-
-```bash
-si-agent manifest migrate-store path/to/manifest.yaml --dry-run
-si-agent manifest migrate-store path/to/manifest.yaml
-```
-
-It copies both the documents and the state file, so the next run sees
-everything as already present and fetches nothing. It **copies rather than
-moves** — the originals stay put, which is what makes rolling back a config
-edit rather than a recovery operation.
-
-Two things happen on the indexing side that this command cannot do for you:
+A source's SQLite state file is qualified by its target, so after a switch
+every source opens fresh state and re-fetches its documents from upstream into
+the new store. On the indexing side:
 
 - The document URIs change (`file://…` becomes `s3://…`), and the indexer keys
-  its own state by URI, so every document in that source is re-converted and
-  re-embedded. This is the real cost of a migration, and the reason to do one
-  source at a time.
+  its own state by URI, so every document is re-converted and re-embedded.
+  This is the real cost of a switch.
 - If the haiku-rag source stanza omits `id:`, its identity is derived from the
   target, so switching *replaces* one source with a different one and the old
-  documents are never cleaned up. Set `id:` explicitly — then a switch is
-  self-cleaning — or drop and rebuild that source's `.lancedb`.
+  documents are never cleaned up. Set `id:` explicitly -- then a switch is
+  self-cleaning -- or drop and rebuild each source's `.lancedb`.
 
-Point the manifest's `haiku_config` at a variant whose source stanza reads
-`type: s3` with `uri: ${DOWNLOAD_URI}`. `DOWNLOAD_URI` is injected
-for every load and holds the resolved base URI in both modes, so one config
-form works either way.
+Manifests used to accept a per-manifest `download_store` block. It was
+applied by temporarily rewriting the shared settings, which the haiku load
+and its post-process callbacks -- running later -- never saw, so they read
+the installation default instead. It has been removed: a manifest that still
+sets it is rejected with a message saying so.
 
 ### Git CLI Mode
 
@@ -766,6 +730,13 @@ components:
 
 #### Manifest Fields
 
+Unknown keys are rejected at every level (top level, `config`, `schedule`,
+post-process steps and components), so a typo such as `extentions` is a
+validation error rather than a setting silently left at its default. The
+server logs a rejected manifest once, at ERROR, and doesn't run it; `si-agent
+manifest run` exits 1. `metadata` and a post-process step's `kwargs` are
+free-form and accept any keys.
+
 Top-level fields:
 
 - **id** (required): Unique identifier for the manifest. Must be unique across all manifests when running from a directory.
@@ -776,7 +747,7 @@ Top-level fields:
 - **config**: Optional shared configuration applied to all components.
   - **metadata**: Key-value pairs attached to all ingested documents.
   - **extensions**: File extensions to include (overrides the global `EXTENSIONS` setting).
-  - **delete_stale**: Remove locally-stored documents that no longer appear in any component (default: false). See [Stale Document Removal](#stale-document-removal) below.
+  - **delete_stale**: Remove locally-stored documents that no longer appear in any component (default: true). See [Stale Document Removal](#stale-document-removal) below.
   - **haiku_config**: Override the haiku-rag config file used when loading this manifest's source. Absolute paths are used as-is; relative values resolve under `HAIKU_PATH`. Defaults to `${HAIKU_PATH}/haiku.rag.default.yaml`. See [haiku-rag Loading](#haiku-rag-loading).
   - **post_process**: Ordered callbacks run after the haiku-rag load completes. See [Post-process callbacks](#post-process-callbacks) below.
 - **components** (required): List of ingestion components (see below).
