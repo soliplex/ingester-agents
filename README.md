@@ -174,7 +174,8 @@ API_KEY=your-api-key
 API_KEY_ENABLED=false
 AUTH_TRUST_PROXY_HEADERS=false
 
-# Manifest scheduling (requires SCHEDULER_ENABLED=true)
+# Manifests the server runs: on a cron (SCHEDULER_ENABLED=true) and on demand
+# via POST /api/v1/manifest/run (always available)
 MANIFEST_DIR=/path/to/manifests
 # SCHEDULER_RECONCILE_CRON="*/1 * * * *"   # how often the dir is rescanned
 
@@ -422,36 +423,54 @@ scm_git_cli_timeout=600
 
 ## Usage
 
-The CLI tool `si-agent` provides six main modes of operation:
+All ingestion runs through **manifests**: YAML files that name a source
+and the components (filesystem, SCM, WebDAV, web) feeding it. Run them from
+the CLI with `si-agent manifest run`, or let the server run them on a cron
+schedule or on demand (`POST /api/v1/manifest/run`).
 
-- **`fs`**: Filesystem agent for ingesting local documents
-- **`web`**: Web agent for ingesting HTML pages from URLs
-- **`scm`**: SCM agent for ingesting from Git repositories
-- **`webdav`**: WebDAV agent for ingesting documents from WebDAV servers
-- **`manifest`**: Manifest runner for declarative multi-source ingestion
-- **`serve`**: REST API server exposing agent functionality via HTTP
+The CLI tool `si-agent` has five command groups:
+
+- **`manifest`**: Run manifests, and maintain the haiku-rag databases they load
+- **`fs`**: Inspect a local directory before ingesting it
+- **`scm`**: Inspect a Git repository and manage its incremental sync state
+- **`webdav`**: Inspect a WebDAV directory, and export its file list for a manifest
+- **`serve`**: REST API server: manifest scheduler, on-demand runs, and inspection routes
 
 ### Filesystem Agent
 
 #### Quick Start
 
-Ingest documents directly from a directory:
+Write a manifest with an `fs` component:
 
-```bash
-si-agent fs run-inventory /path/to/documents my-source-name
+```yaml
+# docs.yml
+id: local-docs
+name: local docs
+source: my-source-name
+components:
+  - name: docs
+    type: fs
+    path: /path/to/documents
 ```
 
-That's it! The tool automatically:
+Then run it:
+
+```bash
+si-agent manifest run docs.yml --no-load
+```
+
+That's it! The runner automatically:
 
 1. Scans the directory
-2. Builds the configuration
+2. Builds the inventory
 3. Validates files
-4. Ingests documents
+4. Writes new and changed documents to the download store, and removes ones
+   no longer in the directory
 
 #### Inspecting before ingestion
 
-Every command takes the document **directory** and builds the inventory by
-scanning it. To review what would happen first:
+The `fs` commands take the document **directory** and build the inventory by
+scanning it. To review what a run would do first:
 
 **1. Preview the inventory**
 
@@ -490,124 +509,113 @@ The status check compares file hashes against the local sync state:
 - **mismatch**: File exists but content has changed
 - **match**: File is unchanged (will be skipped during the run)
 
-**4. Ingest**
-
-```bash
-si-agent fs run-inventory /path/to/documents my-source-name
-```
-
-**Advanced options:**
-
-```bash
-# Process a subset of files (e.g., files 10-50)
-si-agent fs run-inventory /path/to/documents my-source --start 10 --end 50
-```
-
 To narrow *which* files are considered, set `extensions` in the manifest (or
 `EXTENSIONS`) rather than editing an inventory by hand.
 
 ### SCM Agent
 
-#### 1. List Issues
+#### Ingesting a repository
 
-List all issues from a repository:
+Ingest **both files and issues** from a repository with an `scm` manifest
+component. Issues are rendered as Markdown documents with their comments.
 
-```bash
-# GitHub
-si-agent scm list-issues github myorg/my-repo
-
-# Gitea
-si-agent scm list-issues gitea admin/my-repo
+```yaml
+id: my-repo
+name: my repo
+source: my-repo
+components:
+  - name: repo
+    type: scm
+    platform: github        # or gitea (needs base_url or SCM_BASE_URL)
+    owner: myorg
+    repo: my-repo
+    incremental: true       # commit-based sync after the first full run
+    # branch: main
+    # content_filter: all   # all | files | issues
 ```
 
-#### 2. Get Repository Files
-
-List files in a repository:
-
 ```bash
-# GitHub
-si-agent scm get-repo github myorg/my-repo
-
-# Gitea
-si-agent scm get-repo gitea admin/my-repo
-```
-
-#### 3. Load Inventory
-
-Ingest **both files and issues** from a repository. Issues are rendered as Markdown documents with their comments.
-
-```bash
-# GitHub
-si-agent scm run-inventory github myorg/my-repo
-
-# Gitea
-si-agent scm run-inventory gitea admin/my-repo
+si-agent manifest run my-repo.yml --no-load
 ```
 
 Files and issues are written under `<DOWNLOAD_DIR>/<source>/`. Issues are
-saved as Markdown (`.md`) documents.
+saved as Markdown (`.md`) documents. See `example-manifests/scm.yml`.
 
-#### 4. Incremental Sync
+With `incremental: true`, the first run performs a full sync and records the
+latest commit; later runs process only files changed since then, which cuts
+API calls and bandwidth substantially (see
+[Incremental Sync](#incremental-sync-scm-agent)).
 
-Run commit-based incremental synchronization. Only processes files that changed since the last sync, significantly reducing API calls and bandwidth usage.
-
-```bash
-# First run performs full sync and establishes sync state
-si-agent scm run-incremental gitea admin/my-repo
-
-# Subsequent runs only process changes since last sync
-si-agent scm run-incremental gitea admin/my-repo --branch main
-```
-
-**Output JSON format:**
+#### Inspecting a repository
 
 ```bash
-si-agent scm run-incremental gitea admin/my-repo --do-json
+# List issues
+si-agent scm list-issues github myorg/my-repo
+si-agent scm list-issues gitea admin/my-repo
+
+# List repository files
+si-agent scm get-repo github myorg/my-repo
+si-agent scm get-repo gitea admin/my-repo
 ```
 
-#### 5. Sync State Management
+#### Sync State Management
 
-View and manage sync state for repositories:
+View and manage the incremental sync state for a repository:
 
 ```bash
 # View current sync state
 si-agent scm get-sync-state gitea admin/my-repo
 
-# Reset sync state (forces full sync on next run)
+# Reset sync state (forces a full sync on the next manifest run)
 si-agent scm reset-sync gitea admin/my-repo
 ```
 
 ### WebDAV Agent
 
-The WebDAV agent allows you to ingest documents directly from WebDAV servers (like Nextcloud, ownCloud, SharePoint, etc.).
+The WebDAV agent ingests documents from WebDAV servers (like Nextcloud,
+ownCloud, SharePoint, etc.).
 
-#### Quick Start
+#### Ingesting from WebDAV
 
-Ingest documents directly from a WebDAV directory:
+Use a `webdav` manifest component. It takes exactly one of `path` (scan a
+directory recursively), `urls` (an inline list of files) or `urls_file` (a
+URL list file, read from a local path, S3, or the WebDAV server itself):
 
-```bash
-# Set up environment
-export WEBDAV_URL=https://webdav.example.com
-export WEBDAV_USERNAME=your-username
-export WEBDAV_PASSWORD=your-password
+```yaml
+id: webdav-docs
+name: WebDAV Documents
+source: my-source-name
+components:
+  # Scan an entire WebDAV directory recursively
+  - name: shared-drive
+    type: webdav
+    url: https://webdav.example.com
+    path: /documents
 
-# Ingest documents from WebDAV path
-si-agent webdav run-inventory /documents my-source-name
+  # Ingest only a curated list of files
+  - name: curated-files
+    type: webdav
+    url: https://webdav.example.com
+    urls_file: urls.txt
 ```
 
-That's it! The tool automatically:
+```bash
+export WEBDAV_USERNAME=your-username
+export WEBDAV_PASSWORD=your-password
+si-agent manifest run webdav.yml --no-load
+```
 
-1. Connects to the WebDAV server
-2. Scans the directory
-3. Builds the configuration
-4. Validates files
-5. Ingests documents
+Each URL in a URL list is processed independently: if a file fails to
+download, the error is recorded and processing continues with the rest. See
+`example-manifests/webdav.yml` for every source form.
 
 #### Commands
 
 **1. Export URLs**
 
-Scan a WebDAV directory and export discovered file URLs to a file for review. This uses only directory listing (PROPFIND) and does not download file content:
+Scan a WebDAV directory and export discovered file URLs to a file, for review
+or to use as a component's `urls_file`. This uses only directory listing
+(PROPFIND) and does not download file content:
 
 ```bash
 si-agent webdav export-urls /documents urls.txt \
@@ -624,14 +632,15 @@ The output file contains one absolute WebDAV path per line:
 /documents/notes.docx
 ```
 
-Only files matching the configured `EXTENSIONS` filter are included.
+Only files matching the configured `EXTENSIONS` filter are included. Edit the
+list down to the files you want, then point a manifest component's
+`urls_file` at it.
 
 **2. Validate Configuration**
 
 Check if files are supported (downloads files to compute hashes):
 
 ```bash
-# Validate WebDAV directory directly
 si-agent webdav validate-config /documents \
   --webdav-url https://webdav.example.com \
   --webdav-username user \
@@ -650,46 +659,6 @@ si-agent webdav check-status /documents my-source-name \
 ```
 
 Add `--detail` flag to see the full list of files.
-
-**4. Load Inventory**
-
-Ingest documents from a WebDAV directory:
-
-```bash
-si-agent webdav run-inventory /documents my-source-name
-```
-
-**Advanced options:**
-
-```bash
-si-agent webdav run-inventory /documents my-source \
-  --webdav-url https://webdav.example.com \
-  --webdav-username user \
-  --webdav-password pass
-```
-
-**5. Run from URL List**
-
-Ingest specific files from a URL list file instead of scanning an entire directory. This is useful when you want to ingest only a curated subset of files:
-
-```bash
-si-agent webdav run-from-urls urls.txt my-source-name
-```
-
-Each URL in the file is processed independently. If a file fails to download, the error is recorded and processing continues with the remaining URLs. Results are written to a JSON file named `<input-file>.results.<timestamp>.json`:
-
-```json
-[
-  {"url": "/documents/report.md", "status": "success"},
-  {"url": "/documents/broken.pdf", "status": "error", "error_message": "404 Not Found"}
-]
-```
-
-Use `--skip-hash-check` to skip downloading files for hash comparison, which avoids downloading each file twice (once for hashing, once for ingestion):
-
-```bash
-si-agent webdav run-from-urls urls.txt my-source-name --skip-hash-check
-```
 
 ### Manifest Runner
 
@@ -895,7 +864,8 @@ The server loads all manifests from the directory at startup, validates that all
 - **Manifests with a `schedule`** are registered and run when their cron
   expression is due.
 - **Manifests without a `schedule`** are run once when first seen (a
-  fire-and-forget task), then never again unless triggered via the API.
+  fire-and-forget task), then never again unless triggered via the API
+  (`POST /api/v1/manifest/run`).
 
 **Hot-reloading schedules:**
 
@@ -922,8 +892,9 @@ takes down the scheduler.
   at a time, so different manifests never run concurrently. This bounds
   resource use, since a single manifest can already fan out across its
   components. Serialization is structural — the worker does one thing at a
-  time — rather than enforced by a lock each caller has to remember to take,
-  and the scheduler is the only thing that feeds the queue.
+  time — rather than enforced by a lock each caller has to remember to take.
+  The scheduler and `POST /api/v1/manifest/run` both feed this same queue,
+  so an on-demand run never overlaps a scheduled one.
 - **Manifests due at the same time all run, in order.** A cron firing while
   another manifest is in progress is queued behind it, not skipped, so no
   scheduled occurrence is silently lost.
@@ -940,7 +911,29 @@ takes down the scheduler.
 - **Single process only.** Because the cron state and run queue are held in
   memory, scheduling relies on the server running as a single worker (see
   [Starting the Server](#starting-the-server)). If you run multiple server
-  instances, enable `SCHEDULER_ENABLED` on only one of them.
+  instances, enable `SCHEDULER_ENABLED` on only one of them, and send
+  on-demand runs to that same instance: each instance has its own queue, so
+  two instances can run the same manifest at once.
+
+#### On-demand Runs
+
+`POST /api/v1/manifest/run` queues a manifest from `MANIFEST_DIR`, by id, and
+returns `202 Accepted`:
+
+```bash
+curl -X POST http://localhost:8001/api/v1/manifest/run -F manifest_id=test-scm
+# {"status": "queued", "manifest_id": "test-scm"}
+```
+
+The run happens on the queue described above, so it waits behind any
+manifest already running. `"status": "already_queued"` means the manifest
+was already queued or running and this request folded into it. The run queue
+starts with the server whether or not `SCHEDULER_ENABLED` is set; that setting
+controls only cron scheduling and the startup run of unscheduled manifests.
+`GET /api/v1/manifest/queue` lists the ids still queued or running.
+
+Only manifests in `MANIFEST_DIR` can be run this way, never an arbitrary path,
+so the API can ingest only what the operator has put there.
 
 #### haiku-rag Loading
 
@@ -1294,7 +1287,7 @@ since nothing rewrites an unchanged document. Treat it as optional too.
 
 ### Incremental Sync (SCM Agent)
 
-The `run-incremental` command uses commit-based tracking for efficient synchronization:
+An `scm` manifest component with `incremental: true` uses commit-based tracking for efficient synchronization:
 
 1. **Sync State Check**: Retrieves last processed commit SHA from local state
 2. **Commit Enumeration**: Fetches only commits since the last sync
@@ -1303,7 +1296,7 @@ The `run-incremental` command uses commit-based tracking for efficient synchroni
 5. **Write**: Writes changed files to `DOWNLOAD_DIR` and deletes removed ones
 6. **State Update**: Stores the latest commit SHA locally for subsequent syncs
 
-This approach reduces API calls and bandwidth by 80-95% compared to full repository scans. On first run (or after reset), a full sync is performed to establish the baseline.
+This approach reduces API calls and bandwidth by 80-95% compared to full repository scans. On first run (or after `si-agent scm reset-sync`), a full sync is performed to establish the baseline.
 
 ### File Typing and Filtering
 
@@ -1368,11 +1361,24 @@ As an example, the soliplex [documentation](https://github.com/soliplex/soliplex
 
 ```bash
 git clone https://github.com/soliplex/soliplex.git
+```
 
+```yaml
+# soliplex-docs.yml
+id: soliplex-docs
+name: soliplex docs
+source: soliplex-docs
+components:
+  - name: docs
+    type: fs
+    path: <path-to-checkout>/soliplex/docs
+```
+
+```bash
 # Set up environment
 export DOWNLOAD_DIR=./downloads
 
-uv run si-agent fs run-inventory <path-to-checkout>/soliplex/docs soliplex-docs
+uv run si-agent manifest run soliplex-docs.yml --no-load
 
 # Files land under ./downloads/soliplex-docs/, each with a .meta.json sidecar
 ls ./downloads/soliplex-docs
@@ -1388,10 +1394,23 @@ uv run si-agent fs build-config <path-to-checkout>/soliplex/docs
 uv run si-agent fs validate-config <path-to-checkout>/soliplex/docs
 # If there are errors, fix them now
 
-uv run si-agent fs run-inventory <path-to-checkout>/soliplex/docs soliplex-docs
+uv run si-agent manifest run soliplex-docs.yml --no-load
 ```
 
 ### Example 2: Ingest GitHub Repository
+
+```yaml
+# soliplex-repo.yml
+id: soliplex-repo
+name: soliplex repo
+source: soliplex-repo
+components:
+  - name: soliplex
+    type: scm
+    platform: github
+    owner: mycompany
+    repo: soliplex
+```
 
 ```bash
 # Set up environment
@@ -1399,23 +1418,33 @@ export DOWNLOAD_DIR=./downloads
 export scm_auth_token=ghp_your_token_here
 
 # Write repository contents
-si-agent scm run-inventory github mycompany/soliplex
+si-agent manifest run soliplex-repo.yml --no-load
 
-# Files land under ./downloads/github_mycompany_soliplex_all/
-ls ./downloads
+# Files land under ./downloads/soliplex-repo/
+ls ./downloads/soliplex-repo
 ```
 
 ### Example 3: Ingest from WebDAV Server
 
+```yaml
+# webdav-docs.yml
+id: webdav-docs
+name: webdav docs
+source: webdav-docs
+components:
+  - name: project-docs
+    type: webdav
+    url: https://nextcloud.example.com/remote.php/dav/files/username
+    path: /Documents/project-docs
+```
+
 ```bash
 # Set up environment
 export DOWNLOAD_DIR=./downloads
-export WEBDAV_URL=https://nextcloud.example.com/remote.php/dav/files/username
 export WEBDAV_USERNAME=your-username
 export WEBDAV_PASSWORD=your-password
 
-# Write directly from WebDAV directory
-si-agent webdav run-inventory /Documents/project-docs webdav-docs
+si-agent manifest run webdav-docs.yml --no-load
 
 # Files land under ./downloads/webdav-docs/
 ls ./downloads/webdav-docs
@@ -1446,7 +1475,7 @@ the load fails on the missing variable.
 
 ## Server API
 
-The agents can be run as a REST API server using FastAPI. This exposes all agent operations as HTTP endpoints with support for authentication and interactive documentation.
+The agents can be run as a REST API server using FastAPI. The server runs manifests (on a cron schedule, and on demand via `POST /api/v1/manifest/run`) and exposes read-only inspection routes for each source type, with support for authentication and interactive documentation. Ingestion over HTTP goes only through manifests.
 
 ### Starting the Server
 
@@ -1492,7 +1521,7 @@ si-agent serve
 Clients must include the API key in the `Authorization` header:
 
 ```bash
-curl -H "Authorization: Bearer your-api-key" http://localhost:8001/api/fs/status
+curl -H "Authorization: Bearer your-api-key" http://localhost:8001/api/v1/manifest/queue
 ```
 
 #### 3. OAuth2 Proxy Headers
@@ -1510,14 +1539,44 @@ The server will trust authentication headers from a reverse proxy (e.g., OAuth2 
 
 ### API Endpoints
 
+#### Manifest Routes (`/api/v1/manifest/`)
+
+The only way to ingest over HTTP. See [On-demand Runs](#on-demand-runs).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/manifest/run` | Queue a manifest from `MANIFEST_DIR` by id; returns 202 |
+| `GET` | `/api/v1/manifest/queue` | Ids of manifests queued or running |
+| `POST` | `/api/v1/manifest/validate` | Validate manifests without executing |
+
+`POST /run` responds `202` with `"status": "queued"` or `"already_queued"`;
+`404` if no valid manifest in `MANIFEST_DIR` has that id; `409` if more than
+one file declares it; `503` if `MANIFEST_DIR` is unset or not a directory.
+
+**Examples:**
+
+```bash
+# Queue a manifest run
+curl -X POST http://localhost:8001/api/v1/manifest/run \
+  -F "manifest_id=test-scm"
+
+# What is still queued or running
+curl http://localhost:8001/api/v1/manifest/queue
+
+# Validate manifest files
+curl -X POST http://localhost:8001/api/v1/manifest/validate \
+  -F "path=/path/to/manifests"
+```
+
 #### Filesystem Routes (`/api/v1/fs/`)
+
+Read-only inspection of a server-side directory.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/v1/fs/build-config` | Build inventory from directory |
 | `POST` | `/api/v1/fs/validate-config` | Validate the inventory built from a directory |
 | `POST` | `/api/v1/fs/check-status` | Check which files need ingestion |
-| `POST` | `/api/v1/fs/run-inventory` | Ingest documents from a directory |
 
 **Examples:**
 
@@ -1529,31 +1588,26 @@ curl -X POST http://localhost:8001/api/v1/fs/build-config \
 # Validate using a directory
 curl -X POST http://localhost:8001/api/v1/fs/validate-config \
   -F "config_file=/path/to/docs"
-
-# Ingest directly from directory
-curl -X POST http://localhost:8001/api/v1/fs/run-inventory \
-  -F "config_file=/path/to/docs" \
-  -F "source=my-source"
 ```
 
-#### SCM Routes (`/api/scm/`)
+#### SCM Routes (`/api/v1/scm/`)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/scm/{platform}/{repo}/issues` | List repository issues |
-| `GET` | `/api/scm/{platform}/{repo}/files` | List repository files |
-| `POST` | `/api/scm/{platform}/{repo}/ingest` | Ingest repo files and issues |
+| `GET` | `/api/v1/scm/{scm}/issues` | List repository issues |
+| `GET` | `/api/v1/scm/{scm}/repo` | List repository files |
 
-**Example:**
+`{scm}` is `github` or `gitea`; both take `repo_name` and `owner` query
+parameters.
+
+**Examples:**
 
 ```bash
 # List GitHub issues
-curl http://localhost:8001/api/scm/github/my-repo/issues?owner=myuser
+curl "http://localhost:8001/api/v1/scm/github/issues?repo_name=my-repo&owner=myuser"
 
-# Ingest repository
-curl -X POST http://localhost:8001/api/scm/github/my-repo/ingest \
-  -H "Content-Type: application/json" \
-  -d '{"owner": "myuser", "source": "my-source"}'
+# List repository files
+curl "http://localhost:8001/api/v1/scm/github/repo?repo_name=my-repo&owner=myuser"
 ```
 
 #### WebDAV Routes (`/api/v1/webdav/`)
@@ -1562,81 +1616,14 @@ curl -X POST http://localhost:8001/api/scm/github/my-repo/ingest \
 |--------|----------|-------------|
 | `POST` | `/api/v1/webdav/validate-config` | Validate inventory from WebDAV path |
 | `POST` | `/api/v1/webdav/check-status` | Check which files need ingestion |
-| `POST` | `/api/v1/webdav/run-inventory` | Ingest documents from WebDAV directory |
-| `POST` | `/api/v1/webdav/run-from-file` | Ingest documents from an uploaded URL list file |
 
-**Examples:**
+**Example:**
 
 ```bash
 # Validate using WebDAV path
 curl -X POST http://localhost:8001/api/v1/webdav/validate-config \
   -F "config_path=/documents" \
   -F "webdav_url=https://webdav.example.com"
-
-# Ingest from WebDAV directory
-curl -X POST http://localhost:8001/api/v1/webdav/run-inventory \
-  -F "config_path=/documents" \
-  -F "source=my-source" \
-  -F "webdav_url=https://webdav.example.com" \
-  -F "webdav_username=user" \
-  -F "webdav_password=pass"
-
-# Ingest from uploaded URL list file (with skip hash check)
-curl -X POST http://localhost:8001/api/v1/webdav/run-from-file \
-  -F "file=@urls.txt" \
-  -F "source=my-source" \
-  -F "skip_hash_check=true" \
-  -F "webdav_url=https://webdav.example.com" \
-  -F "webdav_username=user" \
-  -F "webdav_password=pass"
-```
-
-#### Web Routes (`/api/v1/web/`)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/v1/web/run-inventory` | Ingest web pages from a JSON array of URLs |
-| `POST` | `/api/v1/web/run-from-file` | Ingest web pages from an uploaded URL list file |
-
-**Examples:**
-
-```bash
-# Ingest web pages from URL list
-curl -X POST http://localhost:8001/api/v1/web/run-inventory \
-  -F "urls=[\"https://example.com/page1\", \"https://example.com/page2\"]" \
-  -F "source=my-source"
-
-# Ingest web pages with extra metadata
-curl -X POST http://localhost:8001/api/v1/web/run-inventory \
-  -F "urls=[\"https://example.com/page1\"]" \
-  -F "source=my-source" \
-  -F "metadata={\"project\": \"test\"}"
-
-# Ingest web pages from uploaded file
-curl -X POST http://localhost:8001/api/v1/web/run-from-file \
-  -F "file=@urls.txt" \
-  -F "source=my-source"
-```
-
-#### Manifest Routes (`/api/v1/manifest/`)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/v1/manifest/validate` | Validate manifests without executing |
-
-Manifests are executed only by the cron scheduler, which feeds the
-single-worker queue in `server/manifest_queue.py`. There is deliberately no
-HTTP run endpoint: a second execution entry point would need a lock to
-serialize against the scheduler, and one worker draining one queue removes
-the need for that lock entirely. Use the `soliplex-agents` CLI for a one-off
-run outside the server.
-
-**Examples:**
-
-```bash
-# Validate manifest files
-curl -X POST http://localhost:8001/api/v1/manifest/validate \
-  -F "path=/path/to/manifests"
 ```
 
 #### Health Check

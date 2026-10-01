@@ -1,16 +1,11 @@
 """WebDAV agent API routes."""
 
-import json
 import logging
-import tempfile
-from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi import Depends
-from fastapi import File
 from fastapi import Form
 from fastapi import HTTPException
-from fastapi import UploadFile
 from pydantic import SecretStr
 
 from soliplex.agents.server.auth import get_current_user
@@ -98,100 +93,3 @@ async def check_status(
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error checking status: {str(e)}") from e
-
-
-@webdav_router.post("/run-inventory")
-async def run_inventory(
-    config_path: str = Form(
-        ...,
-        description="Path to inventory file or WebDAV directory (e.g., /documents)",
-    ),
-    source: str = Form(..., description="Source name"),
-    start: int = Form(0, description="Start index"),
-    end: int | None = Form(None, description="End index"),
-    webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
-    webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
-    webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
-    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
-):
-    """
-    Run document ingestion from an inventory.
-
-    Scans the specified WebDAV directory recursively and writes discovered files.
-    """
-    try:
-        pwd = webdav_password.get_secret_value() if webdav_password else None
-        extra_metadata = json.loads(metadata) if metadata else None
-        result = await webdav_app.load_inventory(
-            config_path,
-            source,
-            start,
-            end,
-            webdav_url=webdav_url,
-            webdav_username=webdav_username,
-            webdav_password=pwd,
-            extra_metadata=extra_metadata,
-        )
-
-        return {
-            "status": "ok",
-            "inventory_count": len(result.get("inventory", [])),
-            "to_process_count": len(result.get("to_process", [])),
-            "ingested_count": len(result.get("ingested", [])),
-            "error_count": len(result.get("errors", [])),
-            "errors": result.get("errors", []),
-        }
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error running inventory: {str(e)}") from e
-
-
-@webdav_router.post("/run-from-file")
-async def run_from_file(
-    file: UploadFile = File(..., description="Text file containing WebDAV URLs (one per line)"),
-    source: str = Form(..., description="Source name"),
-    start: int = Form(0, description="Start index"),
-    end: int | None = Form(None, description="End index"),
-    webdav_url: str = Form(None, description="WebDAV server URL (optional, uses env var if not provided)"),
-    webdav_username: str = Form(None, description="WebDAV username (optional, uses env var if not provided)"),
-    webdav_password: SecretStr = Form(None, description="WebDAV password (optional, uses env var if not provided)"),
-    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
-):
-    """
-    Run document ingestion from an uploaded URL list file.
-
-    Accepts a file upload containing WebDAV URLs (one per line) and writes those specific files.
-    """
-    try:
-        pwd = webdav_password.get_secret_value() if webdav_password else None
-        extra_metadata = json.loads(metadata) if metadata else None
-
-        content = await file.read()
-        with tempfile.NamedTemporaryFile(mode="wb", suffix=".txt", delete=False) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
-        try:
-            result = await webdav_app.load_inventory_from_urls(
-                tmp_path,
-                source,
-                start,
-                end,
-                webdav_url=webdav_url,
-                webdav_username=webdav_username,
-                webdav_password=pwd,
-                extra_metadata=extra_metadata,
-            )
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
-
-        return {
-            "status": "ok",
-            "inventory_count": len(result.get("inventory", [])),
-            "to_process_count": len(result.get("to_process", [])),
-            "ingested_count": len(result.get("ingested", [])),
-            "error_count": len(result.get("errors", [])),
-            "errors": result.get("errors", []),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error running from file: {str(e)}") from e
