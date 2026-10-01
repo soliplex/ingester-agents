@@ -4,12 +4,10 @@ import logging
 
 from fastapi import APIRouter
 from fastapi import Depends
-from fastapi import Form
 from fastapi import HTTPException
 from fastapi import Query
 
 from soliplex.agents.config import SCM
-from soliplex.agents.config import ContentFilter
 from soliplex.agents.config import settings
 from soliplex.agents.scm import app as scm_app
 from soliplex.agents.server.auth import get_current_user
@@ -88,101 +86,4 @@ async def get_repo(
         }
     except Exception as e:
         logger.exception("Error listing repo files for %s/%s", owner, repo_name)
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-
-@scm_router.post("/run-inventory")
-async def run_inventory(
-    scm: SCM = Form(..., description="SCM provider (github/gitea)"),
-    repo_name: str = Form(..., description="Repository name"),
-    owner: str = Form(..., description="Repository owner"),
-    content_filter: ContentFilter = Form(ContentFilter.ALL, description="Content filter: all, files, issues"),
-    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
-):
-    """
-    Run ingestion from a SCM repository.
-
-    Writes files, issues, or both from the repository based on content_filter.
-    """
-    try:
-        import json
-
-        extra_metadata = json.loads(metadata) if metadata else None
-
-        result = await scm_app.load_inventory(
-            scm,
-            repo_name,
-            owner,
-            content_filter=content_filter,
-            extra_metadata=extra_metadata,
-        )
-
-        return {
-            "status": "ok",
-            "scm": scm.value,
-            "repo": repo_name,
-            "owner": owner,
-            "inventory_count": len(result.get("inventory", [])),
-            "to_process_count": len(result.get("to_process", [])),
-            "ingested_count": len(result.get("ingested", [])),
-            "error_count": len(result.get("errors", [])),
-            "errors": result.get("errors", []),
-        }
-    except Exception as e:
-        logger.exception("Error running inventory for %s/%s", owner, repo_name)
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-
-@scm_router.post("/incremental-sync")
-async def run_incremental_sync(
-    scm: SCM = Form(..., description="SCM provider (github/gitea)"),
-    repo_name: str = Form(..., description="Repository name"),
-    owner: str = Form(..., description="Repository owner"),
-    branch: str = Form("main", description="Branch to sync"),
-    content_filter: ContentFilter = Form(ContentFilter.ALL, description="Content filter: all, files, issues"),
-    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
-):
-    """
-    Run incremental sync from a SCM repository.
-
-    Only fetches and writes content that changed since last sync.
-    Falls back to full sync if no sync state exists.
-    """
-    try:
-        import json
-
-        extra_metadata = json.loads(metadata) if metadata else None
-
-        result = await scm_app.incremental_sync(
-            scm,
-            repo_name,
-            owner,
-            branch=branch,
-            content_filter=content_filter,
-            extra_metadata=extra_metadata,
-        )
-
-        if "error" in result:
-            return {
-                "status": "error",
-                "error": result["error"],
-            }
-
-        return {
-            "status": result.get("status", "ok"),
-            "scm": scm.value,
-            "repo": repo_name,
-            "owner": owner,
-            "branch": branch,
-            "commits_processed": result.get("commits_processed", 0),
-            "files_changed": result.get("files_changed", 0),
-            "files_removed": result.get("files_removed", 0),
-            "ingested_count": len(result.get("ingested", [])),
-            "ingested": result.get("ingested", []),
-            "error_count": len(result.get("errors", [])),
-            "errors": result.get("errors", []),
-            "new_commit_sha": result.get("new_commit_sha"),
-        }
-    except Exception as e:
-        logger.exception("Error in incremental sync for %s/%s", owner, repo_name)
         raise HTTPException(status_code=500, detail=str(e)) from e

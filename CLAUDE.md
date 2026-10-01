@@ -18,23 +18,22 @@ uv run pytest               # Run tests (100% branch coverage required)
 uv run ruff check --fix     # Lint and auto-fix
 uv run ruff format          # Format code
 
+# Ingestion runs only through manifests (CLI `manifest run`, or the
+# server's scheduler / POST /api/v1/manifest/run). The fs, scm and webdav
+# groups below are inspection and maintenance helpers.
+
 # Filesystem agent
-si-agent fs run-inventory <path> <source>
 si-agent fs check-status <path> <source>
 si-agent fs build-config <path>
 si-agent fs validate-config <path>
 
 # SCM agent (github/gitea) - uses owner/repo notation
-si-agent scm run-inventory <platform> <owner>/<repo>
-si-agent scm run-incremental <platform> <owner>/<repo>
 si-agent scm list-issues <platform> <owner>/<repo>
 si-agent scm get-repo <platform> <owner>/<repo>
 si-agent scm get-sync-state <platform> <owner>/<repo>
 si-agent scm reset-sync <platform> <owner>/<repo>
 
 # WebDAV agent
-si-agent webdav run-inventory <path> <source>
-si-agent webdav run-from-urls <urls-file> <source>
 si-agent webdav check-status <path> <source>
 si-agent webdav export-urls <path> <output-file>
 si-agent webdav validate-config <path>
@@ -182,7 +181,7 @@ Files are hashed and compared against the local sync state:
 
 ### Incremental Sync (SCM)
 
-The run-incremental command tracks the last processed commit SHA in local sync state to only fetch changed files on subsequent runs.
+An `scm` manifest component with `incremental: true` tracks the last processed commit SHA in local sync state to only fetch changed files on subsequent runs. `si-agent scm reset-sync` clears that state to force a full scan.
 
 ## Testing
 

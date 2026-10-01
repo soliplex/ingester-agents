@@ -113,13 +113,29 @@ def test_routers_included():
     assert "/api/v1/fs/validate-config" in routes
     assert "/api/v1/fs/build-config" in routes
     assert "/api/v1/fs/check-status" in routes
-    assert "/api/v1/fs/run-inventory" in routes
     # SCM routes
     assert "/api/v1/scm/{scm}/issues" in routes
     assert "/api/v1/scm/{scm}/repo" in routes
-    assert "/api/v1/scm/run-inventory" in routes
+    # Manifest routes: the only way to ingest over HTTP
+    assert "/api/v1/manifest/validate" in routes
+    assert "/api/v1/manifest/run" in routes
+    assert "/api/v1/manifest/queue" in routes
     # Health check
     assert "/health" in routes
+
+
+def test_no_ingest_routes_outside_manifests():
+    """Ingestion runs only through manifests; the per-source run routes are gone."""
+    routes = set(app.openapi()["paths"])
+    for removed in (
+        "/api/v1/fs/run-inventory",
+        "/api/v1/scm/run-inventory",
+        "/api/v1/scm/incremental-sync",
+        "/api/v1/webdav/run-inventory",
+        "/api/v1/webdav/run-from-file",
+    ):
+        assert removed not in routes
+    assert not any(path.startswith("/api/v1/web/") for path in routes)
 
 
 # CORS headers tests

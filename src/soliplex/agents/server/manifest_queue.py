@@ -14,6 +14,7 @@ faster than its own runs cannot grow a backlog.
 """
 
 import asyncio
+import enum
 import logging
 import time
 
@@ -33,28 +34,41 @@ _worker_task: asyncio.Task | None = None
 _pending: set[str] = set()
 
 
-async def enqueue_manifest(manifest_id: str, path: str) -> None:
+class EnqueueResult(enum.StrEnum):
+    """What :func:`enqueue_manifest` did with a run request."""
+
+    QUEUED = "queued"
+    COALESCED = "coalesced"
+    NOT_STARTED = "not_started"
+
+
+async def enqueue_manifest(manifest_id: str, path: str) -> EnqueueResult:
     """Queue *manifest_id* to run, unless it is already queued or running.
 
     No-op (with a warning) if the worker has not been started, so a
-    reconcile pass never fails just because the scheduler is disabled.
+    reconcile pass never fails just because the queue is not running.
 
     Args:
         manifest_id: The manifest's id, used for coalescing and logging.
         path: Path to the manifest YAML, reloaded fresh when it runs.
+
+    Returns:
+        ``QUEUED`` if the run was queued, ``COALESCED`` if the manifest was
+        already queued or running, ``NOT_STARTED`` if the worker is not
+        running and the request was dropped.
     """
     if _queue is None:
         logger.warning(
             "manifest run queue not started; dropping run for '%s'",
             manifest_id,
         )
-        return
+        return EnqueueResult.NOT_STARTED
     if manifest_id in _pending:
         logger.info(
             "Manifest '%s' already queued or running; coalescing this run",
             manifest_id,
         )
-        return
+        return EnqueueResult.COALESCED
     _pending.add(manifest_id)
     await _queue.put((manifest_id, path, time.monotonic()))
     logger.info(
@@ -62,6 +76,7 @@ async def enqueue_manifest(manifest_id: str, path: str) -> None:
         manifest_id,
         _queue.qsize(),
     )
+    return EnqueueResult.QUEUED
 
 
 def pending_manifests() -> frozenset[str]:

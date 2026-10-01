@@ -51,6 +51,7 @@ docker exec -it gitea gitea admin user create \
 Open <http://localhost:3000> in your browser.
 
 **Default credentials:**
+
 - Username: `admin`
 - Password: `admin123`
 
@@ -68,6 +69,7 @@ docker exec gitea gitea admin user generate-access-token \
 ```
 
 **Via Web UI:**
+
 1. Log in to Gitea (<http://localhost:3000>)
 2. Click your profile → Settings → Applications
 3. Generate New Token
@@ -175,14 +177,30 @@ docker exec gitea sqlite3 /data/gitea/gitea.db ".tables"
 After setting up Gitea and configuring environment variables, you can test the SCM agent:
 
 ```bash
-# List repositories
-si-agent scm get-repo gitea <repo-name> admin
+# List repository files
+si-agent scm get-repo gitea admin/<repo-name>
 
 # List issues
-si-agent scm list-issues gitea <repo-name> admin
+si-agent scm list-issues gitea admin/<repo-name>
+```
 
-# Run full inventory
-si-agent scm run-inventory gitea <repo-name> admin
+To ingest the repository, run a manifest with an `scm` component:
+
+```yaml
+# gitea.yml
+id: gitea-test
+name: gitea test
+source: gitea-test
+components:
+  - name: repo
+    type: scm
+    platform: gitea
+    owner: admin
+    repo: <repo-name>
+```
+
+```bash
+si-agent manifest run gitea.yml --no-load
 ```
 
 ## Troubleshooting
@@ -247,6 +265,7 @@ docker exec gitea du -h /data/gitea/gitea.db
 ## Test Data
 
 The `build_test_data.py` script can be used to populate test issues. It expects:
+
 - A running Gitea instance
 - Valid `GITEA_URL`, `GITEA_TOKEN`, and `GITEA_OWNER` environment variables
 - CSV file with test issues (`issues.csv`)
