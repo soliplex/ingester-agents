@@ -116,8 +116,8 @@ def configure() -> bool:
 def command_path(root, argv: Sequence[str]) -> str:
     """The subcommand names in *argv*, walked against the command tree *root*.
 
-    Only tokens that name a command are kept -- ``webdav run-inventory /docs
-    --webdav-password hunter2`` is ``webdav run-inventory`` -- which makes it
+    Only tokens that name a command are kept -- ``webdav check-status /docs
+    src --webdav-password hunter2`` is ``webdav check-status`` -- which makes it
     the stable part of a command line, to group runs by. The full line, with
     secrets redacted, is :func:`command_args`.
 
@@ -162,8 +162,8 @@ def _secret_options(root) -> frozenset[str]:
 def command_args(root, argv: Sequence[str]) -> str:
     """*argv* as a shell-quoted command line, with secret option values redacted.
 
-    ``webdav run-inventory /docs --webdav-password hunter2`` becomes
-    ``webdav run-inventory /docs --webdav-password [redacted]``, and the
+    ``webdav check-status /docs src --webdav-password hunter2`` becomes
+    ``webdav check-status /docs src --webdav-password [redacted]``, and the
     ``--opt=value`` form is redacted the same way. ``--otel`` is left out.
 
     Args:

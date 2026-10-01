@@ -1,6 +1,5 @@
 """Filesystem agent API routes."""
 
-import json
 import logging
 import os
 
@@ -115,45 +114,3 @@ async def check_status(
         result["files"] = to_process
 
     return result
-
-
-@fs_router.post("/run-inventory")
-async def run_inventory(
-    config_file: str = Form(..., description="Path to the document directory"),
-    source: str = Form(..., description="Source name"),
-    start: int = Form(0, description="Start index"),
-    end: int | None = Form(None, description="End index"),
-    metadata: str | None = Form(None, description="JSON string of extra metadata to attach to all documents"),
-):
-    """
-    Run document ingestion from a directory.
-
-    The inventory is built by scanning the directory's contents; path
-    resolution happens inside load_inventory via resolve_config_path.
-    """
-    if not os.path.exists(config_file):
-        raise HTTPException(status_code=404, detail=f"Path not found: {config_file}")
-
-    try:
-        extra_metadata = json.loads(metadata) if metadata else None
-
-        # Path resolution now handled by load_inventory internally
-        result = await fs_app.load_inventory(
-            config_file,
-            source,
-            start,
-            end,
-            extra_metadata=extra_metadata,
-        )
-
-        return {
-            "status": "ok",
-            "inventory_count": len(result.get("inventory", [])),
-            "to_process_count": len(result.get("to_process", [])),
-            "ingested_count": len(result.get("ingested", [])),
-            "error_count": len(result.get("errors", [])),
-            "errors": result.get("errors", []),
-        }
-    except Exception as e:
-        logger.exception("Error running inventory for %s", config_file)
-        raise HTTPException(status_code=500, detail=str(e)) from e

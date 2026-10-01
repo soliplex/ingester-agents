@@ -23,11 +23,8 @@ uv run ruff format . && uv run ruff check .
 # Start REST API server
 uv run --env-file .env si-agent serve --reload
 
-# Filesystem ingestion
-si-agent fs run-inventory /path/to/docs my-source
-
-# SCM incremental sync
-si-agent scm run-incremental gitea myowner/myrepo
+# Ingest: every source (fs, scm, webdav, web) runs through a manifest
+si-agent manifest run example-manifests/fs.yml --no-load
 ```
 
 ## Project Structure
@@ -224,23 +221,19 @@ See `config.py` for full settings reference.
 
 ```text
 si-agent
-├── fs
+├── fs                                   # Inspection only; ingest via `manifest run`
 │   ├── build-config <path>              # Scan directory
 │   ├── validate-config <path>           # Validate files
-│   ├── check-status <path> <source>     # Check ingestion status
-│   └── run-inventory <path> <source>    # Ingest documents
-├── scm
-│   ├── list-issues <platform> <repo> <owner>
-│   ├── get-repo <platform> <repo> <owner>
-│   ├── run-inventory <platform> <repo> <owner>
-│   ├── run-incremental <platform> <repo> <owner>
-│   ├── get-sync-state <platform> <repo> <owner>
-│   └── reset-sync <platform> <repo> <owner>
-├── webdav
-│   ├── build-config <path>
+│   └── check-status <path> <source>     # Check ingestion status
+├── scm                                  # Inspection/maintenance only
+│   ├── list-issues <platform> <owner>/<repo>
+│   ├── get-repo <platform> <owner>/<repo>
+│   ├── get-sync-state <platform> <owner>/<repo>
+│   └── reset-sync <platform> <owner>/<repo>
+├── webdav                               # Inspection only
 │   ├── validate-config <path>
-│   ├── check-status <path> <source>
-│   └── run-inventory <path> <source>
+│   ├── export-urls <path> <output-file> # Write a urls_file for a manifest
+│   └── check-status <path> <source>
 ├── manifest
 │   ├── run <path> [--json] [--load/--no-load]   # Run manifest(s); optionally haiku-rag load
 │   ├── migrate [path|all] [--json] [--timeout] [--dry-run]  # haiku-rag DB migrations
@@ -250,15 +243,22 @@ si-agent
 
 ## API Endpoints
 
+Ingestion over HTTP goes only through `POST /api/v1/manifest/run`, which
+queues a manifest from `MANIFEST_DIR` on the same single run queue as the
+cron scheduler. The per-source routes are read-only.
+
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
+| POST | /api/v1/manifest/run | Queue a manifest (by id) from `MANIFEST_DIR`; 202 |
+| GET | /api/v1/manifest/queue | Ids of manifests queued or running |
+| POST | /api/v1/manifest/validate | Validate manifest file(s) without running |
 | POST | /api/v1/fs/build-config | Scan filesystem |
-| POST | /api/v1/fs/run-inventory | Ingest from filesystem |
-| GET | /api/scm/{platform}/{repo}/issues | List issues |
-| GET | /api/scm/{platform}/{repo}/files | List files |
-| POST | /api/scm/{platform}/{repo}/ingest | Ingest from SCM |
-| POST | /api/v1/webdav/build-config | Scan WebDAV |
-| POST | /api/v1/webdav/run-inventory | Ingest from WebDAV |
+| POST | /api/v1/fs/validate-config | Validate files in a directory |
+| POST | /api/v1/fs/check-status | Which files need ingestion |
+| GET | /api/v1/scm/{scm}/issues | List issues (`repo`, `owner` query params) |
+| GET | /api/v1/scm/{scm}/repo | List repo files (`repo`, `owner` query params) |
+| POST | /api/v1/webdav/validate-config | Validate files in a WebDAV path |
+| POST | /api/v1/webdav/check-status | Which files need ingestion |
 | GET | /health | Health check |
 
 ## Key Patterns
@@ -299,8 +299,10 @@ source under `STATE_DIR`. Content hashes recorded in sync state enable
 incremental ingestion (only new/changed files are written).
 
 Where that is depends on the resolved **download target** (`store.py`): the
-local filesystem, or an S3 bucket when `DOWNLOAD_S3_BUCKET` is set, or
-whatever a manifest's `config.download_store` overrides it to. Nothing outside
+local filesystem, or an S3 bucket when `DOWNLOAD_S3_BUCKET` is set. It is
+chosen per installation, never per manifest: nothing may rewrite the
+download settings mid-process, because the haiku load and its callbacks
+resolve the target again later, on another task. Nothing outside
 `store.py` branches on the backend -- callers pass source-relative keys and the
 target owns every layer of prefixing.
 

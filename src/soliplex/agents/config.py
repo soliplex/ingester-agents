@@ -53,10 +53,9 @@ _secrets_kwargs: dict = {"secrets_dir": _SECRETS_DIR} if Path(_SECRETS_DIR).is_d
 def _checked_bucket(value: str | None) -> str | None:
     """Normalize and validate a configured download bucket.
 
-    Shared by the installation setting and the per-manifest override so both
-    accept the same spellings -- a bare name or a full ``s3://bucket/prefix``
-    URI -- and both reject an unusable one while configuration is being read
-    rather than at the first write.
+    Accepts a bare name or a full ``s3://bucket/prefix`` URI, and rejects an
+    unusable one while configuration is being read rather than at the first
+    write.
 
     A blank value becomes ``None``, so object storage is disabled by clearing
     the variable rather than by deleting the line. That is the only way to turn
@@ -353,7 +352,24 @@ def resolve_credential(value: str) -> str:
 # --- Manifest Component Models ---
 
 
-class FSComponent(BaseModel):
+class _ManifestModel(BaseModel):
+    """Base for every model a manifest file is parsed into.
+
+    Unknown keys are rejected rather than silently dropped: a typo such as
+    ``extentions`` or ``delete_stail`` would otherwise leave the setting at its
+    default without a word, and a key that has been removed (``download_store``)
+    would be ignored while the manifest ran somewhere else than intended. A
+    rejected manifest is reported like any other invalid one -- once, at ERROR,
+    by the scheduler's reconcile; as a validation error by the CLI.
+
+    Free-form fields (``metadata``, a post-process step's ``kwargs``) are dicts,
+    so they still accept any keys.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class FSComponent(_ManifestModel):
     """Filesystem ingestion component."""
 
     type: Literal["fs"] = "fs"
@@ -363,7 +379,7 @@ class FSComponent(BaseModel):
     metadata: dict[str, str] | None = None
 
 
-class SCMComponent(BaseModel):
+class SCMComponent(_ManifestModel):
     """Source control management ingestion component."""
 
     type: Literal["scm"] = "scm"
@@ -390,7 +406,7 @@ class SCMComponent(BaseModel):
         return self
 
 
-class WebDAVComponent(BaseModel):
+class WebDAVComponent(_ManifestModel):
     """WebDAV ingestion component."""
 
     type: Literal["webdav"] = "webdav"
@@ -414,7 +430,7 @@ class WebDAVComponent(BaseModel):
         return self
 
 
-class WebComponent(BaseModel):
+class WebComponent(_ManifestModel):
     """Web page ingestion component (fetches raw HTML)."""
 
     type: Literal["web"] = "web"
@@ -444,7 +460,7 @@ Component = Annotated[
 # --- Manifest Config ---
 
 
-class PostProcessStep(BaseModel):
+class PostProcessStep(_ManifestModel):
     """One post-load callback, invoked as ``method(source, **kwargs)``.
 
     ``method`` is a dotted import path (``pkg.mod:func`` or ``pkg.mod.func``)
@@ -459,7 +475,7 @@ class PostProcessStep(BaseModel):
     kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
-class PreRunStep(BaseModel):
+class PreRunStep(_ManifestModel):
     """One step run once, before any component, invoked as ``method(context, **kwargs)``.
 
     A step may return SKIP to call the run off (no components, no load, no
@@ -467,15 +483,13 @@ class PreRunStep(BaseModel):
     see :mod:`soliplex.agents.manifest.pre_run`.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     method: str
     kwargs: dict[str, Any] = Field(default_factory=dict)
     on_error: Literal["continue", "skip", "fail"] = "fail"
     timeout: float | None = Field(default=300, gt=0)  # seconds; None = no limit
 
 
-class PreProcessStep(BaseModel):
+class PreProcessStep(_ManifestModel):
     """One step run on each new or changed document, before it is stored.
 
     Invoked as ``method(document, **kwargs)``; ``mime_types`` limits it to
@@ -483,38 +497,14 @@ class PreProcessStep(BaseModel):
     :mod:`soliplex.agents.manifest.pre_process`.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     method: str
     kwargs: dict[str, Any] = Field(default_factory=dict)
     mime_types: list[str] | None = None
     on_error: Literal["continue", "skip", "fail"] = "continue"
 
 
-class DownloadStoreConfig(BaseModel):
-    """Per-manifest override of where this source's documents are written.
-
-    ``target`` is explicit rather than inferred from ``bucket``'s presence,
-    because an override needs three states, not two: inherit the installation
-    default (omit the whole block), force object storage, or force the local
-    filesystem. The third is how a source is pinned while it is not ready, or
-    rolled back after a bad migration, when the installation default is
-    already S3 -- and ``bucket: null`` cannot express it, since pydantic
-    cannot tell an absent key from an explicit null without inspecting
-    ``model_fields_set``.
-    """
-
-    target: Literal["fs", "s3"]
-    bucket: str | None = None  # Defaults to settings.download_s3_bucket
-    dir: str | None = None  # Defaults to settings.download_dir
-
-    _validate_bucket = field_validator("bucket", mode="after")(_checked_bucket)
-
-
-class ManifestConfig(BaseModel):
+class ManifestConfig(_ManifestModel):
     """Shared configuration applied to all components in a manifest."""
-
-    download_store: DownloadStoreConfig | None = None
 
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
@@ -530,8 +520,27 @@ class ManifestConfig(BaseModel):
     # soliplex.agents.manifest.post_process).
     post_process: list[PostProcessStep] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_download_store(cls, data: Any) -> Any:
+        """Explain the one removed key, rather than a bare "extra input".
 
-class Schedule(BaseModel):
+        Where a source's documents go is chosen per installation --
+        ``DOWNLOAD_S3_BUCKET`` for object storage, with an S3 haiku config via
+        ``HAIKU_DEFAULT_CONFIG`` or this manifest's ``haiku_config``. A
+        per-manifest override was applied by temporarily rewriting the shared
+        settings, which the haiku load and its callbacks, running later, never
+        saw.
+        """
+        if isinstance(data, dict) and "download_store" in data:
+            raise ValueError(
+                "download_store is no longer supported: storage is chosen per installation "
+                "(DOWNLOAD_S3_BUCKET, with an S3 haiku config via HAIKU_DEFAULT_CONFIG or haiku_config)"
+            )
+        return data
+
+
+class Schedule(_ManifestModel):
     """Cron schedule for automated manifest execution."""
 
     cron: str
@@ -540,7 +549,7 @@ class Schedule(BaseModel):
 # --- Top-level Manifest ---
 
 
-class Manifest(BaseModel):
+class Manifest(_ManifestModel):
     """Top-level manifest defining a group of ingestion components sharing a single source."""
 
     id: str
@@ -568,39 +577,19 @@ class Manifest(BaseModel):
         return None
 
     def get_download_target(self, download_dir: str | None = None):
-        """Resolve where this manifest's documents are written.
+        """Where this manifest's documents are written: the installation's store.
 
-        The manifest's ``config.download_store`` wins; absent it, the
-        installation settings decide. Returns a
+        Chosen per installation (``DOWNLOAD_DIR``, or ``DOWNLOAD_S3_BUCKET`` for
+        object storage), never per manifest, so the ingest, the haiku load and
+        its callbacks all resolve the same place. Returns a
         :class:`~soliplex.agents.store.DownloadTarget`.
 
         Args:
             download_dir: Override for the resolved directory (mainly tests).
-
-        Raises:
-            ValueError: if the override asks for ``s3`` but no bucket is
-                configured, here or in the settings. Failing loudly beats
-                silently writing to local disk.
         """
-        from soliplex.agents.store import DownloadTarget
-        from soliplex.agents.store import storage_options
+        from soliplex.agents.store import get_document_store
 
-        override = self.config.download_store if self.config else None
-        if override is None:
-            from soliplex.agents.store import get_document_store
-
-            return get_document_store(self.source, download_dir).target
-
-        base = download_dir if download_dir is not None else (override.dir or settings.download_dir)
-        if override.target == "fs":
-            return DownloadTarget(dir=base, source=self.source)
-        bucket = override.bucket or settings.download_s3_bucket
-        if not bucket:
-            raise ValueError(
-                f"Manifest '{self.id}' sets download_store.target='s3' but no bucket is "
-                f"configured; set download_store.bucket or DOWNLOAD_S3_BUCKET"
-            )
-        return DownloadTarget(dir=base, source=self.source, bucket=bucket, storage_options=storage_options())
+        return get_document_store(self.source, download_dir).target
 
     def get_metadata(self, component: FSComponent | SCMComponent | WebDAVComponent | WebComponent) -> dict[str, str]:
         """Resolve metadata for a component (config metadata merged with component metadata on top)."""

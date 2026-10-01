@@ -223,6 +223,22 @@ class TestReconcileReportsProblemsOnce:
         assert "file removed" not in caplog.text
 
     @pytest.mark.asyncio
+    async def test_a_manifest_still_using_download_store_is_reported_once(self, tmp_path, reconcile, caplog):
+        _write_manifest(tmp_path, "m.yml", "m", schedule="*/5 * * * *")
+        await reconcile()
+        override = "config:\n  download_store:\n    target: s3\ncomponents:"
+        (tmp_path / "m.yml").write_text((tmp_path / "m.yml").read_text().replace("components:", override))
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            await reconcile(times=3)
+
+        errors = _messages(caplog, logging.ERROR)
+        assert len(errors) == 2  # the invalid file, then the unregistration it causes
+        assert "(id m) is invalid" in errors[0]
+        assert "download_store is no longer supported" in errors[0]
+        assert errors[1] == f"Unregistered manifest 'm': {tmp_path / 'm.yml'} is invalid"
+
+    @pytest.mark.asyncio
     async def test_fixed_file_is_reported_valid_again(self, tmp_path, reconcile, caplog):
         (tmp_path / "a.yml").write_text(":::invalid:::")
         await reconcile()
@@ -429,3 +445,43 @@ class TestSchedulerExpectations:
         assert started == ["aaa", "bbb"]
         assert caplog.text.count("coalescing this run") == 2
         assert manifest_queue.pending_manifests() == frozenset()
+
+
+class TestLifespan:
+    """The run queue starts with the server; the scheduler only adds cron."""
+
+    @pytest.fixture
+    def quiet(self):
+        """Skip logging and Logfire setup, and the startup reconcile."""
+        with (
+            patch.object(server, "configure_logging"),
+            patch.object(server.telemetry, "configure"),
+            patch.object(server, "reconcile_manifest_schedules", new_callable=AsyncMock) as reconcile,
+            patch.object(server.settings, "haiku_load_enabled", False),
+        ):
+            yield reconcile
+
+    async def _run(self):
+        """Enter the lifespan, report whether the worker runs, then leave it."""
+        lifespan = server.lifespan(server.app)
+        await anext(lifespan)
+        running = manifest_queue._worker_task is not None
+        with pytest.raises(StopAsyncIteration):
+            await anext(lifespan)
+        return running
+
+    @pytest.mark.asyncio
+    async def test_queue_runs_with_scheduler_disabled(self, quiet):
+        with patch.object(server.settings, "scheduler_enabled", False):
+            running = await self._run()
+        assert running
+        assert manifest_queue._worker_task is None
+        quiet.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scheduler_enabled_also_reconciles_at_startup(self, quiet):
+        with patch.object(server.settings, "scheduler_enabled", True):
+            running = await self._run()
+        assert running
+        assert manifest_queue._worker_task is None
+        quiet.assert_awaited_once()
