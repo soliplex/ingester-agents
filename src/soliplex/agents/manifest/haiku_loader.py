@@ -20,6 +20,7 @@ from pathlib import Path
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import settings
 from soliplex.agents.manifest.context import LoadContext
+from soliplex.agents.manifest.haiku_process import HaikuRun
 from soliplex.agents.manifest.haiku_process import run_haiku
 from soliplex.agents.sidecar import kinds as sidecar_kinds
 
@@ -113,17 +114,18 @@ def build_load_argv(haiku_cfg: str, db: str, source: str) -> list[str]:
     return [token.format(**substitutions) for token in shlex.split(settings.haiku_load_command)]
 
 
-async def _run_post_process(manifest: Manifest, ingester_exit_code: int | None) -> list[dict]:
+async def _run_post_process(manifest: Manifest, ingester: HaikuRun, run_result: dict | None) -> list[dict]:
     """Run the manifest's post-process callbacks after a load.
 
     Fires regardless of the load outcome (success, failure, or timeout);
-    ``ingester_exit_code`` is the load's exit code (``None`` on timeout) and is
-    forwarded to the callbacks. The local import avoids a circular import
-    (``post_process`` imports ``resolve_haiku_cfg`` from this module).
+    *ingester* is the load's outcome and *run_result* the manifest run that
+    queued it, both forwarded to the callbacks. The local import avoids a
+    circular import (``post_process`` imports ``resolve_haiku_cfg`` from this
+    module).
     """
     from soliplex.agents.manifest import post_process
 
-    return await post_process.run_post_process(manifest, ingester_exit_code=ingester_exit_code)
+    return await post_process.run_post_process(manifest, ingester=ingester, run_result=run_result)
 
 
 async def _log_if_no_documents(manifest: Manifest, context: LoadContext) -> None:
@@ -155,7 +157,7 @@ async def _log_if_no_documents(manifest: Manifest, context: LoadContext) -> None
         )
 
 
-async def run_load(manifest: Manifest, *, queue_wait_s: float | None = None) -> dict:
+async def run_load(manifest: Manifest, *, queue_wait_s: float | None = None, run_result: dict | None = None) -> dict:
     """Run a single haiku-rag batch load for *manifest*.
 
     Spawns the configured load command with ``SOURCE`` set to the
@@ -169,6 +171,8 @@ async def run_load(manifest: Manifest, *, queue_wait_s: float | None = None) -> 
         manifest: The manifest whose source should be loaded.
         queue_wait_s: Seconds the load waited in the haiku queue, recorded on
             the load's span (``None`` when it wasn't queued, as from the CLI).
+        run_result: The result of the manifest run that asked for this load,
+            handed to post-process callbacks that accept ``run_result``.
 
     Returns:
         Dict with ``source``, ``db``, ``returncode`` (``None`` on timeout),
@@ -209,5 +213,5 @@ async def run_load(manifest: Manifest, *, queue_wait_s: float | None = None) -> 
         "stdout": run.stdout,
         "stderr": run.stderr,
         "timed_out": run.timed_out,
-        "post_process": await _run_post_process(manifest, run.returncode),
+        "post_process": await _run_post_process(manifest, run, run_result),
     }

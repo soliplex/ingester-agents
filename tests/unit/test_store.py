@@ -41,19 +41,6 @@ def _clear_store_cache():
     agent_store.reset_store_cache()
 
 
-@pytest.fixture
-def memory_store(monkeypatch):
-    """Swap the obstore S3Store for one shared in-process MemoryStore.
-
-    `_make_s3_store` exists as its own function so this is the only seam a test
-    needs; nothing else about S3DocumentStore is mocked. One instance per test,
-    so two stores resolved for the same target see the same objects -- which is
-    what a real bucket does.
-    """
-    shared = MemoryStore()
-    monkeypatch.setattr(agent_store, "_make_s3_store", lambda bucket, options: shared)
-
-
 @pytest.fixture(params=["local", "s3"])
 def store(request, local_target, s3_target, memory_store) -> DocumentStore:
     if request.param == "local":

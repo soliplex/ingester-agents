@@ -1,0 +1,34 @@
+# Notify a webhook when the run starts and finishes, and skip the run when
+# the disk is nearly full. See the README's "Manifest hooks".
+#
+# INGEST_WEBHOOK_URL / INGEST_WEBHOOK_TOKEN name docker secrets or environment
+# variables, so the manifest never holds the values.
+#
+# Why did a run not happen?
+#   si-agent manifest pre-run-report example-manifests/pre-run.yml --status skip
+id: pre-run-example
+name: pre-run example
+source: pre-run-docs
+schedule:
+  cron: "0 2 * * *"
+config:
+  pre_run:
+    - method: soliplex.agents.manifest.pre_run_steps:notify_webhook
+      kwargs:
+        url_secret: INGEST_WEBHOOK_URL
+        secret_headers: { Authorization: INGEST_WEBHOOK_TOKEN }
+      on_error: continue   # a failed notification must not block ingestion
+      timeout: 15
+    - method: soliplex.agents.manifest.pre_run_steps:check_free_space
+      kwargs: { min_free_mb: 2048 }
+      on_error: fail
+  post_process:
+    # Listed last: a failed delivery stops the post-process chain.
+    - method: soliplex.agents.manifest.post_processors:notify_webhook
+      kwargs:
+        url_secret: INGEST_WEBHOOK_URL
+        secret_headers: { Authorization: INGEST_WEBHOOK_TOKEN }
+components:
+  - name: docs
+    type: fs
+    path: tests/test_fs

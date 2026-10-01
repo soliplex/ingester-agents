@@ -1,6 +1,7 @@
 """Unit tests for incremental sync and SCM provider commit helpers."""
 
 import datetime
+import pathlib
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -420,132 +421,149 @@ async def test_list_commits_since_max_pages_limit(mock_response):
 
 
 # ---------------------------------------------------------------------------
-# Processor integration — run_processors called after each successful write
+# Pre-process: an encrypted PDF is a content decision, not a failure
 # ---------------------------------------------------------------------------
+
+_PDF_FIXTURES = pathlib.Path(__file__).parent.parent / "fixtures" / "pdf"
+
+
+def _pdf_check_run(source):
+    """The pre-process run of a manifest that lists `check_pdf_password`."""
+    from soliplex.agents.config import Manifest
+    from soliplex.agents.manifest import pre_process
+
+    manifest = Manifest(
+        id="m",
+        name="M",
+        source=source,
+        config={
+            "pre_process": [
+                {"method": "soliplex.agents.manifest.pre_processors:check_pdf_password", "mime_types": ["application/pdf"]}
+            ]
+        },
+        components=[{"type": "fs", "name": "c", "path": "/x"}],
+    )
+    return pre_process.PreProcessRun(manifest_id="m", source=source, steps=pre_process.resolve_steps(manifest))
+
+
+def _locked_pdf_provider():
+    provider = MagicMock()
+    provider.list_commits_since = AsyncMock(return_value=[{"sha": "def456", "message": "Add locked.pdf"}])
+    provider.get_commit_details = AsyncMock(
+        return_value={"sha": "def456", "files": [{"filename": "locked.pdf", "status": "modified"}]}
+    )
+    provider.get_single_file = AsyncMock(
+        return_value={
+            "uri": "locked.pdf",
+            "file_bytes": (_PDF_FIXTURES / "user_password.pdf").read_bytes(),
+            "content-type": "application/pdf",
+            "sha256": "aabbcc",
+            "metadata": {},
+        }
+    )
+    provider.list_issues = AsyncMock(return_value=[])
+    provider.list_all_files = AsyncMock(return_value=[])
+    return provider
 
 
 @pytest.mark.asyncio
-async def test_incremental_sync_calls_run_processors(local_env):
-    """run_processors is invoked once per successfully written file."""
-    source = "gitea:admin:test:all"
-    local_state.set_sync_meta(source, "abc123", branch="main")
+async def test_encrypted_pdf_is_skipped_without_pinning_the_cursor(local_env):
+    """A skipped document is not stored, but is not an error either.
 
-    with patch("soliplex.agents.scm.app.get_scm") as mock_get_scm:
-        mock_provider = MagicMock()
-        mock_provider.list_commits_since = AsyncMock(return_value=[{"sha": "def456", "message": "Update file1.md"}])
-        mock_provider.get_commit_details = AsyncMock(
-            return_value={"sha": "def456", "files": [{"filename": "file1.md", "status": "modified"}]}
-        )
-        mock_provider.get_single_file = AsyncMock(
-            return_value={
-                "uri": "file1.md",
-                "file_bytes": b"content",
-                "content-type": "text/markdown",
-                "sha256": "aabbcc",
-                "metadata": {},
-            }
-        )
-        mock_provider.list_issues = AsyncMock(return_value=[])
-        mock_get_scm.return_value = mock_provider
-
-        with patch(
-            "soliplex.agents.scm.app.processors.run_processors",
-            side_effect=lambda data, mime_type: data,
-        ) as mock_run:
-            result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin")
-
-    assert result["status"] == "synced"
-    assert mock_run.call_count == 1
-    # Processors now run on the bytes, before anything is written.
-    assert mock_run.call_args.args == (b"content", "text/markdown")
-
-
-# ---------------------------------------------------------------------------
-# ProcessorRejected is a content decision, not a failure
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_rejection_does_not_pin_the_sync_cursor(local_env):
-    """A rejected document must not make the run replay itself forever.
-
-    The cursor only advances when the run had no errors. Counting a rejection
-    as one leaves the cursor where it was, so the next run fetches the same
-    commit, rejects the same file, and never advances -- and the reconcile
-    (with it, the relocation repair) is skipped every time.
+    The cursor only advances when the run had no errors, so counting a skip
+    as one would make every run fetch the same commit and skip the same file
+    forever. The state row is still recorded, so a full run does not re-fetch
+    it until upstream changes.
     """
+    from soliplex.agents.manifest import pre_process
+
     source = "gitea:admin:test:all"
     local_state.set_sync_meta(source, "abc123", branch="main")
 
-    with patch("soliplex.agents.scm.app.get_scm") as mock_get_scm:
-        mock_provider = MagicMock()
-        mock_provider.list_commits_since = AsyncMock(return_value=[{"sha": "def456", "message": "Add locked.pdf"}])
-        mock_provider.get_commit_details = AsyncMock(
-            return_value={"sha": "def456", "files": [{"filename": "locked.pdf", "status": "modified"}]}
-        )
-        mock_provider.get_single_file = AsyncMock(
-            return_value={
-                "uri": "locked.pdf",
-                "file_bytes": b"%PDF-",
-                "content-type": "application/pdf",
-                "sha256": "aabbcc",
-                "metadata": {},
-            }
-        )
-        mock_provider.list_issues = AsyncMock(return_value=[])
-        mock_provider.list_all_files = AsyncMock(return_value=[])
-        mock_get_scm.return_value = mock_provider
-
-        with patch(
-            "soliplex.agents.scm.app.processors.run_processors",
-            side_effect=scm_app.processors.ProcessorRejected("password required"),
-        ):
+    with patch("soliplex.agents.scm.app.get_scm", return_value=_locked_pdf_provider()):
+        with pre_process.activate(_pdf_check_run(source)) as run:
             result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin", delete_stale=False)
 
     assert result["errors"] == []
-    assert result["rejected"] == [{"uri": "locked.pdf", "reason": "password required"}]
-    # Advanced past the commit, so the rejection is not replayed next run.
     assert result["new_commit_sha"] == "def456"
     assert local_state.get_sync_meta(source)["last_commit_sha"] == "def456"
+    assert run.skipped == [
+        {
+            "uri": "locked.pdf",
+            "method": "soliplex.agents.manifest.pre_processors:check_pdf_password",
+            "message": "password protected",
+        }
+    ]
+    assert not (local_store.source_dir(source) / "locked.pdf").exists()
+    assert "locked.pdf" in local_state.load_file_state(source)
+    assert local_state.get_pre_process_document(source, "locked.pdf")["status"] == "skip"
 
 
 @pytest.mark.asyncio
-async def test_rejection_does_not_block_delete_stale(local_env):
+async def test_encrypted_pdf_removes_the_previously_stored_version(local_env):
+    """An upstream replacement that is now encrypted must not leave the old one indexed."""
+    from soliplex.agents.manifest import pre_process
+
+    source = "gitea:admin:test:all"
+    local_state.set_sync_meta(source, "abc123", branch="main")
+    valid = (_PDF_FIXTURES / "valid.pdf").read_bytes()
+    await local_store.write_document(source, "locked.pdf", valid, "application/pdf")
+    stored = local_store.source_dir(source) / "locked.pdf"
+    assert stored.exists()
+
+    with patch("soliplex.agents.scm.app.get_scm", return_value=_locked_pdf_provider()):
+        with pre_process.activate(_pdf_check_run(source)):
+            await scm_app.incremental_sync(SCM.GITEA, "test", "admin", delete_stale=False)
+
+    assert not stored.exists()
+    assert not stored.with_name("locked.pdf.meta.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_skip_does_not_block_delete_stale(local_env):
     """Stale cleanup still runs, so the relocation repair still runs with it."""
+    from soliplex.agents.manifest import pre_process
+
     source = "gitea:admin:test:all"
     local_state.set_sync_meta(source, "abc123", branch="main")
 
-    with patch("soliplex.agents.scm.app.get_scm") as mock_get_scm:
-        mock_provider = MagicMock()
-        mock_provider.list_commits_since = AsyncMock(return_value=[{"sha": "def456", "message": "Add locked.pdf"}])
-        mock_provider.get_commit_details = AsyncMock(
-            return_value={"sha": "def456", "files": [{"filename": "locked.pdf", "status": "modified"}]}
-        )
-        mock_provider.get_single_file = AsyncMock(
-            return_value={
-                "uri": "locked.pdf",
-                "file_bytes": b"%PDF-",
-                "content-type": "application/pdf",
-                "sha256": "aabbcc",
-                "metadata": {},
-            }
-        )
-        mock_provider.list_issues = AsyncMock(return_value=[])
-        mock_get_scm.return_value = mock_provider
-
-        with (
-            patch(
-                "soliplex.agents.scm.app.processors.run_processors",
-                side_effect=scm_app.processors.ProcessorRejected("password required"),
-            ),
-            patch("soliplex.agents.scm.app.list_all_uris", AsyncMock(return_value=[])) as mock_list,
-            patch("soliplex.agents.local_state.prune_documents", AsyncMock(return_value=[])) as mock_prune,
-        ):
+    with (
+        patch("soliplex.agents.scm.app.get_scm", return_value=_locked_pdf_provider()),
+        patch("soliplex.agents.scm.app.list_all_uris", AsyncMock(return_value=[])) as mock_list,
+        patch("soliplex.agents.local_state.prune_documents", AsyncMock(return_value=[])) as mock_prune,
+    ):
+        with pre_process.activate(_pdf_check_run(source)) as run:
             result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin", delete_stale=True)
 
-    assert result["rejected"]
+    assert result["errors"] == []
+    assert run.skipped
     assert mock_list.called
     assert mock_prune.called
+
+
+@pytest.mark.asyncio
+async def test_full_inventory_encrypted_pdf_is_not_refetched(local_env):
+    """load_inventory: once skipped, an unchanged PDF is not selected again."""
+    from soliplex.agents.manifest import pre_process
+
+    source = "gitea:admin:test:all"
+    row = {
+        "uri": "locked.pdf",
+        "file_bytes": (_PDF_FIXTURES / "user_password.pdf").read_bytes(),
+        "content-type": "application/pdf",
+        "sha256": "aabbcc",
+        "metadata": {},
+    }
+    with patch("soliplex.agents.scm.app.get_data", AsyncMock(return_value=[row])):
+        with pre_process.activate(_pdf_check_run(source)) as run:
+            first = await scm_app.load_inventory(SCM.GITEA, "test", "admin", source=source)
+            second = await scm_app.load_inventory(SCM.GITEA, "test", "admin", source=source)
+
+    assert first["errors"] == []
+    assert [r["uri"] for r in first["to_process"]] == ["locked.pdf"]
+    assert second["to_process"] == []
+    assert len(run.skipped) == 1
+    assert not (local_store.source_dir(source) / "locked.pdf").exists()
 
 
 def _failing_sync_provider(**overrides):

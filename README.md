@@ -179,6 +179,10 @@ AUTH_TRUST_PROXY_HEADERS=false
 MANIFEST_DIR=/path/to/manifests
 # SCHEDULER_RECONCILE_CRON="*/1 * * * *"   # how often the dir is rescanned
 
+# Pre-process spool: where each document is staged while its pre-process
+# steps run (default: system temp dir; needs room for the largest document)
+# PRE_PROCESS_SPOOL_DIR=/var/lib/ingester/spool
+
 # haiku-rag loading (runs `haiku-ingester run-batch` after each manifest run)
 HAIKU_LOAD_ENABLED=false
 LANCEDB_DIR=/var/lib/lancedb          # read by the haiku-rag config, which
@@ -718,6 +722,8 @@ Top-level fields:
   - **extensions**: File extensions to include (overrides the global `EXTENSIONS` setting).
   - **delete_stale**: Remove locally-stored documents that no longer appear in any component (default: true). See [Stale Document Removal](#stale-document-removal) below.
   - **haiku_config**: Override the haiku-rag config file used when loading this manifest's source. Absolute paths are used as-is; relative values resolve under `HAIKU_PATH`. Defaults to `${HAIKU_PATH}/haiku.rag.default.yaml`. See [haiku-rag Loading](#haiku-rag-loading).
+  - **pre_run**: Ordered steps run once before any component; one may skip the run. See [Pre-run steps](#pre-run-steps) below.
+  - **pre_process**: Ordered steps run on each new or changed document before it is stored; one may skip or modify it. None run unless listed. See [Pre-process steps](#pre-process-steps) below.
   - **post_process**: Ordered callbacks run after the haiku-rag load completes. See [Post-process callbacks](#post-process-callbacks) below.
 - **components** (required): List of ingestion components (see below).
 
@@ -1124,6 +1130,218 @@ doubles as a config check. Add `--json` for the full per-target detail
 > serializes loads within that process. Run maintenance during a quiet
 > window, or with the scheduler stopped.
 
+#### Manifest hooks
+
+A manifest can run three kinds of optional, ordered steps, named for when they
+fire:
+
+| Hook | Fires | Once per | Can stop |
+| --- | --- | --- | --- |
+| [`pre_run`](#pre-run-steps) | before any component runs | manifest run | the whole run (SKIP) |
+| [`pre_process`](#pre-process-steps) | inside each document write, before it is stored | new or changed document | that document (SKIP) |
+| [`post_process`](#post-process-callbacks) | after the haiku-ingester load | load | nothing |
+
+```text
+pre_run steps ─► components ─┬─► write ─► pre_process steps ─► store
+                             │   (per new / changed document)
+                             └─► stale reconcile ─► haiku load ─► post_process
+```
+
+Every step names a `method` -- a dotted import path, `pkg.mod:func` or
+`pkg.mod.func`, importable in the agent's environment -- plus optional
+`kwargs`. All `pre_run` and `pre_process` methods are imported before the run
+starts, so a typo fails the manifest before any step (a "starting"
+notification, say) has run.
+
+#### Pre-run steps
+
+`config.pre_run` runs once, before any component, for notifications and
+pre-checks. Each step is called as `method(context, **kwargs)`, where
+`context` has `manifest` (a copy -- a step cannot change what runs), `load`
+(the source's resolved download target, store and sidecars) and `started_at`.
+
+```yaml
+config:
+  pre_run:
+    - method: soliplex.agents.manifest.pre_run_steps:notify_webhook
+      kwargs:
+        url_secret: INGEST_WEBHOOK_URL            # docker secret / env var
+        secret_headers: { Authorization: INGEST_WEBHOOK_TOKEN }
+      on_error: continue      # a failed notification must not block ingestion
+      timeout: 15
+    - method: soliplex.agents.manifest.pre_run_steps:check_free_space
+      kwargs: { min_free_mb: 2048 }
+```
+
+A step returns `"continue"` (or `None`) to carry on, or `"skip"` to call the
+run off -- optionally with a message, as `("skip", "maintenance window")`. Use
+`PreRunStatus` from `soliplex.agents.manifest.pre_run` for the values.
+
+- **A skipped run does nothing:** no component, no stale reconcile, no
+  pre-processing, and no haiku load -- so no post-process either. The next
+  scheduled run happens as normal. `si-agent manifest run` prints the
+  manifest as `SKIPPED by <method>: <message>` and still exits `0`.
+- **`on_error`** decides what a step that raises (or outlives its `timeout`)
+  means: `fail` (the default) fails the manifest like a crashing component;
+  `skip` turns it into a skip; `continue` logs it and moves on.
+- **`timeout`** (seconds, default 300, `null` for none) keeps a slow webhook
+  from holding up the single-worker manifest queue. An async step is
+  cancelled; a sync step runs in a thread and cannot be interrupted, so the
+  wait is abandoned while the thread finishes.
+- **Outcomes are kept** in the source's state DB for the last 100 runs:
+  `si-agent manifest pre-run-report <path|all> [--status skip] [--since <iso>]`
+  answers "why didn't this source update last night?".
+
+Built-in steps (`soliplex.agents.manifest.pre_run_steps`):
+
+- **`notify_webhook`** POSTs `{"event": "manifest.started", "manifest_id",
+  "manifest_name", "source", "started_at", "download_uri"}` as JSON. Give
+  `url`, or `url_secret` naming a docker secret / env var that holds it
+  (incoming-webhook URLs are credentials); `headers` are sent as written,
+  `secret_headers` values are resolved like an SCM `auth_token`. A non-2xx
+  response raises, so pair it with `on_error: continue`.
+- **`check_free_space`** skips the run when the download directory (local
+  store) or the pre-process spool directory has less than `min_free_mb` free
+  (`include_spool: false` checks only the former). An S3 store has nothing to
+  check and is reported as such.
+
+Writing your own is a few lines -- for example, a maintenance-window flag:
+
+```python
+from pathlib import Path
+
+from soliplex.agents.manifest.pre_run import PreRunStatus
+
+
+def unless_paused(context, *, flag="/etc/ingester/paused"):
+    if Path(flag).exists():
+        return PreRunStatus.SKIP, f"paused by {flag}"
+    return PreRunStatus.CONTINUE
+```
+
+#### Pre-process steps
+
+`config.pre_process` runs on **each new or changed document** -- unchanged
+documents are never fetched, so they are never pre-processed -- after it is
+downloaded and **before** it is stored. Every agent writes through the same
+call, so the steps apply to `fs`, `scm`, `webdav` and `web` components alike.
+
+```yaml
+config:
+  pre_process:
+    - method: soliplex.agents.manifest.pre_processors:check_pdf_password
+      mime_types: [application/pdf]
+      kwargs: { skip_invalid: true, skip_owner_restricted: false }
+```
+
+Each document is spooled to a private temp directory first, and each step is
+called as `method(document, **kwargs)`. `document` carries `source`, `uri`,
+`key` (its path in the store), `mime_type`, `path` (the spooled file -- treat
+it as read-only), `workdir` (scratch space for output), `sha256` (of `path`),
+and `read_bytes()`. Steps therefore see a local file whichever store the
+document is headed for, so path-based tools (qpdf, ocrmypdf, pdfium by path)
+work unchanged with S3. A step that also accepts `context` receives the
+source's resolved store.
+
+A step answers with one of:
+
+| Return | Effect |
+| --- | --- |
+| `"continue"` / `None` | Nothing to do. |
+| `"modified"`, with new content | Later steps see the new content, and it is what gets stored (and described by the `.meta.json`). Logged at INFO. |
+| `"skip"` | The document is **not stored**. Any version already stored at its path is deleted (the next load drops it from the index). Later steps do not run. Logged at INFO. |
+
+Any of these may carry a message for the log and the audit:
+`return PreProcessStatus.SKIP, "password protected"`. MODIFIED needs the new
+content, so it is returned as a `PreProcessResult`:
+
+```python
+from soliplex.agents.manifest.pre_process import PreProcessResult
+from soliplex.agents.manifest.pre_process import PreProcessStatus
+
+
+def redact(document):
+    text = document.read_bytes().decode("utf-8")
+    cleaned = text.replace("CONFIDENTIAL", "")
+    if cleaned == text:
+        return PreProcessStatus.CONTINUE
+    return PreProcessResult(PreProcessStatus.MODIFIED, "removed markings", data=cleaned.encode("utf-8"))
+```
+
+Give exactly one of `data=` (bytes) or `path=` (a file the step wrote,
+normally under `document.workdir`; relative paths resolve against it). A
+MODIFIED whose content is byte-for-byte unchanged counts as CONTINUE.
+`metadata={...}` is merged into the document's `.meta.json` under
+`metadata.pre_process.<method>`.
+
+- **`mime_types`** limits a step to documents of those detected types --
+  the type the document is stored under, not its URI's extension (see [File
+  Typing and Filtering](#file-typing-and-filtering)). Omit it to run on
+  everything.
+- **Nothing runs unless listed.** There are no default steps: a manifest
+  without `pre_process` stores every document as fetched. To check PDFs or
+  fix AsciiDoc, list the built-in steps below.
+- **`on_error`** decides what a step that raises (or returns something
+  invalid) means: `continue` (the default) logs it and keeps the document as
+  it stood before that step; `skip` skips the document; `fail` fails that
+  document's write, which the agent records like any download error -- no
+  state row, retried next run, and the stale reconcile is skipped for the run.
+- **A skipped document still gets its state row,** so it is not fetched again
+  until it changes upstream (the reconcile tolerates its absence). After
+  changing a step, `si-agent manifest reprocess <path|all> [--status
+  skip|modified|continue|error|all] [--method <dotted>] [--dry-run]` forgets
+  the matching documents so the next run fetches and checks them again (the
+  default is `--status skip`). For an incremental SCM source this also costs
+  one full listing.
+- **Steps run one at a time** per run, even while webdav downloads
+  concurrently -- pdfium is not thread-safe, and it bounds the spool to about
+  one document. Sync steps run in a worker thread so the event loop stays
+  responsive.
+- **The spool** is `PRE_PROCESS_SPOOL_DIR` (default: the system temp dir) and
+  needs room for the largest document. In containers `/tmp` is often tmpfs
+  (RAM); point it at a volume for large corpora. Agents still hold each
+  downloaded document in memory, so spooling does not lower peak memory.
+
+Built-in steps (`soliplex.agents.manifest.pre_processors`):
+
+- **`check_pdf_password`** skips PDFs pdfium cannot open without a password
+  (`password protected`). Other open failures (truncated, not a PDF) are
+  skipped as `unreadable PDF: ...` unless `skip_invalid: false`. A PDF
+  encrypted with an owner password only opens fine -- printing or copying may
+  be restricted -- so it is kept, with a message, unless
+  `skip_owner_restricted: true`.
+- **`fix_asciidoc`** rewrites AsciiDoc that docling's parser cannot handle:
+  block attribute lines before a table, cell-format specifiers before pipes,
+  `include::` / `image::` directives, and blank lines inside tables.
+
+##### Inspecting pre-process outcomes
+
+Every pre-processed write is recorded in the source's state DB:
+
+- `pre_process_documents` -- the latest outcome per document: status,
+  deciding method and message, `input_sha256` (the downloaded bytes),
+  `output_sha256` (what was stored; empty when skipped),
+  `previous_input_sha256` and `hash_changed_at`;
+- `pre_process` -- the latest outcome per (document, step), with each step's
+  input and output hash.
+
+The hashes are SHA-256 of the bytes pre-processing saw and stored -- not the
+upstream hash the agents use for change detection (SHA3-256 for SCM, and
+sometimes absent for webdav). A re-fetch with identical content keeps
+`hash_changed_at`; a real change records the old hash and logs
+`content of <uri> changed (<old> -> <new>)`, and a changed document that is
+skipped again logs `new version of <uri> still skipped`. Audit rows are
+removed with the document's state row.
+
+```bash
+# Everything skipped, and why
+si-agent manifest pre-process-report all --status skip
+# Documents whose content changed since a date
+si-agent manifest pre-process-report my-manifest.yml --changed-since 2026-10-01
+# Every "password protected" document
+si-agent manifest pre-process-report all --message "password protected" --json
+```
+
 #### Post-process callbacks
 
 A manifest's `config.post_process` is an ordered list of callbacks invoked
@@ -1160,10 +1378,18 @@ config:
   sidecar facade for this source. A callback that needs to read what the
   manifest just downloaded takes `context` instead of rediscovering the
   storage layout from the environment.
-- **Load outcome (`ingester_exit_code`):** callbacks fire regardless of the
-  load result. The load's exit code (`0` on success, non-zero on failure,
-  `None` on timeout) is auto-injected as an `ingester_exit_code` kwarg for
-  callables that accept one, so a step can decide what to do on failure.
+- **Load outcome (`ingester`):** callbacks fire regardless of the load
+  result. The load's outcome is auto-injected as an `ingester` kwarg for
+  callables that accept one: a `HaikuRun` with `returncode` (`0` on success,
+  non-zero on failure, `None` on timeout), `timed_out`, and the last 1 MiB of
+  `stdout` / `stderr` (the full output is in the log, in parts). The exit code
+  alone is still injected as `ingester_exit_code`, so existing callbacks keep
+  working.
+- **Run outcome (`run_result`):** likewise, the result of the manifest run
+  that queued the load -- its `summary` counts, per-component results,
+  `pre_run` and `pre_process` outcomes. Under the server, loads are queued, so
+  a later run of the same manifest may already have started by the time a
+  load's callbacks fire.
 - **Terminate on error:** a step that raises is logged and the exception
   propagates — the remaining steps do **not** run. The per-step outcomes are
   returned under the load result's `post_process` key only when every step
@@ -1172,13 +1398,21 @@ config:
 - **Requires a load:** post-process only runs when a load runs — it is skipped
   with `--no-load`.
 
-Built-in callback: `soliplex.agents.manifest.post_processors:vacuum` runs
-LanceDB maintenance (optimize + clean up table history) on the per-source
-database. It shells out to `haiku-rag vacuum` as a subprocess (like the load) —
-keeping LanceDB's async runtime out of the agent's event loop and making the
-pass killable via its `timeout` kwarg (default 1800s), so a stuck compaction
-can't hang the run. Retention comes from the haiku config's
-`storage.vacuum_retention_seconds`.
+Built-in callbacks (`soliplex.agents.manifest.post_processors`):
+
+- **`vacuum`** runs LanceDB maintenance (optimize + clean up table history) on
+  the per-source database. It shells out to `haiku-rag vacuum` as a subprocess
+  (like the load) — keeping LanceDB's async runtime out of the agent's event
+  loop and making the pass killable via its `timeout` kwarg (default 1800s),
+  so a stuck compaction can't hang the run. Retention comes from the haiku
+  config's `storage.vacuum_retention_seconds`.
+- **`notify_webhook`** POSTs `{"event": "load.finished", "source", "status",
+  "returncode", "timed_out", "summary", "manifest_id"}`, where `status` is
+  `ok`, `failed`, `timed_out` or `no_load`, plus `stderr_tail` (the last
+  `stderr_lines`, default 20) when the load failed or timed out. It takes the
+  same `url` / `url_secret` / `headers` / `secret_headers` as the
+  [pre-run](#pre-run-steps) version. A failed delivery raises, which stops the
+  chain, so list it last.
 
 **Note:** All commands support WebDAV credentials via environment variables (`WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD`) or command-line options (`--webdav-url`, `--webdav-username`, `--webdav-password`).
 
@@ -1194,6 +1428,7 @@ can't hang the run. Retention comes from the haiku config's
    - SCM sources: SHA3-256 hash for files, SHA256 for issues
 3. **Status Check**: The system checks which files are new or changed against the local sync state, so only new or changed files are processed
 4. **Write**: Each file is written to `<DOWNLOAD_DIR>/<source>/<source-relative-path>`, with a `<filename>.meta.json` sidecar (see [Metadata Sidecars](#metadata-sidecars)). The stored filename is given the extension implied by its detected MIME type (added when missing, replaced when it mismatches, left alone when already correct) — see [File Typing and Filtering](#file-typing-and-filtering)
+   - **Pre-process** (manifest runs): before the write, the manifest's `pre_process` steps check or rewrite the document; a skipped document is not written, and any earlier stored version is removed (see [Pre-process steps](#pre-process-steps))
 5. **State Update**: Content hashes (and, for SCM, the latest commit SHA) are recorded in local state
 6. **Stale Removal** (optional): When `delete_stale` is enabled, the download folder is reconciled against the source — documents no longer present (dropped from the listing, or 404 on fetch) are deleted, along with untracked orphan files (see [Stale Document Removal](#stale-document-removal))
 7. **haiku-rag Load** (optional): When `HAIKU_LOAD_ENABLED` is set, the downloaded documents are indexed into a per-source LanceDB database via `haiku-ingester` (see [haiku-rag Loading](#haiku-rag-loading))
@@ -1211,7 +1446,7 @@ written next to it. The sidecar records:
 | `ingestion_type` | Method used to fetch the document: `fs`, `webdav`, `scm`, or `web` |
 | `sha256` | SHA256 of the written bytes |
 | `size` | Size of the written bytes |
-| `metadata` | Any additional source-specific metadata |
+| `metadata` | Any additional source-specific metadata; pre-process steps add theirs under `metadata.pre_process.<method>` |
 | `source_url` | Full URL the document was fetched from (see below) |
 | `downloaded_time` | When the document was last written, ISO 8601 with a UTC offset (see below) |
 

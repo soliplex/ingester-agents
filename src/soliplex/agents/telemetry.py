@@ -56,6 +56,8 @@ COMPONENT_NAME = "component.name"
 COMPONENT_TYPE = "component.type"
 POST_PROCESS_METHOD = "post_process.method"
 POST_PROCESS_INDEX = "post_process.index"
+PRE_RUN_METHOD = "pre_run.method"
+PRE_RUN_INDEX = "pre_run.index"
 INGESTER_EXIT_CODE = "haiku.returncode"
 
 

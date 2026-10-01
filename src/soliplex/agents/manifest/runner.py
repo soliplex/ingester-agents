@@ -1,5 +1,6 @@
 """Manifest runner — load YAML manifests and dispatch components to agents."""
 
+import datetime
 import logging
 import tempfile
 from contextlib import contextmanager
@@ -375,7 +376,15 @@ def collect_inventory_uris(result: dict[str, Any]) -> list[dict[str, str]]:
 
 
 async def run_manifest(manifest: Manifest) -> dict:
-    """Run all components in a manifest.
+    """Run all components in a manifest, between its pre-run and pre-process hooks.
+
+    Every ``pre_run`` and ``pre_process`` method is imported first, so a typo
+    fails the run before any step -- a "starting" notification, say -- has
+    run. The ``pre_run`` steps then decide whether the run happens at all;
+    when one returns SKIP, nothing else runs and the result carries
+    ``skipped``. Otherwise the components run with this manifest's
+    pre-process steps active, so every document they write passes through
+    them (see :mod:`soliplex.agents.manifest.pre_process`).
 
     After every component has executed, if ``delete_stale`` is enabled
     in the manifest config **and** no component produced an error, a
@@ -388,9 +397,22 @@ async def run_manifest(manifest: Manifest) -> dict:
         manifest: Validated Manifest instance.
 
     Returns:
-        Dict with manifest id/name, per-component results list,
-        and optional delete_stale result.
+        Dict with manifest id/name, per-component results list, optional
+        delete_stale result, ``summary``, ``pre_run`` and ``pre_process``
+        outcomes, and ``skipped`` (``None`` unless a pre-run step skipped it).
+
+    Raises:
+        ImportError, AttributeError: when a hook's method cannot be imported.
+        PreRunFailed: when a pre-run step fails under ``on_error: fail``.
     """
+    from soliplex.agents.manifest import pre_process
+    from soliplex.agents.manifest import pre_run
+    from soliplex.agents.manifest.context import LoadContext
+
+    pre_run_steps = pre_run.resolve_steps(manifest)
+    pre_process_steps = pre_process.resolve_steps(manifest)
+    started_at = datetime.datetime.now(datetime.UTC).isoformat()
+
     target = manifest.get_download_target()
     logger.info(
         "Starting manifest '%s' (%s) with %d components -> %s",
@@ -399,7 +421,33 @@ async def run_manifest(manifest: Manifest) -> dict:
         len(manifest.components),
         target.base_uri,
     )
-    return await _run_components(manifest)
+    load = LoadContext.for_source(manifest.source)
+    pre_run_outcome = await pre_run.run_pre_run(manifest, pre_run_steps, load=load, started_at=started_at)
+    if pre_run_outcome["skipped"] is not None:
+        return {
+            "manifest_id": manifest.id,
+            "manifest_name": manifest.name,
+            "started_at": started_at,
+            "skipped": pre_run_outcome["skipped"],
+            "pre_run": pre_run_outcome["steps"],
+            "pre_process": None,
+            "results": [],
+            "delete_stale_result": None,
+            "summary": {"components": len(manifest.components), "skipped": True},
+        }
+    run = pre_process.PreProcessRun(
+        manifest_id=manifest.id,
+        source=manifest.source,
+        steps=pre_process_steps,
+        context=load,
+    )
+    with pre_process.activate(run):
+        result = await _run_components(manifest, run)
+    result["started_at"] = started_at
+    result["skipped"] = None
+    result["pre_run"] = pre_run_outcome["steps"]
+    result["pre_process"] = run.report()
+    return result
 
 
 def _component_type(component) -> str:
@@ -414,13 +462,15 @@ def _count(result: dict[str, Any], key: str) -> int:
     return len(value) if isinstance(value, list) else 0
 
 
-async def _run_components(manifest: Manifest) -> dict:
+async def _run_components(manifest: Manifest, run) -> dict:
     """Execute a manifest's components and reconcile.
 
     The returned ``summary`` is the one set of outcome counts for the run: the
     final log line reads it, and so can anything reporting on the run. A
     component *fails* when its handler raises; it finishes *with file errors*
     when it returns per-file ``errors``. Either makes the run a failure.
+    *run* is the active :class:`~soliplex.agents.manifest.pre_process.PreProcessRun`,
+    whose counts join the summary.
     """
     results: list[dict[str, Any]] = []
     summary = {
@@ -430,8 +480,11 @@ async def _run_components(manifest: Manifest) -> dict:
         "file_errors": 0,
         "ingested": 0,
         "not_found": 0,
-        "rejected": 0,
         "deleted": 0,
+        "pre_process_checked": 0,
+        "pre_process_skipped": 0,
+        "pre_process_modified": 0,
+        "pre_process_errors": 0,
         "delete_stale_skipped": False,
     }
     all_uri_hashes: list[dict[str, str]] = []
@@ -468,7 +521,6 @@ async def _run_components(manifest: Manifest) -> dict:
                 # "should exist" set so their local copies are deleted.
                 all_not_found.update(result.get("not_found", []))
                 summary["ingested"] += _count(result, "ingested")
-                summary["rejected"] += _count(result, "rejected")
                 results.append({"component": component.name, "result": result})
                 # Per-file transient errors (timeout/5xx) block the reconcile to
                 # stay safe, mirroring a raised component exception.
@@ -478,7 +530,6 @@ async def _run_components(manifest: Manifest) -> dict:
                         "component.ingested": _count(result, "ingested"),
                         "component.errors": file_errors,
                         "component.not_found": _count(result, "not_found"),
-                        "component.rejected": _count(result, "rejected"),
                     }
                 )
                 if file_errors:
@@ -529,18 +580,25 @@ async def _run_components(manifest: Manifest) -> dict:
 
     summary["deleted"] = len(delete_stale_result or [])
     summary["not_found"] = len(all_not_found)
+    summary["pre_process_checked"] = run.checked
+    summary["pre_process_skipped"] = len(run.skipped)
+    summary["pre_process_modified"] = len(run.modified)
+    summary["pre_process_errors"] = len(run.errors)
     # ERROR, not INFO, whenever anything failed: a level filter must find a run
     # whose files failed even though every component returned.
     failed = summary["component_errors"] or summary["file_errors"]
     logger.log(
         logging.ERROR if failed else logging.INFO,
-        "Manifest '%s' finished: %d components, %d component errors, %d file errors, %d not found (404), %d deleted",
+        "Manifest '%s' finished: %d components, %d component errors, %d file errors, %d not found (404), %d deleted, "
+        "%d pre-process skipped, %d modified",
         manifest.id,
         summary["components"],
         summary["component_errors"],
         summary["file_errors"],
         summary["not_found"],
         summary["deleted"],
+        summary["pre_process_skipped"],
+        summary["pre_process_modified"],
     )
 
     return {
@@ -566,7 +624,8 @@ async def run_manifests(path: str, load: bool = False) -> list[dict]:
     A failure while running or loading one manifest is isolated to that
     manifest: it is logged and recorded (an ``error`` on the result, or a
     ``haiku_load_error`` when the load/post-process step is the one that failed)
-    and the remaining manifests still run.
+    and the remaining manifests still run. A manifest a pre-run step skipped is
+    returned with ``skipped`` set and is not loaded.
 
     Returns:
         List of per-manifest result dicts.
@@ -590,14 +649,55 @@ async def run_manifests(path: str, load: bool = False) -> list[dict]:
                 telemetry.fail(span, f"manifest run failed: {type(e).__name__}", e)
                 continue
             telemetry.record_summary(span, result["summary"])
+            if result.get("skipped"):
+                # A pre-run step called the run off: nothing to load.
+                results.append(result)
+                continue
             if load:
                 from soliplex.agents.manifest import haiku_loader
 
                 try:
-                    result["haiku_load"] = await haiku_loader.run_load(manifest)
+                    result["haiku_load"] = await haiku_loader.run_load(manifest, run_result=dict(result))
                 except Exception as e:
                     logger.exception("haiku load failed for manifest '%s' (%s)", manifest.id, manifest.name)
                     result["haiku_load_error"] = str(e)
                     telemetry.fail(span, f"haiku load failed: {type(e).__name__}", e)
             results.append(result)
     return results
+
+
+def pre_process_report(
+    manifest: Manifest,
+    *,
+    status: str | None = None,
+    message: str | None = None,
+    changed_since: str | None = None,
+) -> list[dict]:
+    """The latest pre-process outcome per document of *manifest*'s source.
+
+    Filters are those of :func:`~soliplex.agents.local_state.list_pre_process`.
+    """
+    return local_state.list_pre_process(manifest.source, status=status, message=message, changed_since=changed_since)
+
+
+def pre_run_report(manifest: Manifest, *, status: str | None = None, since: str | None = None) -> list[dict]:
+    """Recorded pre-run outcomes for *manifest*'s source, newest run first."""
+    return local_state.list_pre_run(manifest.source, status=status, since=since)
+
+
+def reprocess(
+    manifest: Manifest,
+    *,
+    status: str | None = None,
+    method: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Make the next run of *manifest* re-fetch and re-pre-process matching documents.
+
+    See :func:`~soliplex.agents.local_state.reprocess`.
+
+    Returns:
+        ``{"manifest_id", "source", "uris", "dry_run"}``.
+    """
+    uris = local_state.reprocess(manifest.source, status=status, method=method, dry_run=dry_run)
+    return {"manifest_id": manifest.id, "source": manifest.source, "uris": uris, "dry_run": dry_run}

@@ -13,6 +13,8 @@ from soliplex.agents.config import ContentFilter
 from soliplex.agents.config import FSComponent
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import ManifestConfig
+from soliplex.agents.config import PreProcessStep
+from soliplex.agents.config import PreRunStep
 from soliplex.agents.config import Schedule
 from soliplex.agents.config import SCMComponent
 from soliplex.agents.config import WebComponent
@@ -471,3 +473,46 @@ def test_download_store_is_rejected_with_an_explanation():
 def test_haiku_config_override_is_still_supported():
     manifest = Manifest(**_raw(config={"haiku_config": "haiku.rag.s3.yaml"}))
     assert manifest.config.haiku_config == "haiku.rag.s3.yaml"
+
+
+# --- manifest hooks ---
+
+
+class TestHookSteps:
+    def _manifest(self, config):
+        return Manifest(id="m", name="M", source="s", config=config, components=[{"type": "fs", "name": "c", "path": "/x"}])
+
+    def test_defaults(self):
+        config = ManifestConfig()
+        assert config.pre_run == []
+        assert config.pre_process == []
+
+    def test_pre_run_step_defaults_and_values(self):
+        step = PreRunStep(method="pkg:fn")
+        assert (step.kwargs, step.on_error, step.timeout) == ({}, "fail", 300)
+        assert PreRunStep(method="pkg:fn", timeout=None).timeout is None
+
+    @pytest.mark.parametrize("bad", [{"timeout": 0}, {"on_error": "ignore"}, {"metod": "typo"}])
+    def test_pre_run_step_rejects(self, bad):
+        with pytest.raises(PydanticValidationError):
+            PreRunStep(method="pkg:fn", **bad)
+
+    def test_pre_process_step_defaults(self):
+        step = PreProcessStep(method="pkg:fn")
+        assert (step.kwargs, step.mime_types, step.on_error) == ({}, None, "continue")
+
+    @pytest.mark.parametrize("bad", [{"mime_type": ["application/pdf"]}, {"extensions": ["pdf"]}, {"on_error": "x"}])
+    def test_pre_process_step_rejects(self, bad):
+        with pytest.raises(PydanticValidationError):
+            PreProcessStep(method="pkg:fn", **bad)
+
+    def test_yaml_shaped_config(self):
+        manifest = self._manifest(
+            {
+                "pre_run": [{"method": "a:b", "kwargs": {"x": 1}, "on_error": "continue", "timeout": 15}],
+                "pre_process": [{"method": "c:d", "mime_types": ["application/pdf"]}],
+            }
+        )
+        assert manifest.config.pre_run[0].timeout == 15
+        assert manifest.config.pre_process[0].mime_types == ["application/pdf"]
+        assert self._manifest({"pre_process": []}).config.pre_process == []

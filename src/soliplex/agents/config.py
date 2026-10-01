@@ -140,6 +140,11 @@ class Settings(BaseSettings):
     # Manifest settings
     manifest_dir: str | None = None  # Directory with manifest .yml files for scheduling
 
+    # Pre-process spool: where each document is staged while its pre-process
+    # steps run, before it is uploaded. Needs room for the largest document.
+    # Default (None) is the system temp dir -- often tmpfs (RAM) in containers.
+    pre_process_spool_dir: str | None = None
+
     # haiku-rag load settings (run after each manifest run)
     haiku_load_enabled: bool = False  # Queue a haiku-rag load after each manifest run
     lancedb_dir: str | None = None  # Base dir for per-source .lancedb databases (LANCEDB_DIR)
@@ -461,13 +466,41 @@ class PostProcessStep(_ManifestModel):
     ``method`` is a dotted import path (``pkg.mod:func`` or ``pkg.mod.func``)
     to a callable importable in the agent's environment; ``kwargs`` are passed
     through as keyword arguments. Steps run in order after the load, and the
-    runner fills in ``config``, ``context`` and ``ingester_exit_code`` for a
-    callable that accepts them -- see
+    runner fills in ``config``, ``context``, ``ingester``, ``ingester_exit_code``
+    and ``run_result`` for a callable that accepts them -- see
     :mod:`soliplex.agents.manifest.post_process`.
     """
 
     method: str
     kwargs: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreRunStep(_ManifestModel):
+    """One step run once, before any component, invoked as ``method(context, **kwargs)``.
+
+    A step may return SKIP to call the run off (no components, no load, no
+    post-process). ``on_error`` decides what a raising or timed-out step means;
+    see :mod:`soliplex.agents.manifest.pre_run`.
+    """
+
+    method: str
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+    on_error: Literal["continue", "skip", "fail"] = "fail"
+    timeout: float | None = Field(default=300, gt=0)  # seconds; None = no limit
+
+
+class PreProcessStep(_ManifestModel):
+    """One step run on each new or changed document, before it is stored.
+
+    Invoked as ``method(document, **kwargs)``; ``mime_types`` limits it to
+    documents of those detected types (``None`` = every document). See
+    :mod:`soliplex.agents.manifest.pre_process`.
+    """
+
+    method: str
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+    mime_types: list[str] | None = None
+    on_error: Literal["continue", "skip", "fail"] = "continue"
 
 
 class ManifestConfig(_ManifestModel):
@@ -477,6 +510,12 @@ class ManifestConfig(_ManifestModel):
     metadata: dict[str, str] | None = None
     delete_stale: bool = True
     haiku_config: str | None = None  # Per-manifest haiku-rag config (abs path, or filename under HAIKU_PATH)
+    # Ordered steps run once before any component (see
+    # soliplex.agents.manifest.pre_run).
+    pre_run: list[PreRunStep] = Field(default_factory=list)
+    # Ordered steps run on each new or changed document before it is stored
+    # (see soliplex.agents.manifest.pre_process).
+    pre_process: list[PreProcessStep] = Field(default_factory=list)
     # Ordered callbacks run after the haiku-rag load completes (see
     # soliplex.agents.manifest.post_process).
     post_process: list[PostProcessStep] = Field(default_factory=list)

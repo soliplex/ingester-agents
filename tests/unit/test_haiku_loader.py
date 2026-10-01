@@ -292,7 +292,11 @@ class TestRunLoad:
             ) as mock_pp,
         ):
             result = await haiku_loader.run_load(manifest)
-        mock_pp.assert_awaited_once_with(manifest, ingester_exit_code=0)
+        mock_pp.assert_awaited_once()
+        assert mock_pp.await_args.args == (manifest,)
+        assert mock_pp.await_args.kwargs["ingester"].returncode == 0
+        assert mock_pp.await_args.kwargs["ingester"].stdout.strip() == "ok"
+        assert mock_pp.await_args.kwargs["run_result"] is None
         assert result["post_process"] == [{"method": "pkg:fn", "ok": True, "error": None}]
 
     @pytest.mark.asyncio
@@ -313,7 +317,9 @@ class TestRunLoad:
             ) as mock_pp,
         ):
             result = await haiku_loader.run_load(manifest)
-        mock_pp.assert_awaited_once_with(manifest, ingester_exit_code=1)
+        mock_pp.assert_awaited_once()
+        assert mock_pp.await_args.kwargs["ingester"].returncode == 1
+        assert "x" in mock_pp.await_args.kwargs["ingester"].stderr
         assert result["post_process"] == [{"method": "pkg:fn", "ok": True, "error": None}]
 
     @pytest.mark.asyncio
@@ -337,7 +343,9 @@ class TestRunLoad:
             ) as mock_pp,
         ):
             result = await haiku_loader.run_load(manifest)
-        mock_pp.assert_awaited_once_with(manifest, ingester_exit_code=None)
+        mock_pp.assert_awaited_once()
+        assert mock_pp.await_args.kwargs["ingester"].returncode is None
+        assert mock_pp.await_args.kwargs["ingester"].timed_out is True
         assert result["timed_out"] is True
         assert result["post_process"] == [{"method": "pkg:fn", "ok": True, "error": None}]
 
