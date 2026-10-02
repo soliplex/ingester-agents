@@ -45,6 +45,8 @@ si-agent manifest run <path> --load     # Also run a haiku-rag load per manifest
 si-agent manifest migrate [path|all]    # Run pending haiku-rag DB migrations
 si-agent manifest vacuum [path|all]     # Compact the haiku-rag databases
 si-agent manifest vacuum --dry-run      # Print the commands without running them
+si-agent manifest backfill-metadata --missing page_count  # Re-run metadata providers on indexed docs
+si-agent manifest backfill-metadata --check  # Report what a back-fill would change
 
 # REST API server
 si-agent serve
@@ -72,6 +74,8 @@ src/soliplex/agents/
 ├── store.py            # DownloadTarget + DocumentStore (local | s3)
 ├── sidecar/            # Sidecar kinds (.meta.json): format + addressing
 ├── local_store.py      # Writes documents + sidecars through the store
+├── haiku_metadata.py   # haiku-rag metadata providers (sidecar, PDF, combined)
+├── haiku_backfill.py   # Subprocess re-running metadata providers on indexed docs
 ├── common/config.py    # Shared validation utilities
 ├── fs/                 # Filesystem agent
 │   ├── cli.py          # CLI commands
@@ -84,7 +88,7 @@ src/soliplex/agents/
 ├── manifest/           # Manifest runner
 │   ├── runner.py       # YAML loading, validation, agent dispatch
 │   ├── haiku_loader.py # haiku-rag batch load subprocess
-│   ├── haiku_maint.py  # haiku-rag migrate/vacuum subprocesses
+│   ├── haiku_maint.py  # haiku-rag migrate/vacuum/backfill-metadata subprocesses
 │   └── cli.py          # CLI commands
 ├── scm/                # SCM agent
 │   ├── cli.py          # CLI commands
@@ -170,6 +174,26 @@ reusing the load's config/DB/env resolution. `all` (the default) means
 every manifest in `MANIFEST_DIR`. Sequential, deduplicated by database, no
 post-process callbacks; `--dry-run` prints the command lines instead of
 running them. See `manifest/haiku_maint.py`.
+
+`si-agent manifest backfill-metadata` is a third verb on the same path, but
+runs `python -m soliplex.agents.haiku_backfill` instead of `haiku-rag`: it
+re-runs each haiku source's `metadata_provider` over documents already
+indexed (`--missing KEY` / `--filter` scope it in LanceDB, `--check` writes
+nothing). `post_processors.backfill_metadata` is the post-process form and
+refuses to run unscoped unless given `full: true`. PDF attachments
+(`parent_uri`, no `source_id`) are filled from their top-level ancestor's
+bytes and must never gain a `source_id`; providers with `backfill = False`
+are skipped.
+
+### haiku-rag Metadata Providers
+
+`haiku_metadata.py` registers `haiku.rag.metadata_providers` entry points
+that `haiku-ingester` calls per new or changed document:
+`soliplex-sidecar-metadata` (the `.meta.json` sidecar, flattened),
+`soliplex-pdf-metadata` (`page_count`, `pdf_*` information via pypdfium2,
+under haiku-rag's `PDFIUM_LOCK`) and `soliplex-metadata` (both). A haiku
+source names one provider. Providers never raise for a bad document --
+haiku-rag would dead-letter it -- they return `{}` and log.
 
 ### Status Checking
 

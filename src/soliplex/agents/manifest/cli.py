@@ -103,9 +103,27 @@ def _report_results(results: list[dict]) -> None:
         elif result["timed_out"]:
             print(f"{source}: {verb} TIMED OUT after {result['timeout']}s")
         elif result["returncode"] == 0:
-            print(f"{source}: {verb} ok -> {result['db']}")
+            print(f"{source}: {verb} ok -> {result['db']}{_summary_text(result)}")
         else:
-            print(f"{source}: {verb} FAILED (rc={result['returncode']}) -> {result['db']}")
+            print(f"{source}: {verb} FAILED (rc={result['returncode']}) -> {result['db']}{_summary_text(result)}")
+            for error in (result.get("summary") or {}).get("errors", []):
+                print(f"  {error['uri']}: {error['error']}")
+
+
+def _summary_text(result: dict) -> str:
+    """A back-fill's counts, as a suffix for its outcome line."""
+    summary = result.get("summary")
+    if not summary:
+        return ""
+    updated = "would update" if summary["check"] else "updated"
+    if summary["attachments_updated"]:
+        updated += f" ({summary['attachments_updated']} attachments)"
+    skipped = summary["skipped_no_provider"] + summary["skipped_provider_opt_out"] + summary["skipped_not_selected"]
+    return (
+        f" (scanned {summary['scanned']}: {summary['updated']} {updated}, {summary['unchanged']} unchanged, "
+        f"{summary['stale']} stale, {summary['orphaned']} orphaned, {skipped} skipped, "
+        f"{len(summary['errors'])} errors)"
+    )
 
 
 def _any_failed(results: list[dict], dry_run: bool) -> bool:
@@ -118,10 +136,12 @@ def _any_failed(results: list[dict], dry_run: bool) -> bool:
     return False
 
 
-def _maintenance(verb: str, path: str, do_json: bool, timeout: float | None, dry_run: bool) -> None:
-    """Shared implementation of the `migrate` and `vacuum` verbs."""
+def _maintenance(
+    verb: str, path: str, do_json: bool, timeout: float | None, dry_run: bool, options: dict | None = None
+) -> None:
+    """Shared implementation of the `migrate`, `vacuum` and `backfill-metadata` verbs."""
     try:
-        results = asyncio.run(haiku_maint.run_maintenance(verb, path, timeout=timeout, dry_run=dry_run))
+        results = asyncio.run(haiku_maint.run_maintenance(verb, path, timeout=timeout, dry_run=dry_run, options=options))
     except FileNotFoundError as e:
         print(f"Error: {e}")
         raise SystemExit(1) from None
@@ -176,6 +196,67 @@ def vacuum(
 ):
     """Optimize and compact each manifest source's haiku-rag database."""
     _maintenance("vacuum", path, do_json, timeout, dry_run)
+
+
+@cli.command(haiku_maint.BACKFILL_VERB)
+def backfill_metadata(
+    path: str = typer.Argument(runner.ALL_MANIFESTS, help=_PATH_HELP),
+    missing: list[str] = typer.Option(
+        [],
+        "--missing",
+        help="Only documents lacking this metadata key, e.g. page_count (repeatable)",
+    ),
+    content_types: list[str] = typer.Option(
+        [],
+        "--content-type",
+        help="Only documents of this content type, e.g. application/pdf (repeatable)",
+    ),
+    doc_filter: str = typer.Option(None, "--filter", help="LanceDB WHERE clause scoping which documents run"),
+    db_name: str = typer.Option(
+        None,
+        "--db-name",
+        help="Database in the config's lancedb.databases; only needed when it places more than one",
+    ),
+    batch_size: int = typer.Option(None, "--batch-size", min=1, help="Pagination size (default: 500)"),
+    check: bool = typer.Option(False, "--check", help="Report what would change; write nothing"),
+    attachments: bool = typer.Option(
+        True, "--attachments/--no-attachments", help="Fill PDF attachments too, from their parent document"
+    ),
+    do_json: bool = typer.Option(False, "--json", help="Output results as JSON"),
+    timeout: float = typer.Option(
+        None,
+        "--timeout",
+        help="Seconds before a back-fill is killed (default: HAIKU_MAINTENANCE_TIMEOUT)",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print the command lines that would run, without running them",
+    ),
+):
+    """Re-run each source's haiku-rag metadata_provider over documents already indexed.
+
+    Fetches each selected document again through its haiku source, calls the
+    provider, and merges the result into the document's metadata without
+    re-ingesting it. --check reports what would change; --dry-run only prints
+    the command. Do not run it while a load for the same source is running.
+    """
+    _maintenance(
+        haiku_maint.BACKFILL_VERB,
+        path,
+        do_json,
+        timeout,
+        dry_run,
+        {
+            "missing": missing,
+            "content_types": content_types,
+            "doc_filter": doc_filter,
+            "db_name": db_name,
+            "batch_size": batch_size,
+            "check": check,
+            "attachments": attachments,
+        },
+    )
 
 
 def _resolve(path: str) -> list:

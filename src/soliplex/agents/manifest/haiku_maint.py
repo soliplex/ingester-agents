@@ -11,13 +11,26 @@ and the subprocess inherits the parent environment plus an explicit
 ``SOURCE`` / ``DOWNLOAD_DIR`` so the haiku-rag config's ``${VAR}``
 interpolation resolves the same way it does for a load.
 
+``backfill-metadata`` is the one verb that is not haiku-rag's own: it runs
+:mod:`soliplex.agents.haiku_backfill`, which re-runs each source's
+``metadata_provider`` over documents already indexed. It goes through the same
+planning, deduplication, environment and subprocess handling, only its command
+line differs (:func:`build_backfill_argv`), and its result carries the
+``summary`` the subprocess prints.
+
 Running out-of-process keeps LanceDB's async runtime out of the agent's event
 loop (avoiding an in-process deadlock) and makes a stuck compaction killable.
 """
 
+import json
 import logging
 import shlex
+import sys
+from collections.abc import Iterable
+from collections.abc import Mapping
+from typing import Any
 
+from soliplex.agents import haiku_backfill
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import settings
 from soliplex.agents.manifest.context import LoadContext
@@ -29,7 +42,8 @@ from soliplex.agents.manifest.haiku_process import run_haiku
 logger = logging.getLogger(__name__)
 
 # The maintenance verbs exposed as `si-agent manifest <verb>`.
-MAINTENANCE_VERBS = ("migrate", "vacuum")
+BACKFILL_VERB = "backfill-metadata"
+MAINTENANCE_VERBS = ("migrate", "vacuum", BACKFILL_VERB)
 
 
 def build_maintenance_argv(verb: str, haiku_cfg: str | None, db: str, source: str) -> list[str]:
@@ -65,6 +79,63 @@ def build_maintenance_argv(verb: str, haiku_cfg: str | None, db: str, source: st
     return argv
 
 
+def build_backfill_argv(
+    haiku_cfg: str | None,
+    *,
+    missing: Iterable[str] = (),
+    content_types: Iterable[str] = (),
+    doc_filter: str | None = None,
+    db_name: str | None = None,
+    batch_size: int | None = None,
+    check: bool = False,
+    attachments: bool = True,
+) -> list[str]:
+    """Build the :mod:`soliplex.agents.haiku_backfill` command argv.
+
+    Runs with this interpreter, so the subprocess sees the same haiku-rag and
+    the same registered metadata providers. Each value is one ``--opt=value``
+    token, so nothing in it can become an extra argument.
+
+    Args:
+        haiku_cfg: Resolved haiku-rag config path, or ``None`` to let the
+            subprocess fall back to haiku-rag's config discovery.
+        missing: Only documents lacking one of these metadata keys.
+        content_types: Only documents of one of these content types.
+        doc_filter: A LanceDB ``WHERE`` clause, AND-ed with *missing*'s.
+        db_name: The database to open, when the config places several.
+        batch_size: Pagination size for the document listing.
+        check: Report what would change; write nothing.
+        attachments: Fill PDF attachments too (from their parent).
+    """
+    argv = [sys.executable, "-m", haiku_backfill.__name__]
+    if haiku_cfg is not None:
+        argv.append(f"--config={haiku_cfg}")
+    if db_name is not None:
+        argv.append(f"--db-name={db_name}")
+    argv += [f"--missing={key}" for key in missing]
+    argv += [f"--content-type={content_type}" for content_type in content_types]
+    if doc_filter is not None:
+        argv.append(f"--filter={doc_filter}")
+    if batch_size is not None:
+        argv.append(f"--batch-size={batch_size}")
+    if check:
+        argv.append("--check")
+    if not attachments:
+        argv.append("--no-attachments")
+    return argv
+
+
+def parse_backfill_summary(stdout: str) -> dict | None:
+    """The counts a back-fill printed last, or ``None`` when it printed none."""
+    for line in reversed(stdout.splitlines()):
+        if line.startswith(haiku_backfill.SUMMARY_PREFIX):
+            try:
+                return json.loads(line[len(haiku_backfill.SUMMARY_PREFIX) :])
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
 def _maintenance_env(source: str, verb: str) -> dict[str, str]:
     """Build the subprocess environment for a maintenance verb.
 
@@ -87,6 +158,7 @@ async def run_verb(
     haiku_cfg: str | None,
     timeout: float | None = None,
     dry_run: bool = False,
+    options: Mapping[str, Any] | None = None,
 ) -> dict:
     """Run one haiku-rag maintenance verb against one source's database.
 
@@ -103,12 +175,16 @@ async def run_verb(
         timeout: Seconds before the subprocess is killed; defaults to
             ``settings.haiku_maintenance_timeout``.
         dry_run: Resolve everything and return the command without spawning.
+        options: Keyword arguments for :func:`build_backfill_argv`; only
+            ``backfill-metadata`` takes any.
 
     Returns:
         Dict with ``source``, ``verb``, ``db``, ``argv``, ``command`` and the
         resolved ``timeout``, plus either ``dry_run`` (when *dry_run*) or
         ``returncode`` / ``timed_out`` / ``stdout`` / ``stderr``. On timeout
         ``returncode`` is ``None`` and the output is whatever arrived first.
+        A ``backfill-metadata`` run also has ``summary``: the counts it
+        printed, or ``None`` when it printed none.
 
     Raises:
         ValueError: If ``settings.lancedb_dir`` is unset.
@@ -116,7 +192,12 @@ async def run_verb(
     if timeout is None:
         timeout = settings.haiku_maintenance_timeout
     db = resolve_db_path(source)
-    argv = build_maintenance_argv(verb, haiku_cfg, db, source)
+    if verb == BACKFILL_VERB:
+        argv = build_backfill_argv(haiku_cfg, **(options or {}))
+    elif options:
+        raise ValueError(f"haiku {verb} takes no options")
+    else:
+        argv = build_maintenance_argv(verb, haiku_cfg, db, source)
     result = {
         "source": source,
         "verb": verb,
@@ -137,12 +218,15 @@ async def run_verb(
         timeout=timeout,
         attributes={"haiku.db": db, "haiku.config": haiku_cfg or ""},
     )
-    return result | {
+    result |= {
         "returncode": run.returncode,
         "timed_out": run.timed_out,
         "stdout": run.stdout,
         "stderr": run.stderr,
     }
+    if verb == BACKFILL_VERB:
+        result["summary"] = parse_backfill_summary(run.stdout)
+    return result
 
 
 def plan_targets(verb: str, manifests: list[Manifest]) -> list[dict]:
@@ -194,6 +278,7 @@ async def run_maintenance(
     *,
     timeout: float | None = None,
     dry_run: bool = False,
+    options: Mapping[str, Any] | None = None,
 ) -> list[dict]:
     """Run *verb* against every database named by the manifests at *path*.
 
@@ -210,6 +295,7 @@ async def run_maintenance(
             ``settings.haiku_maintenance_timeout``.
         dry_run: Resolve every target and return the commands that would
             run, without spawning anything.
+        options: Passed to :func:`run_verb` for every target.
 
     Returns:
         One result dict per manifest, in manifest order: a :func:`run_verb`
@@ -239,6 +325,7 @@ async def run_maintenance(
                 haiku_cfg=entry["haiku_cfg"],
                 timeout=timeout,
                 dry_run=dry_run,
+                options=options,
             )
         except Exception as e:
             # e.g. the haiku-rag executable is missing; keep going so the
