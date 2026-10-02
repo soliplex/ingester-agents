@@ -113,5 +113,9 @@ ingester:
       root: ${DOWNLOAD_DIR}/${SOURCE}
       poll_interval_s: 300
       delete_orphans: true
+      # Adds each document's .meta.json sidecar (source_uri, source_url,
+      # manifest metadata, ...) and, for a PDF, its page_count and own
+      # title/author/dates/... to its metadata (soliplex.agents.haiku_metadata).
+      metadata_provider: soliplex-metadata
       include_patterns: ["*.md", "*.pdf", "*.adoc", "*.pptx", "*.puml", "*.plantuml", "*.asciidoc", "*.docx", "*.xlsx", "*.ppsx", "*.txt", "*.csv"]
       ignore_patterns: ["*.json", "*.meta.json"]

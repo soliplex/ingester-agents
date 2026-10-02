@@ -118,6 +118,96 @@ def _ok(source="src", verb="vacuum", rc=0):
     }
 
 
+def _backfill_summary(scanned, updated=0, unchanged=0, errors=(), check=False, attachments=0, orphaned=0):
+    errors = list(errors)
+    skipped = scanned - updated - unchanged - orphaned - len(errors)
+    return {
+        "scanned": scanned,
+        "updated": updated,
+        "attachments_updated": attachments,
+        "unchanged": unchanged,
+        "stale": 0,
+        "orphaned": orphaned,
+        "skipped_no_provider": skipped // 3,
+        "skipped_provider_opt_out": skipped // 3,
+        "skipped_not_selected": skipped - 2 * (skipped // 3),
+        "errors": errors,
+        "check": check,
+    }
+
+
+class TestBackfillMetadata:
+    def test_passes_options_and_reports_counts(self):
+        done = _ok(verb="backfill-metadata") | {"summary": _backfill_summary(scanned=9, updated=3, unchanged=1)}
+        with patch(_MAINT, new=AsyncMock(return_value=[done])) as mock:
+            result = runner.invoke(
+                cli,
+                [
+                    "backfill-metadata",
+                    "--missing",
+                    "page_count",
+                    "--content-type",
+                    "application/pdf",
+                    "--filter",
+                    "uri LIKE '%.pdf'",
+                    "--db-name",
+                    "db",
+                    "--batch-size",
+                    "50",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert mock.call_args.args == ("backfill-metadata", "all")
+        assert mock.call_args.kwargs["options"] == {
+            "missing": ["page_count"],
+            "content_types": ["application/pdf"],
+            "doc_filter": "uri LIKE '%.pdf'",
+            "db_name": "db",
+            "batch_size": 50,
+            "check": False,
+            "attachments": True,
+        }
+        assert (
+            "src: backfill-metadata ok -> /data/lance/src.lancedb "
+            "(scanned 9: 3 updated, 1 unchanged, 0 stale, 0 orphaned, 5 skipped, 0 errors)"
+        ) in result.output
+
+    def test_reports_attachments_and_orphans(self):
+        summary = _backfill_summary(scanned=6, updated=3, attachments=2, orphaned=1)
+        done = _ok(verb="backfill-metadata") | {"summary": summary}
+        with patch(_MAINT, new=AsyncMock(return_value=[done])) as mock:
+            result = runner.invoke(cli, ["backfill-metadata", "--no-attachments"])
+        assert mock.call_args.kwargs["options"]["attachments"] is False
+        assert "(scanned 6: 3 updated (2 attachments), 0 unchanged, 0 stale, 1 orphaned, 2 skipped, 0 errors)" in (
+            result.output
+        )
+
+    def test_check_reports_what_would_change(self):
+        done = _ok(verb="backfill-metadata") | {"summary": _backfill_summary(scanned=2, updated=2, check=True)}
+        with patch(_MAINT, new=AsyncMock(return_value=[done])) as mock:
+            result = runner.invoke(cli, ["backfill-metadata", "--check"])
+        assert mock.call_args.kwargs["options"]["check"] is True
+        assert "(scanned 2: 2 would update, 0 unchanged, 0 stale, 0 orphaned, 0 skipped, 0 errors)" in result.output
+
+    def test_partial_failure_lists_documents_and_exits_1(self):
+        summary = _backfill_summary(
+            scanned=2, updated=1, errors=[{"uri": "file:///a.pdf", "error": "FileNotFoundError: gone"}]
+        )
+        partial = _ok(verb="backfill-metadata", rc=3) | {"summary": summary}
+        with patch(_MAINT, new=AsyncMock(return_value=[partial])):
+            result = runner.invoke(cli, ["backfill-metadata"])
+        assert result.exit_code == 1
+        assert "backfill-metadata FAILED (rc=3)" in result.output
+        assert "  file:///a.pdf: FileNotFoundError: gone" in result.output
+
+    def test_crash_without_summary(self):
+        crashed = _ok(verb="backfill-metadata", rc=1) | {"summary": None}
+        with patch(_MAINT, new=AsyncMock(return_value=[crashed])):
+            result = runner.invoke(cli, ["backfill-metadata"])
+        assert result.exit_code == 1
+        assert result.output.rstrip().endswith("backfill-metadata FAILED (rc=1) -> /data/lance/src.lancedb")
+
+
 class TestMaintenance:
     def test_vacuum_reports_success(self):
         with patch(_MAINT, new=AsyncMock(return_value=[_ok()])) as mock:
@@ -126,7 +216,7 @@ class TestMaintenance:
         assert "src: vacuum ok -> /data/lance/src.lancedb" in result.output
         # PATH defaults to the "all" sentinel.
         assert mock.call_args.args == ("vacuum", "all")
-        assert mock.call_args.kwargs == {"timeout": None, "dry_run": False}
+        assert mock.call_args.kwargs == {"timeout": None, "dry_run": False, "options": None}
 
     def test_migrate_passes_verb_path_and_timeout(self, tmp_path):
         path = _write_manifest(tmp_path)
