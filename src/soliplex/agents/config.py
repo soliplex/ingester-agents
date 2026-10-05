@@ -377,6 +377,7 @@ class FSComponent(_ManifestModel):
     path: str
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
+    error_on_empty: bool = False
 
 
 class SCMComponent(_ManifestModel):
@@ -394,6 +395,7 @@ class SCMComponent(_ManifestModel):
     auth_token: str | None = None
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
+    error_on_empty: bool = False
 
     @model_validator(mode="after")
     def validate_gitea_base_url(self):
@@ -419,6 +421,7 @@ class WebDAVComponent(_ManifestModel):
     password: str | None = None
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
+    error_on_empty: bool = False
 
     @model_validator(mode="after")
     def validate_source_specified(self):
@@ -440,6 +443,7 @@ class WebComponent(_ManifestModel):
     urls_file: str | None = None
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
+    error_on_empty: bool = False
 
     @model_validator(mode="after")
     def validate_source_specified(self):

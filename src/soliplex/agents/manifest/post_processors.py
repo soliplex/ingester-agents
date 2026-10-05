@@ -72,6 +72,7 @@ DEFAULT_STDERR_LINES = 20
 _SUMMARY_KEYS = (
     "components",
     "component_errors",
+    "empty_components",
     "file_errors",
     "ingested",
     "deleted",

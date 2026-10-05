@@ -39,6 +39,7 @@ MIME types are detected from file **content** (via [puremagic](https://pypi.org/
   - Supports all agent types (fs, scm, webdav, web) in a single manifest
   - Shared configuration (metadata, extensions, haiku-rag load config)
   - Stale document removal (`delete_stale`) across all components in a manifest
+  - Per-component `error_on_empty` guard, so an empty listing can't wipe a source
   - Cron-based scheduling via the REST API server
   - Per-component credential and extension overrides
   - Directory-level execution for running multiple manifests at once
@@ -735,6 +736,7 @@ Top-level fields:
 - **path** (required): Path to a local directory.
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
+- **error_on_empty**: Treat an empty result as a component error, which blocks stale-document removal (default: false). See [Empty-result protection](#empty-result-protection).
 
 **Web (`web`):**
 
@@ -745,6 +747,7 @@ Top-level fields:
 - Exactly one of `url`, `urls`, or `urls_file` must be specified.
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
+- **error_on_empty**: Treat an empty result as a component error, which blocks stale-document removal (default: false). See [Empty-result protection](#empty-result-protection).
 
 **SCM (`scm`):**
 
@@ -759,6 +762,7 @@ Top-level fields:
 - **auth_token**: Override auth token name (resolved via Docker secrets or env vars).
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
+- **error_on_empty**: Treat an empty result as a component error, which blocks stale-document removal (default: false). See [Empty-result protection](#empty-result-protection).
 
 **WebDAV (`webdav`):**
 
@@ -772,6 +776,7 @@ Top-level fields:
 - **password**: Override WebDAV password (resolved via Docker secrets or env vars).
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
+- **error_on_empty**: Treat an empty result as a component error, which blocks stale-document removal (default: false). See [Empty-result protection](#empty-result-protection).
 
 #### Configuration Precedence
 
@@ -801,8 +806,29 @@ When `delete_stale: true` is set in a manifest's `config` block, the runner remo
 
 **Safety:**
 
-- If **any** component raises, hits an unknown type, or reports a **transient per-file error** (timeout / 5xx), `delete_stale` is **skipped entirely** for that manifest run. This prevents accidental deletions when the URI set may be incomplete. (A 404 is a removal signal, not a transient error, so it does not trigger this skip.)
+- If **any** component raises, hits an unknown type, reports a **transient per-file error** (timeout / 5xx), or (with `error_on_empty`) returns nothing, `delete_stale` is **skipped entirely** for that manifest run. This prevents accidental deletions when the URI set may be incomplete. (A 404 is a removal signal, not a transient error, so it does not trigger this skip.)
 - Components that succeed still have their documents ingested normally — only the stale deletion step is skipped.
+- A component that returns **no items** counts as a success unless it sets `error_on_empty: true` (see below), so an empty listing would otherwise delete every document the source holds.
+
+**Empty-result protection:**
+
+For most sources an empty result is never legitimate: it means a `urls_file` that came back blank or comments-only, an fs path that isn't mounted, or a WebDAV list whose every entry returned 404. Set `error_on_empty: true` on such a component to make "nothing came back" a component error, which skips `delete_stale` for the run like any other component error:
+
+```yaml
+components:
+  - name: pubs
+    type: webdav
+    url: https://webdav.example.com
+    urls_file: https://webdav.example.com/manifests/urls.txt
+    error_on_empty: true
+```
+
+- The check is on the component's *effective* set: its inventory minus the URIs that returned 404. A list whose every URL 404s is as empty as a blank one.
+- Extension filtering happens first, so a source holding only disallowed file types counts as empty.
+- The error message gives the inventory and `not_found` counts, telling "the list was empty" apart from "everything 404'd".
+- The run's `summary` counts these in `empty_components` as well as in `component_errors`; the component span carries `component.empty: true`.
+- An incremental SCM component (`incremental: true`) is checked against its full listing, which is only fetched when `delete_stale` is on. With `delete_stale` off there is no clean-up to protect, so the flag does nothing for it.
+- Default `false`, so existing manifests behave as before.
 
 **Example:**
 
@@ -824,7 +850,7 @@ components:
 
 If a file is removed from `/data/docs` or from the WebDAV server (dropped from the listing, or returning 404 on fetch), the next manifest run detects that its URI is no longer present and deletes it — and its sidecar — from the download directory.
 
-**Note:** SCM components using `incremental: true` only return files changed since the last sync, not the full file listing. When `delete_stale` is enabled with incremental SCM components, the stale detection may not have complete URI coverage for those components. Consider using full inventory mode (`incremental: false`) when `delete_stale` is needed with SCM sources.
+**Note:** SCM components using `incremental: true` only return files changed since the last sync, not the full file listing. When `delete_stale` is enabled, the runner therefore fetches each incremental component's full file listing after the sync and reconciles against that, not against the partial inventory. That listing is one extra walk of the repository per run; if it fails, it is recorded as a component error and `delete_stale` is skipped. With `error_on_empty: true`, an empty full listing is an error too.
 
 #### Scheduling
 
