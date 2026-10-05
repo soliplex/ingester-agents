@@ -171,6 +171,11 @@ class TestWebDAVComponent:
         assert c.username == "USER_VAR"
         assert c.password == "PASS_VAR"
 
+    @pytest.mark.parametrize("bad", ["https://dav/a.pdf", "a/b.pdf"])
+    def test_urls_entry_not_absolute_path_raises(self, bad):
+        with pytest.raises(ValueError, match="absolute WebDAV path"):
+            WebDAVComponent(name="test", url="http://dav", urls=["/a.pdf", bad])
+
 
 # --- WebComponent ---
 
@@ -195,6 +200,15 @@ class TestWebComponent:
     def test_multiple_sources_raises(self):
         with pytest.raises(ValueError, match="only one"):
             WebComponent(name="test", url="http://a.com", urls=["http://b.com"])
+
+    @pytest.mark.parametrize("bad", ["/a", "ftp://x/a", "https://", "example.com/a"])
+    def test_non_http_url_raises(self, bad):
+        with pytest.raises(ValueError, match="http:// or https:// URL"):
+            WebComponent(name="test", url=bad)
+
+    def test_non_http_urls_entry_raises(self):
+        with pytest.raises(ValueError, match=r"invalid: \['/b'\]"):
+            WebComponent(name="test", urls=["http://a.com", "/b"])
 
 
 # --- ManifestConfig ---

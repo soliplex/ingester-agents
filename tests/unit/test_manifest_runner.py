@@ -1092,6 +1092,44 @@ class TestRunManifestDeleteStale:
         assert "Skipping delete_stale" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_delete_stale_skipped_when_webdav_urls_file_is_html(self, tmp_path, monkeypatch, caplog):
+        # A urls_file answering 200 with an HTML page must fail the component
+        # rather than read as an empty list, which would wipe the source.
+        from soliplex.agents import store as agent_store
+
+        monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
+        monkeypatch.setattr(settings, "state_dir", str(tmp_path / "state"))
+        m = Manifest(
+            id="ds-html",
+            name="DS HTML",
+            source="src",
+            config={"delete_stale": True},
+            components=[
+                {
+                    "type": "webdav",
+                    "name": "d",
+                    "url": "https://dav.example.com",
+                    "urls_file": "http://manifest_server:8001/urls.txt",
+                }
+            ],
+        )
+
+        with (
+            patch(
+                "soliplex.agents.common.urls_file.read_text_from_url",
+                new_callable=AsyncMock,
+                return_value="<!DOCTYPE html>\n<html><body>Bad gateway</body></html>\n",
+            ),
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await runner.run_manifest(m)
+
+        mock_check.assert_not_called()
+        assert result["delete_stale_result"] is None
+        assert "returned HTML" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_delete_stale_skipped_on_unknown_component(self):
         m = Manifest(
             id="ds-unk",
