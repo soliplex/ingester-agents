@@ -1,6 +1,7 @@
 """Tests for the haiku-rag loader — 100% branch coverage required."""
 
 import logging
+from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -160,6 +161,11 @@ class _RaisingTimeout:
 
 
 class TestRunLoad:
+    @pytest.fixture(autouse=True)
+    def _documents_present(self, monkeypatch):
+        """These tests are about the subprocess, not the empty-location gate."""
+        monkeypatch.setattr(haiku_loader, "_document_count", AsyncMock(return_value=1))
+
     @pytest.mark.asyncio
     async def test_success_logs_output_in_parts_and_returns(self, haiku_env, caplog):
         proc = _fake_proc(returncode=0, stdout_lines=[b"step 1\n", b"done\n"])
@@ -183,7 +189,8 @@ class TestRunLoad:
         kwargs = mock_exec.call_args.kwargs
         # SOURCE matches the sanitized download-folder name (spaces preserved).
         assert kwargs["env"]["SOURCE"] == "composite source"
-        assert kwargs["env"]["DOWNLOAD_DIR"] == "downloads"
+        # Exported resolved, so the subprocess's cwd can't change what it names.
+        assert kwargs["env"]["DOWNLOAD_DIR"] == str(Path("downloads").resolve())
         assert kwargs["env"]["PYTHONUNBUFFERED"] == "1"
         assert kwargs["cwd"] is None
 
@@ -350,12 +357,11 @@ class TestRunLoad:
         assert result["post_process"] == [{"method": "pkg:fn", "ok": True, "error": None}]
 
 
-# --- empty download folder check ---
+# --- empty download location gate ---
 
 
-class TestLogIfNoDocuments:
+class TestEmptyLocationGate:
     _LOGGER = "soliplex.agents.manifest.haiku_loader"
-    _EMPTY = "finished with no documents"
 
     @pytest.fixture
     def source_dir(self, haiku_env, monkeypatch, tmp_path):
@@ -367,49 +373,134 @@ class TestLogIfNoDocuments:
         reset_store_cache()
 
     @staticmethod
-    async def _run(caplog):
+    def _manifest(allow_empty_load=False):
+        return Manifest(
+            id="m",
+            name="M",
+            source="src",
+            config=ManifestConfig(allow_empty_load=allow_empty_load, post_process=[PostProcessStep(method="pkg:fn")]),
+            components=[{"type": "fs", "name": "c", "path": "/data"}],
+        )
+
+    @staticmethod
+    async def _run(caplog, manifest, **kwargs):
         with (
-            caplog.at_level(logging.INFO, logger=TestLogIfNoDocuments._LOGGER),
+            caplog.at_level(logging.INFO, logger=TestEmptyLocationGate._LOGGER),
             patch(
                 "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
                 return_value=_fake_proc(returncode=0),
             ) as mock_exec,
+            patch(
+                "soliplex.agents.manifest.post_process.run_post_process", new_callable=AsyncMock, return_value=[]
+            ) as mock_pp,
         ):
-            await haiku_loader.run_load(_manifest())
-        return mock_exec
+            result = await haiku_loader.run_load(manifest, **kwargs)
+        return result, mock_exec, mock_pp
+
+    def _skip_records(self, caplog):
+        return [r for r in caplog.records if r.levelno == logging.ERROR and "Skipping haiku load" in r.getMessage()]
 
     @pytest.mark.asyncio
-    async def test_missing_folder_logs_error_and_still_loads(self, source_dir, caplog):
-        mock_exec = await self._run(caplog)
-        errors = [r for r in caplog.records if r.levelno == logging.ERROR and self._EMPTY in r.getMessage()]
-        assert len(errors) == 1
-        assert "Manifest 'm'" in errors[0].getMessage()
-        assert "source 'src'" in errors[0].getMessage()
-        mock_exec.assert_awaited_once()
+    async def test_a_missing_folder_skips_the_load_and_its_post_process(self, source_dir, caplog):
+        result, mock_exec, mock_pp = await self._run(caplog, self._manifest())
+        mock_exec.assert_not_called()
+        mock_pp.assert_not_called()
+        assert result["skipped"] == {"reason": "no documents in download location"}
+        assert result["returncode"] is None
+        assert result["post_process"] == []
+        (record,) = self._skip_records(caplog)
+        message = record.getMessage()
+        assert "manifest 'm' (source 'src'): no documents in download location" in message
+        assert source_dir.resolve().as_uri() in message
 
     @pytest.mark.asyncio
     async def test_only_sidecars_counts_as_empty(self, source_dir, caplog):
         source_dir.mkdir(parents=True)
         (source_dir / f"doc.md{META_SUFFIX}").write_text("{}", encoding="utf-8")
-        await self._run(caplog)
-        assert self._EMPTY in caplog.text
+        result, mock_exec, _ = await self._run(caplog, self._manifest())
+        mock_exec.assert_not_called()
+        assert result["skipped"]["reason"] == "no documents in download location"
 
     @pytest.mark.asyncio
-    async def test_document_present_logs_nothing(self, source_dir, caplog):
+    async def test_a_document_lets_the_load_run(self, source_dir, caplog):
         (source_dir / "nested").mkdir(parents=True)
         (source_dir / "nested" / "doc.md").write_text("# hi", encoding="utf-8")
-        await self._run(caplog)
-        assert self._EMPTY not in caplog.text
+        result, mock_exec, mock_pp = await self._run(caplog, self._manifest())
+        mock_exec.assert_awaited_once()
+        mock_pp.assert_awaited_once()
+        assert "skipped" not in result
+        assert self._skip_records(caplog) == []
 
     @pytest.mark.asyncio
-    async def test_listing_failure_is_logged_and_load_continues(self, source_dir, caplog):
+    async def test_a_listing_failure_skips_the_load(self, source_dir, caplog):
+        """If the agent can't list the location, haiku would most likely read it as empty."""
         with patch(
             "soliplex.agents.store.LocalDocumentStore.list",
             new_callable=AsyncMock,
             side_effect=OSError("bucket unreachable"),
         ):
-            mock_exec = await self._run(caplog)
+            result, mock_exec, mock_pp = await self._run(caplog, self._manifest())
+        mock_exec.assert_not_called()
+        mock_pp.assert_not_called()
+        assert result["skipped"] == {"reason": "download location could not be listed"}
         assert "Could not list documents" in caplog.text
-        assert self._EMPTY not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_allow_empty_load_on_the_manifest_loads_anyway(self, source_dir, caplog):
+        result, mock_exec, _ = await self._run(caplog, self._manifest(allow_empty_load=True))
         mock_exec.assert_awaited_once()
+        assert "skipped" not in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("manifest_allows, argument, loads", [(False, True, True), (True, False, False)])
+    async def test_the_argument_overrides_the_manifest(self, source_dir, caplog, manifest_allows, argument, loads):
+        _, mock_exec, _ = await self._run(caplog, self._manifest(allow_empty_load=manifest_allows), allow_empty_load=argument)
+        assert mock_exec.await_count == (1 if loads else 0)
+
+    @pytest.mark.asyncio
+    async def test_a_manifest_without_config_is_gated(self, source_dir, caplog):
+        result, mock_exec, _ = await self._run(caplog, _manifest())
+        mock_exec.assert_not_called()
+        assert "skipped" in result
+
+    @pytest.mark.asyncio
+    async def test_load_on_error_does_not_bypass_the_gate(self, source_dir, caplog, monkeypatch):
+        monkeypatch.setattr(settings, "haiku_load_on_error", True)
+        result, mock_exec, _ = await self._run(caplog, self._manifest())
+        mock_exec.assert_not_called()
+        assert "skipped" in result
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_load_gets_a_span_of_its_own(self, source_dir, caplog, spans):
+        await self._run(caplog, self._manifest(), queue_wait_s=2.5)
+        (span,) = spans.named("haiku load")
+        assert span.attributes["haiku.load_skipped"] is True
+        assert span.attributes["haiku.load_skipped.empty_location"] == 1
+        assert span.attributes["haiku.source"] == "src"
+        assert span.attributes["haiku.queue_wait_s"] == 2.5
+
+    @pytest.mark.asyncio
+    async def test_the_gate_applies_at_load_time_through_the_server_queue(self, source_dir, caplog):
+        """A folder emptied while the load waited in the queue is caught when the load runs."""
+        from soliplex.agents.server import haiku_queue
+
+        source_dir.mkdir(parents=True)
+        doc = source_dir / "doc.md"
+        doc.write_text("# hi", encoding="utf-8")
+        haiku_queue.start_worker()
+        try:
+            with patch(
+                "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=_fake_proc(returncode=0),
+            ) as mock_exec:
+                # Queued while the folder held a document ...
+                await haiku_queue.enqueue_load(self._manifest())
+                # ... emptied before the worker got to it.
+                doc.unlink()
+                await haiku_queue._queue.join()
+        finally:
+            await haiku_queue.stop_worker()
+        mock_exec.assert_not_called()
+        assert "no documents in download location" in caplog.text

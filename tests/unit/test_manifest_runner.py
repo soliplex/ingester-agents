@@ -1602,7 +1602,9 @@ async def test_the_load_and_its_callbacks_read_where_the_run_wrote(installation,
     monkeypatch.setattr(haiku_loader, "resolve_haiku_cfg", lambda manifest: "/cfg.yaml")
     monkeypatch.setattr(post_process, "resolve_haiku_cfg", lambda manifest: "/cfg.yaml")
     monkeypatch.setattr(haiku_loader.settings, "lancedb_dir", "/lance", raising=False)
-    manifest = _src_manifest("src", post_process=[PostProcessStep(method="pkg:step")])
+    # delete_stale off: the fake writes no state row, so the stale sweep would
+    # remove doc.md -- and the load would then be skipped over an empty folder.
+    manifest = _src_manifest("src", delete_stale=False, post_process=[PostProcessStep(method="pkg:step")])
 
     await runner.run_manifest(manifest)
     proc = MagicMock(returncode=0, wait=AsyncMock(), stdout=MagicMock(), stderr=MagicMock())
@@ -1778,6 +1780,173 @@ class TestRunManifestsSpans:
 
         (run,) = spans.named("manifest run")
         assert run.status.description == "haiku load failed: OSError"
+
+
+# --- load gate -------------------------------------------------------------------
+
+
+class TestLoadBlockers:
+    def test_a_clean_run_has_none(self):
+        assert runner.load_blockers({"summary": {"component_errors": 0, "file_errors": 0}}) == {}
+
+    @pytest.mark.parametrize("kind", ["component_errors", "file_errors"])
+    def test_each_error_count_blocks_on_its_own(self, kind):
+        assert runner.load_blockers({"summary": {kind: 3}}) == {kind: 3}
+
+    def test_both_counts_are_reported(self):
+        summary = {"component_errors": 1, "file_errors": 2}
+        assert runner.load_blockers({"summary": summary}) == {"component_errors": 1, "file_errors": 2}
+
+    def test_404s_are_removals_not_errors(self):
+        assert runner.load_blockers({"summary": {"not_found": 5}}) == {}
+
+    def test_on_error_continue_hook_errors_do_not_block(self):
+        result = {
+            "summary": {"pre_process_errors": 2},
+            "pre_run": [{"method": "m:f", "status": "error", "message": "boom"}],
+        }
+        assert runner.load_blockers(result) == {}
+
+    def test_a_result_without_a_summary_has_none(self):
+        assert runner.load_blockers({}) == {}
+        assert runner.load_blockers({"summary": None}) == {}
+
+    def test_describe_blockers(self):
+        assert runner.describe_blockers({"component_errors": 1, "file_errors": 2}) == "component_errors=1, file_errors=2"
+
+
+def _write_gate_manifest(tmp_path, mid="test"):
+    f = tmp_path / f"{mid}.yml"
+    f.write_text(
+        textwrap.dedent(f"""\
+        id: {mid}
+        name: M{mid}
+        source: src-{mid}
+        components:
+          - type: fs
+            name: c
+            path: /data
+    """)
+    )
+    return f
+
+
+class TestRunManifestsLoadGate:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "summary",
+        [{"component_errors": 1, "file_errors": 0}, {"component_errors": 0, "file_errors": 2}],
+    )
+    async def test_a_run_with_errors_is_not_loaded(self, tmp_path, caplog, summary):
+        f = _write_gate_manifest(tmp_path)
+        with (
+            patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run,
+            patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock) as mock_load,
+            caplog.at_level(logging.ERROR, logger="soliplex.agents.manifest.runner"),
+        ):
+            mock_run.return_value = {"manifest_id": "test", "results": [], "summary": summary}
+            (result,) = await runner.run_manifests(str(f), load=True, load_on_error=False)
+        mock_load.assert_not_called()
+        blockers = {k: v for k, v in summary.items() if v}
+        assert result["haiku_load_skipped"] == {"reason": "run had errors", "errors": blockers}
+        assert "haiku_load" not in result
+        assert "Skipping haiku load for manifest 'test' (source 'src-test'): run had errors" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_run_with_only_404s_is_loaded(self, tmp_path):
+        f = _write_gate_manifest(tmp_path)
+        with (
+            patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run,
+            patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock) as mock_load,
+        ):
+            mock_run.return_value = {"manifest_id": "test", "results": [], "summary": {"not_found": 4}}
+            mock_load.return_value = {"returncode": 0}
+            (result,) = await runner.run_manifests(str(f), load=True, load_on_error=False)
+        mock_load.assert_awaited_once()
+        assert "haiku_load_skipped" not in result
+
+    @pytest.mark.asyncio
+    async def test_load_on_error_loads_anyway(self, tmp_path):
+        f = _write_gate_manifest(tmp_path)
+        with (
+            patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run,
+            patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock) as mock_load,
+        ):
+            mock_run.return_value = {"manifest_id": "test", "results": [], "summary": {"file_errors": 1}}
+            mock_load.return_value = {"returncode": 0}
+            (result,) = await runner.run_manifests(str(f), load=True, load_on_error=True)
+        mock_load.assert_awaited_once()
+        assert result["haiku_load"] == {"returncode": 0}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("setting", [True, False])
+    async def test_load_on_error_defaults_to_the_setting(self, tmp_path, monkeypatch, setting):
+        monkeypatch.setattr(settings, "haiku_load_on_error", setting)
+        f = _write_gate_manifest(tmp_path)
+        with (
+            patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run,
+            patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock) as mock_load,
+        ):
+            mock_run.return_value = {"manifest_id": "test", "results": [], "summary": {"component_errors": 1}}
+            await runner.run_manifests(str(f), load=True)
+        assert mock_load.await_count == (1 if setting else 0)
+
+    @pytest.mark.asyncio
+    async def test_only_the_failing_manifest_is_held_back(self, tmp_path):
+        _write_gate_manifest(tmp_path, "a")
+        _write_gate_manifest(tmp_path, "b")
+        with (
+            patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run,
+            patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock) as mock_load,
+        ):
+            mock_run.side_effect = [
+                {"manifest_id": "a", "results": [], "summary": {"file_errors": 1}},
+                {"manifest_id": "b", "results": [], "summary": {}},
+            ]
+            mock_load.return_value = {}
+            results = await runner.run_manifests(str(tmp_path), load=True, load_on_error=False)
+        assert [m.id for m in (c.args[0] for c in mock_load.await_args_list)] == ["b"]
+        assert "haiku_load_skipped" in results[0]
+        assert results[1]["haiku_load"] == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("allow", [None, True])
+    async def test_allow_empty_load_reaches_the_load(self, tmp_path, allow):
+        f = _write_gate_manifest(tmp_path)
+        with (
+            patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run,
+            patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock) as mock_load,
+        ):
+            mock_run.return_value = {"manifest_id": "test", "results": [], "summary": {}}
+            mock_load.return_value = {}
+            await runner.run_manifests(str(f), load=True, allow_empty_load=allow)
+        assert mock_load.await_args.kwargs["allow_empty_load"] is allow
+
+    @pytest.mark.asyncio
+    async def test_without_load_nothing_is_recorded(self, tmp_path):
+        f = _write_gate_manifest(tmp_path)
+        with patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run:
+            mock_run.return_value = {"manifest_id": "test", "results": [], "summary": {"file_errors": 1}}
+            (result,) = await runner.run_manifests(str(f), load=False)
+        assert "haiku_load_skipped" not in result
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_load_is_marked_on_the_span(self, tmp_path, spans):
+        f = _write_gate_manifest(tmp_path)
+        with (
+            patch(
+                "soliplex.agents.manifest.runner.run_manifest",
+                AsyncMock(return_value={"manifest_id": "test", "results": [], "summary": {"file_errors": 2}}),
+            ),
+            patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock),
+        ):
+            await runner.run_manifests(str(f), load=True, load_on_error=False)
+        (run,) = spans.named("manifest run")
+        assert run.attributes["haiku.load_skipped"] is True
+        assert run.attributes["haiku.load_skipped.file_errors"] == 2
+        assert "haiku.load_skipped.component_errors" not in run.attributes
+        # Failed by record_summary for the same errors, not by the skip.
+        assert run.status.status_code is StatusCode.ERROR
 
 
 # --- error_on_empty ---

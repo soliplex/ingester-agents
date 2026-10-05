@@ -238,6 +238,11 @@ class TestManifestConfig:
         assert c.delete_stale is True
         assert c.haiku_config is None
         assert c.post_process == []
+        # Off: a load over an empty location would delete the whole source.
+        assert c.allow_empty_load is False
+
+    def test_allow_empty_load(self):
+        assert ManifestConfig(allow_empty_load=True).allow_empty_load is True
 
     def test_haiku_config_override(self):
         c = ManifestConfig(haiku_config="custom.yaml")

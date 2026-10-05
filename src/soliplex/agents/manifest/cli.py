@@ -25,12 +25,30 @@ def run(
         "--load/--no-load",
         help="Run a haiku-rag load after each manifest (default: HAIKU_LOAD_ENABLED)",
     ),
+    load_on_error: bool = typer.Option(
+        None,
+        "--load-on-error/--no-load-on-error",
+        help="Load even after a run with component or file errors (default: HAIKU_LOAD_ON_ERROR)",
+    ),
+    allow_empty_load: bool = typer.Option(
+        False,
+        "--allow-empty-load",
+        help="Load even when the download location holds no documents (default: the manifest's allow_empty_load)",
+    ),
 ):
     """Run one or more manifests from a YAML file or directory."""
     if load is None:
         load = settings.haiku_load_enabled
     try:
-        results = asyncio.run(runner.run_manifests(path, load=load))
+        results = asyncio.run(
+            runner.run_manifests(
+                path,
+                load=load,
+                load_on_error=load_on_error,
+                # Unset defers to each manifest's config.allow_empty_load.
+                allow_empty_load=True if allow_empty_load else None,
+            )
+        )
     except FileNotFoundError as e:
         print(f"Error: {e}")
         raise SystemExit(1) from None
@@ -71,6 +89,12 @@ def run(
                 for item in pre["skipped"]:
                     reason = f": {item['message']}" if item.get("message") else ""
                     print(f"    skipped {item['uri']}{reason}")
+            load_skipped = manifest_result.get("haiku_load_skipped")
+            if load_skipped:
+                print(f"  haiku load: SKIPPED ({runner.describe_blockers(load_skipped['errors'])})")
+            empty_skip = (manifest_result.get("haiku_load") or {}).get("skipped")
+            if empty_skip:
+                print(f"  haiku load: SKIPPED ({empty_skip['reason']})")
 
 
 _PATH_HELP = "Manifest YAML file, directory of manifests, or 'all' for every manifest in MANIFEST_DIR"

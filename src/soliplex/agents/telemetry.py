@@ -274,6 +274,18 @@ def describe_manifest(target: Span, manifest) -> None:
     )
 
 
+def mark_load_skipped(target: Span, blockers: dict[str, int]) -> None:
+    """Record on *target* that the run's haiku load was skipped, and why.
+
+    *blockers* is :func:`~soliplex.agents.manifest.runner.load_blockers`'s
+    answer. The span is not failed here: :func:`record_summary` already failed
+    it for the same errors.
+    """
+    target.set_attributes(
+        {"haiku.load_skipped": True, **{f"haiku.load_skipped.{kind}": count for kind, count in blockers.items()}}
+    )
+
+
 def record_summary(target: Span, summary: dict[str, Any]) -> None:
     """Copy a run's outcome counts onto *target*, failing it if anything failed.
 

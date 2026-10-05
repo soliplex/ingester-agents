@@ -1,6 +1,7 @@
 """Tests for the manifest post-process runner — 100% branch coverage required."""
 
 import os
+from pathlib import Path
 
 import pytest
 from opentelemetry.trace import StatusCode
@@ -219,7 +220,7 @@ def test_load_env_sets_and_restores(monkeypatch):
     manifest = _manifest(source="army-airfield")
     with post_process._load_env(manifest, LoadContext.for_source(manifest.source)):
         assert os.environ["SOURCE"] == "army-airfield"
-        assert os.environ["DOWNLOAD_DIR"] == "downloads"
+        assert os.environ["DOWNLOAD_DIR"] == str(Path("downloads").resolve())
         # The resolved base URI is exposed too, so a config can use one form
         # regardless of backend.
         assert os.environ["DOWNLOAD_URI"].startswith("file://")

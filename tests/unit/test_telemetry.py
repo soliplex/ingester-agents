@@ -267,6 +267,17 @@ class TestManifestSpan:
         assert spans.named("manifest run")[0].attributes[telemetry.MANIFEST_ID] == "m"
 
 
+class TestMarkLoadSkipped:
+    def test_records_the_skip_and_its_counts_without_failing_the_span(self, spans):
+        with telemetry.span("x", "x") as span:
+            telemetry.mark_load_skipped(span, {"component_errors": 1, "file_errors": 4})
+        (finished,) = spans.named("x")
+        assert finished.attributes["haiku.load_skipped"] is True
+        assert finished.attributes["haiku.load_skipped.component_errors"] == 1
+        assert finished.attributes["haiku.load_skipped.file_errors"] == 4
+        assert finished.status.status_code is StatusCode.UNSET
+
+
 class TestRecordSummary:
     def test_clean_run_copies_counts_and_stays_ok(self, spans):
         with telemetry.span("x", "x") as span:

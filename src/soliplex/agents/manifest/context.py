@@ -15,6 +15,7 @@ import logging
 import os
 from dataclasses import dataclass
 from dataclasses import field
+from pathlib import Path
 
 from soliplex.agents.local_store import sanitize_source
 from soliplex.agents.sidecar import Sidecars
@@ -74,7 +75,12 @@ class LoadContext:
         """
         env = dict(os.environ if base is None else base)
         env["SOURCE"] = self.sanitized
-        env["DOWNLOAD_DIR"] = self.target.dir
+        # A local directory is exported resolved: a relative one would be
+        # re-resolved against the consumer's working directory (the load's
+        # HAIKU_LOAD_CWD), naming a different -- likely missing -- folder than
+        # the one the documents were written to. An object target's dir is a
+        # key prefix and goes as configured.
+        env["DOWNLOAD_DIR"] = str(Path(self.target.dir).resolve()) if self.target.is_local else self.target.dir
         env["DOWNLOAD_URI"] = self.download_uri
         for key, value in self.storage_options.items():
             env[f"DOWNLOAD_S3_{key.upper()}"] = value

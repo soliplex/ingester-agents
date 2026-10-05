@@ -59,6 +59,58 @@ class TestRun:
         assert result.exit_code == 0
         assert "comp1: ERROR - boom" in result.output
 
+    def test_run_reports_a_skipped_load(self, tmp_path):
+        path = _write_manifest(tmp_path)
+        fake = [
+            {
+                "manifest_id": "test-m",
+                "manifest_name": "Test Manifest",
+                "results": [{"component": "comp1", "error": "boom"}],
+                "delete_stale_result": None,
+                "haiku_load_skipped": {"reason": "run had errors", "errors": {"component_errors": 1}},
+            }
+        ]
+        with patch("soliplex.agents.manifest.runner.run_manifests", new=AsyncMock(return_value=fake)):
+            result = runner.invoke(cli, ["run", path])
+        assert result.exit_code == 0
+        assert "haiku load: SKIPPED (component_errors=1)" in result.output
+
+    def test_run_passes_load_on_error_through(self, tmp_path):
+        path = _write_manifest(tmp_path)
+        mock = AsyncMock(return_value=[])
+        with patch("soliplex.agents.manifest.runner.run_manifests", new=mock):
+            assert runner.invoke(cli, ["run", path, "--load", "--load-on-error"]).exit_code == 0
+            assert mock.await_args.kwargs == {"load": True, "load_on_error": True, "allow_empty_load": None}
+            assert runner.invoke(cli, ["run", path, "--load", "--no-load-on-error"]).exit_code == 0
+            assert mock.await_args.kwargs == {"load": True, "load_on_error": False, "allow_empty_load": None}
+            # Unset defers to HAIKU_LOAD_ON_ERROR, resolved by run_manifests.
+            assert runner.invoke(cli, ["run", path, "--load"]).exit_code == 0
+            assert mock.await_args.kwargs == {"load": True, "load_on_error": None, "allow_empty_load": None}
+
+    def test_run_passes_allow_empty_load_through(self, tmp_path):
+        path = _write_manifest(tmp_path)
+        mock = AsyncMock(return_value=[])
+        with patch("soliplex.agents.manifest.runner.run_manifests", new=mock):
+            assert runner.invoke(cli, ["run", path, "--load", "--allow-empty-load"]).exit_code == 0
+        # Only ever True from the flag; unset (None) defers to the manifest.
+        assert mock.await_args.kwargs["allow_empty_load"] is True
+
+    def test_run_reports_a_load_skipped_over_an_empty_location(self, tmp_path):
+        path = _write_manifest(tmp_path)
+        fake = [
+            {
+                "manifest_id": "test-m",
+                "manifest_name": "Test Manifest",
+                "results": [],
+                "delete_stale_result": None,
+                "haiku_load": {"returncode": None, "skipped": {"reason": "no documents in download location"}},
+            }
+        ]
+        with patch("soliplex.agents.manifest.runner.run_manifests", new=AsyncMock(return_value=fake)):
+            result = runner.invoke(cli, ["run", path])
+        assert result.exit_code == 0
+        assert "haiku load: SKIPPED (no documents in download location)" in result.output
+
     def test_run_json_output(self, tmp_path):
         path = _write_manifest(tmp_path)
         fake = [{"manifest_id": "test-m", "manifest_name": "Test Manifest", "results": []}]

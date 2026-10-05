@@ -168,6 +168,10 @@ class Settings(BaseSettings):
 
     # haiku-rag load settings (run after each manifest run)
     haiku_load_enabled: bool = False  # Queue a haiku-rag load after each manifest run
+    # Load even after a run with component or file errors. Off by default: the
+    # load deletes whatever is missing from the download location, which a
+    # failed run may have left incomplete.
+    haiku_load_on_error: bool = False
     lancedb_dir: str | None = None  # Base dir for per-source .lancedb databases (LANCEDB_DIR)
     haiku_path: str | None = None  # Base dir for haiku-rag config files (HAIKU_PATH)
     haiku_default_config: str = "haiku.rag.default.yaml"  # Default config filename under haiku_path
@@ -591,6 +595,11 @@ class ManifestConfig(_ManifestModel):
     metadata: dict[str, str] | None = None
     delete_stale: bool = True
     haiku_config: str | None = None  # Per-manifest haiku-rag config (abs path, or filename under HAIKU_PATH)
+    # Run the haiku load even when the download location holds no documents.
+    # Off by default: over an empty location the load deletes every document
+    # of the source from the database, which is only right when emptying the
+    # source on purpose (see soliplex.agents.manifest.haiku_loader.run_load).
+    allow_empty_load: bool = False
     # Ordered steps run once before any component (see
     # soliplex.agents.manifest.pre_run).
     pre_run: list[PreRunStep] = Field(default_factory=list)

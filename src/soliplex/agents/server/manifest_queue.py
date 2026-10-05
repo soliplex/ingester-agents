@@ -87,6 +87,10 @@ def pending_manifests() -> frozenset[str]:
 async def run_manifest_now(manifest_id: str, path: str) -> None:
     """Load *path* fresh and execute it, then queue its haiku load.
 
+    The load is queued only when the run had no errors (see
+    :func:`~soliplex.agents.manifest.runner.load_blockers`), unless
+    ``settings.haiku_load_on_error`` says otherwise.
+
     Raises on failure; the worker owns the logging and recovery. Runs inside
     the worker's manifest span, which it describes once the file has loaded
     and finishes with the run's outcome counts. The haiku load is queued from
@@ -113,6 +117,17 @@ async def run_manifest_now(manifest_id: str, path: str) -> None:
         len(result.get("results", [])),
     )
     if settings.haiku_load_enabled:
+        blockers = manifest_runner.load_blockers(result)
+        if blockers and not settings.haiku_load_on_error:
+            # The download location may be incomplete, and a load would
+            # delete whatever is missing from it.
+            logger.error(
+                "Manifest '%s' had errors (%s); haiku load not queued",
+                manifest_id,
+                manifest_runner.describe_blockers(blockers),
+            )
+            telemetry.mark_load_skipped(span, blockers)
+            return
         await enqueue_load(loaded, run_result=result)
 
 

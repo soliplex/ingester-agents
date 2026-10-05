@@ -1,6 +1,7 @@
 """Tests for haiku-rag maintenance verbs — 100% branch coverage required."""
 
 import logging
+from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -166,7 +167,7 @@ class TestRunVerb:
         env = mock_exec.call_args.kwargs["env"]
         # SOURCE is the sanitized download-folder name, as for a load.
         assert env["SOURCE"] == "gitea_admin_repo"
-        assert env["DOWNLOAD_DIR"] == "downloads"
+        assert env["DOWNLOAD_DIR"] == str(Path("downloads").resolve())
         assert env["PYTHONUNBUFFERED"] == "1"
         assert env["OTEL_SERVICE_NAME"].endswith(".haiku-rag.vacuum.gitea:admin:repo")
         assert "LOGFIRE_TOKEN" not in env

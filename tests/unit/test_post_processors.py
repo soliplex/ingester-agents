@@ -2,6 +2,7 @@
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -82,7 +83,7 @@ async def test_vacuum_runs_subprocess_with_config(lancedb_env):
     # Env carries SOURCE / DOWNLOAD_DIR so a config with ${SOURCE} resolves.
     env = mock_exec.call_args.kwargs["env"]
     assert env["SOURCE"] == "army-airfield"
-    assert env["DOWNLOAD_DIR"] == "downloads"
+    assert env["DOWNLOAD_DIR"] == str(Path("downloads").resolve())
     assert env["PYTHONUNBUFFERED"] == "1"
 
 

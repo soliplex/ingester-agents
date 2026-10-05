@@ -115,10 +115,15 @@ ingester:
   sources:
     - type: s3
       id: ${SOURCE}
-      # ${DOWNLOAD_S3_BUCKET} and ${DOWNLOAD_DIR} are the same pair the
-      # download store wrote with, so this reads exactly what the manifest run
-      # just produced.
-      uri: ${DOWNLOAD_S3_BUCKET}${DOWNLOAD_DIR}/${SOURCE}
+      # ${DOWNLOAD_URI} is the agent's own resolved location for this source
+      # (s3://<bucket>/<prefix>/<source>), so this reads exactly what the
+      # manifest run just produced. Don't rebuild it from
+      # ${DOWNLOAD_S3_BUCKET}${DOWNLOAD_DIR}/${SOURCE}: that joins raw text,
+      # while the agent normalizes the slashes, and a spelling such as
+      # s3://bucket/prefix/ or a DOWNLOAD_DIR without a leading slash makes
+      # this list an empty prefix -- and delete_orphans then removes every
+      # document of the source.
+      uri: ${DOWNLOAD_URI}
       poll_interval_s: 300
       delete_orphans: true
       # Adds each document's .meta.json sidecar (source_uri, source_url,
