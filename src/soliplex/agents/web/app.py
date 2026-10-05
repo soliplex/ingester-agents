@@ -72,9 +72,10 @@ async def resolve_urls(
     if urls is not None:
         return list(urls)
     if urls_file is not None:
+        from soliplex.agents.common.urls_file import is_http_url
         from soliplex.agents.common.urls_file import read_urls_file
 
-        return await read_urls_file(urls_file, base_dir)
+        return await read_urls_file(urls_file, base_dir, is_valid_line=is_http_url)
     return []
 
 

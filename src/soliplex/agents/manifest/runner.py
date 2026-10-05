@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml
 
+from soliplex.agents import EmptyComponentError
 from soliplex.agents import local_state
 from soliplex.agents import telemetry
 from soliplex.agents.config import FSComponent
@@ -463,6 +464,45 @@ def _count(result: dict[str, Any], key: str) -> int:
     return len(value) if isinstance(value, list) else 0
 
 
+def _effective_uris(inventory: list[dict[str, str]], not_found: list[str]) -> set[str]:
+    """The URIs the clean-up would keep for one component: its inventory minus its 404s."""
+    return {item["uri"] for item in inventory} - set(not_found)
+
+
+def _check_not_empty(component, source: str, inventory: list[dict[str, str]], not_found: list[str]) -> None:
+    """Raise :class:`EmptyComponentError` when *component* has nothing left to keep.
+
+    *inventory* is the normalised listing (:func:`collect_inventory_uris`, or
+    an incremental SCM component's full listing); a listing whose every URI
+    404'd is as empty as a blank one.
+    """
+    if not _effective_uris(inventory, not_found):
+        raise EmptyComponentError(component.name, _component_type(component), source, len(inventory), len(not_found))
+
+
+def _record_component_error(component, error: Exception, summary: dict[str, Any], target) -> None:
+    """Count, log and fail *target* for a component that raised *error*.
+
+    Called from an ``except`` block, so a generic failure is logged with its
+    traceback; an :class:`EmptyComponentError` is expected and is not.
+    """
+    summary["component_errors"] += 1
+    if isinstance(error, EmptyComponentError):
+        summary["empty_components"] += 1
+        target.set_attribute("component.empty", True)
+        logger.error(
+            "Component %s returned no items and has error_on_empty set (inventory=%d, not_found=%d)",
+            component.name,
+            error.inventory,
+            error.not_found,
+        )
+        telemetry.fail(target, "component returned no items")
+    else:
+        logger.exception("Error running component %s", component.name)
+        # Caught so the next component still runs: fail the span by hand.
+        telemetry.fail(target, f"component failed: {type(error).__name__}", error)
+
+
 async def _run_components(manifest: Manifest, run) -> dict:
     """Execute a manifest's components and reconcile.
 
@@ -472,11 +512,18 @@ async def _run_components(manifest: Manifest, run) -> dict:
     when it returns per-file ``errors``. Either makes the run a failure.
     *run* is the active :class:`~soliplex.agents.manifest.pre_process.PreProcessRun`,
     whose counts join the summary.
+
+    A component with ``error_on_empty`` set fails when nothing is left of its
+    inventory once its 404s are removed (counted in ``empty_components`` as
+    well as ``component_errors``). An incremental SCM component reports only
+    what changed, so it is checked against its full listing, which is fetched
+    only when ``delete_stale`` is on.
     """
     results: list[dict[str, Any]] = []
     summary = {
         "components": len(manifest.components),
         "component_errors": 0,
+        "empty_components": 0,
         "components_with_file_errors": 0,
         "file_errors": 0,
         "listing_errors": 0,
@@ -492,7 +539,9 @@ async def _run_components(manifest: Manifest, run) -> dict:
     all_uri_hashes: list[dict[str, str]] = []
     all_not_found: set[str] = set()
     has_errors = False
-    incremental_scm_components: list[SCMComponent] = []
+    delete_stale = bool(manifest.config and manifest.config.delete_stale)
+    # Each with its entry in ``results``, which the full-listing check may fail.
+    incremental_scm_components: list[tuple[SCMComponent, dict[str, Any]]] = []
 
     for component in manifest.components:
         ctype = _component_type(component)
@@ -514,16 +563,25 @@ async def _run_components(manifest: Manifest, run) -> dict:
                 continue
             try:
                 result = await handler(component, manifest, metadata)
+                is_incremental_scm = isinstance(component, SCMComponent) and component.incremental
+                if component.error_on_empty and not is_incremental_scm:
+                    _check_not_empty(component, manifest.source, collect_inventory_uris(result), result.get("not_found", []))
+                entry = {"component": component.name, "result": result}
                 # Skip URI collection for incremental SCM — handled below
-                if isinstance(component, SCMComponent) and component.incremental:
-                    incremental_scm_components.append(component)
+                if is_incremental_scm:
+                    incremental_scm_components.append((component, entry))
+                    if component.error_on_empty and not delete_stale:
+                        logger.debug(
+                            "Component '%s': error_on_empty not checked (incremental SCM without delete_stale)",
+                            component.name,
+                        )
                 else:
                     all_uri_hashes.extend(collect_inventory_uris(result))
                 # 404s are removals, not errors: exclude them from the reconcile
                 # "should exist" set so their local copies are deleted.
                 all_not_found.update(result.get("not_found", []))
                 summary["ingested"] += _count(result, "ingested")
-                results.append({"component": component.name, "result": result})
+                results.append(entry)
                 # Per-file transient errors (timeout/5xx) block the reconcile to
                 # stay safe, mirroring a raised component exception.
                 file_errors = _count(result, "errors")
@@ -549,27 +607,34 @@ async def _run_components(manifest: Manifest, run) -> dict:
                 else:
                     logger.info("Component '%s' completed successfully", component.name)
             except Exception as e:
-                logger.exception("Error running component %s", component.name)
                 results.append({"component": component.name, "error": str(e)})
-                summary["component_errors"] += 1
                 has_errors = True
-                # Caught so the next component still runs: fail the span by hand.
-                telemetry.fail(component_span, f"component failed: {type(e).__name__}", e)
+                _record_component_error(component, e, summary, component_span)
 
     # --- full URI listing for incremental SCM components -----------------------
-    if manifest.config and manifest.config.delete_stale and not has_errors and incremental_scm_components:
-        for inc_component in incremental_scm_components:
+    if delete_stale and not has_errors:
+        for inc_component, entry in incremental_scm_components:
             with telemetry.span(
                 "list scm uris",
                 f"list scm uris {inc_component.name}",
                 {telemetry.COMPONENT_NAME: inc_component.name, telemetry.MANIFEST_ID: manifest.id},
-            ):
-                full_uris = await _list_scm_all_uris(inc_component, manifest)
-            all_uri_hashes.extend(full_uris)
+            ) as list_span:
+                try:
+                    full_uris = await _list_scm_all_uris(inc_component, manifest)
+                    if inc_component.error_on_empty:
+                        _check_not_empty(inc_component, manifest.source, full_uris, [])
+                except Exception as e:
+                    # The sync itself succeeded, so its result stays; the error
+                    # marks the component failed, which is how the CLI prints it.
+                    entry["error"] = str(e)
+                    has_errors = True
+                    _record_component_error(inc_component, e, summary, list_span)
+                else:
+                    all_uri_hashes.extend(full_uris)
 
     # --- delete stale documents ------------------------------------------------
     delete_stale_result = None
-    if manifest.config and manifest.config.delete_stale:
+    if delete_stale:
         if has_errors:
             summary["delete_stale_skipped"] = True
             logger.warning(
@@ -597,12 +662,13 @@ async def _run_components(manifest: Manifest, run) -> dict:
     failed = summary["component_errors"] or summary["file_errors"]
     logger.log(
         logging.ERROR if failed else logging.INFO,
-        "Manifest '%s' finished: %d components, %d component errors, %d file errors, %d not found (404), %d deleted, "
-        "%d pre-process skipped, %d modified",
+        "Manifest '%s' finished: %d components, %d component errors, %d file errors, %d empty components, "
+        "%d not found (404), %d deleted, %d pre-process skipped, %d modified",
         manifest.id,
         summary["components"],
         summary["component_errors"],
         summary["file_errors"],
+        summary["empty_components"],
         summary["not_found"],
         summary["deleted"],
         summary["pre_process_skipped"],

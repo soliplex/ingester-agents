@@ -44,3 +44,5 @@ components:
     type: webdav
     url: https://webdav.example.com
     urls_file: https://webdav.example.com/manifests/urls.txt
+    # An empty list is an error, not "delete everything"
+    error_on_empty: true

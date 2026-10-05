@@ -329,6 +329,36 @@ async def test_build_config_from_urls_blank_lines(tmp_path, mock_webdav_client, 
 
 
 @pytest.mark.asyncio
+async def test_build_config_from_urls_drops_invalid_lines(tmp_path, mock_webdav_client, local_env):
+    # Only absolute paths are WebDAV paths: comments, full URLs and relative
+    # paths never reach the client.
+    urls_file = tmp_path / "urls.txt"
+    urls_file.write_text("# list\n/documents/test.md\nhttps://dav/x.md\ndocs/y.md\n", encoding="utf-8")
+
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client):
+        config, results = await webdav_app.build_config_from_urls(str(urls_file))
+
+    assert [item["path"] for item in config] == ["/documents/test.md"]
+    assert [r["url"] for r in results] == ["/documents/test.md"]
+
+
+@pytest.mark.asyncio
+async def test_build_config_from_urls_html_raises(tmp_path, mock_webdav_client, local_env):
+    from soliplex.agents import UrlsFileFormatError
+
+    urls_file = tmp_path / "urls.txt"
+    urls_file.write_text("<!DOCTYPE html>\n<html><body>Sign in</body></html>\n", encoding="utf-8")
+
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client) as mock_create,
+        pytest.raises(UrlsFileFormatError, match="returned HTML"),
+    ):
+        await webdav_app.build_config_from_urls(str(urls_file))
+
+    mock_create.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_build_config_from_urls_info_error_all_succeed(tmp_path, local_env):
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:

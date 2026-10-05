@@ -4,6 +4,7 @@ import logging
 import logging.handlers
 import os
 import time
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
 
+from soliplex.agents import log_config
 from soliplex.agents.common.s3 import split_bucket
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,12 @@ def _checked_bucket(value: str | None) -> str | None:
     return value
 
 
+def _blank_is_none(value: str | None) -> str | None:
+    """Treat a blank (or whitespace-only) value as unset, as a compose ``.env`` must."""
+    value = value.strip() if value else value
+    return value or None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(**_secrets_kwargs)
     # SCM settings
@@ -88,6 +96,14 @@ class Settings(BaseSettings):
     extensions: list[str] = ["md", "pdf", "doc", "docx"]
     log_level: str = "INFO"
     log_format: str = "{name}|{asctime}|{levelname}|{message}"
+    # A logging.config.dictConfig file (YAML or JSON) applied on top of the
+    # built-in setup, e.g. to send particular loggers to an HTTP sink. When it
+    # cannot be applied, the built-in setup is used and a warning logged --
+    # or, with LOG_CONFIG_STRICT, logging setup (and so startup) fails.
+    log_config_file: str | None = None
+    log_config_strict: bool = False
+
+    _validate_log_config_file = field_validator("log_config_file", mode="after")(_blank_is_none)
 
     # SMTP email alert settings (handler only added when smtp_host is set)
     smtp_host: str | None = None
@@ -304,27 +320,46 @@ def configure_logging():
     When ``settings.log_format`` equals ``"json"``, a
     `JsonFormatter` is installed; otherwise the value is
     used as a ``str.format``-style pattern.
+
+    ``settings.log_config_file``, when set, is applied on top (see
+    :mod:`soliplex.agents.log_config`): it adds handlers and may set the root
+    level, but the console and SMTP handlers are installed either way. Safe to
+    call repeatedly; each call replaces what the last one installed.
     """
     root = logging.getLogger()
+    log_config.stop_listeners()
+    root.handlers.clear()
     try:
         root.setLevel(settings.log_level)
-        handler = logging.StreamHandler()
-        handler.setFormatter(_make_formatter())
-        root.handlers.clear()
-        root.addHandler(handler)
+        formatter = _make_formatter()
+        invalid_settings = False
     except Exception:
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter(
-                fmt="{name}|{asctime}|{levelname}|{message}",
-                datefmt="%Y-%m-%dT%H:%M:%S",
-                style="{",
-            )
-        )
-        root.handlers.clear()
-        root.addHandler(handler)
         root.setLevel(logging.INFO)
+        formatter = logging.Formatter(
+            fmt="{name}|{asctime}|{levelname}|{message}",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+            style="{",
+        )
+        invalid_settings = True
+
+    # Before the console handler is created: dictConfig closes every handler
+    # that already exists.
+    config_error = None
+    if settings.log_config_file:
+        try:
+            log_config.apply_file(settings.log_config_file)
+        except log_config.LogConfigError as exc:
+            config_error = exc
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    root.addHandler(handler)
+    if invalid_settings:
         root.warning("invalid settings. environment variables might not be set. ")
+    if config_error is not None:
+        if settings.log_config_strict:
+            raise config_error
+        logger.warning("%s; using the built-in logging setup", config_error)
     _add_smtp_handler()
 
 
@@ -382,6 +417,7 @@ class FSComponent(_ManifestModel):
     path: str
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
+    error_on_empty: bool = False
 
 
 class SCMComponent(_ManifestModel):
@@ -399,6 +435,7 @@ class SCMComponent(_ManifestModel):
     auth_token: str | None = None
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
+    error_on_empty: bool = False
 
     @model_validator(mode="after")
     def validate_gitea_base_url(self):
@@ -409,6 +446,17 @@ class SCMComponent(_ManifestModel):
                     "(set in component or via scm_base_url env var)"
                 )
         return self
+
+
+def _check_inline_urls(name: str, entries: list[str], is_valid: Callable[[str], bool], expected: str) -> None:
+    """Raise if any inline URL entry of component *name* fails *is_valid*.
+
+    The same rule the component's ``urls_file`` lines are held to at run time,
+    applied at load so ``manifest validate`` catches a typo before any run.
+    """
+    invalid = [entry for entry in entries if not is_valid(entry.strip())]
+    if invalid:
+        raise ValueError(f"Component '{name}': each URL must be {expected}; invalid: {invalid[:5]!r}")
 
 
 class WebDAVComponent(_ManifestModel):
@@ -428,6 +476,7 @@ class WebDAVComponent(_ManifestModel):
     # listing -- e.g. a folder the service account may never read. Their
     # documents are absent on purpose, so stale removal deletes them.
     exclude_paths: list[str] | None = None
+    error_on_empty: bool = False
 
     @model_validator(mode="after")
     def validate_source_specified(self):
@@ -443,6 +492,14 @@ class WebDAVComponent(_ManifestModel):
                 raise ValueError(f"Component '{self.name}': 'exclude_paths' entries must not be empty")
         return self
 
+    @model_validator(mode="after")
+    def validate_urls_are_paths(self):
+        # Imported here: urls_file imports this module (for settings).
+        from soliplex.agents.common.urls_file import is_webdav_path
+
+        _check_inline_urls(self.name, self.urls or [], is_webdav_path, "an absolute WebDAV path starting with '/'")
+        return self
+
 
 class WebComponent(_ManifestModel):
     """Web page ingestion component (fetches raw HTML)."""
@@ -454,6 +511,7 @@ class WebComponent(_ManifestModel):
     urls_file: str | None = None
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
+    error_on_empty: bool = False
 
     @model_validator(mode="after")
     def validate_source_specified(self):
@@ -462,6 +520,15 @@ class WebComponent(_ManifestModel):
             raise ValueError(f"Component '{self.name}': one of 'url', 'urls', or 'urls_file' is required")
         if sum(sources) > 1:
             raise ValueError(f"Component '{self.name}': only one of 'url', 'urls', or 'urls_file' may be specified")
+        return self
+
+    @model_validator(mode="after")
+    def validate_urls_are_http(self):
+        # Imported here: urls_file imports this module (for settings).
+        from soliplex.agents.common.urls_file import is_http_url
+
+        entries = [self.url] if self.url is not None else self.urls or []
+        _check_inline_urls(self.name, entries, is_http_url, "an http:// or https:// URL with a host")
         return self
 
 
