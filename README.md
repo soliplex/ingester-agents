@@ -797,9 +797,9 @@ Top-level fields:
 **Web (`web`):**
 
 - **name** (required): Component name.
-- **url**: Single URL to fetch.
-- **urls**: List of URLs to fetch.
-- **urls_file**: Path to a file containing URLs (one per line). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` WebDAV URLs.
+- **url**: Single URL to fetch (`http://` or `https://`, with a host).
+- **urls**: List of URLs to fetch (same rule as `url`).
+- **urls_file**: Path to a file containing URLs (one per line; see [URL list files](#url-list-files)). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` URLs.
 - Exactly one of `url`, `urls`, or `urls_file` must be specified.
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
@@ -823,13 +823,41 @@ Top-level fields:
 - **name** (required): Component name.
 - **url** (required): WebDAV server URL.
 - **path**: WebDAV directory path to scan recursively.
-- **urls**: List of specific WebDAV file paths to ingest.
-- **urls_file**: Path to a file containing WebDAV URLs (one per line). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` WebDAV URLs (fetched using the same WebDAV credentials).
+- **urls**: List of specific WebDAV file paths to ingest (each an absolute path starting with `/`).
+- **urls_file**: Path to a file containing WebDAV paths (one per line; see [URL list files](#url-list-files)). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` URLs (fetched with the WebDAV credentials when on the WebDAV host, otherwise with a plain GET).
 - Exactly one of `path`, `urls`, or `urls_file` must be specified.
 - **username**: Override WebDAV username (resolved via Docker secrets or env vars).
 - **password**: Override WebDAV password (resolved via Docker secrets or env vars).
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
+
+#### URL list files
+
+A `urls_file` holds one entry per line:
+
+- Leading and trailing whitespace is stripped; blank lines are ignored.
+- Lines starting with `#` are comments and are ignored.
+- Each remaining line must match the component type: an absolute path
+  starting with `/` for `webdav` (full URLs are not accepted), or an
+  `http://` / `https://` URL with a host for `web`. Invalid lines are dropped
+  with one warning per file, giving the count and up to five examples.
+
+The file is refused -- the component fails, so `delete_stale` is skipped for
+the run -- when:
+
+- it is an HTML document (an error, login or maintenance page served with a
+  200 status by a proxy or upstream server);
+- it is not UTF-8 text;
+- it has content but no valid line once comments and invalid lines are
+  dropped.
+
+An empty list from a non-empty file means the file is wrong, not that the
+source is empty; ingesting it would remove every document of the source. A
+genuinely empty file (no non-blank lines) still yields an empty list.
+
+Inline `urls` (and a `web` component's `url`) are held to the same rule
+when the manifest is loaded, so a bad entry fails manifest loading (and
+`POST /api/v1/manifest/validate`) before any run.
 
 #### Configuration Precedence
 

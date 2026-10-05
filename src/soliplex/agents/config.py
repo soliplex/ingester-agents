@@ -4,6 +4,7 @@ import logging
 import logging.handlers
 import os
 import time
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -440,6 +441,17 @@ class SCMComponent(_ManifestModel):
         return self
 
 
+def _check_inline_urls(name: str, entries: list[str], is_valid: Callable[[str], bool], expected: str) -> None:
+    """Raise if any inline URL entry of component *name* fails *is_valid*.
+
+    The same rule the component's ``urls_file`` lines are held to at run time,
+    applied at load so ``manifest validate`` catches a typo before any run.
+    """
+    invalid = [entry for entry in entries if not is_valid(entry.strip())]
+    if invalid:
+        raise ValueError(f"Component '{name}': each URL must be {expected}; invalid: {invalid[:5]!r}")
+
+
 class WebDAVComponent(_ManifestModel):
     """WebDAV ingestion component."""
 
@@ -463,6 +475,14 @@ class WebDAVComponent(_ManifestModel):
             raise ValueError(f"Component '{self.name}': only one of 'path', 'urls', or 'urls_file' may be specified")
         return self
 
+    @model_validator(mode="after")
+    def validate_urls_are_paths(self):
+        # Imported here: urls_file imports this module (for settings).
+        from soliplex.agents.common.urls_file import is_webdav_path
+
+        _check_inline_urls(self.name, self.urls or [], is_webdav_path, "an absolute WebDAV path starting with '/'")
+        return self
+
 
 class WebComponent(_ManifestModel):
     """Web page ingestion component (fetches raw HTML)."""
@@ -482,6 +502,15 @@ class WebComponent(_ManifestModel):
             raise ValueError(f"Component '{self.name}': one of 'url', 'urls', or 'urls_file' is required")
         if sum(sources) > 1:
             raise ValueError(f"Component '{self.name}': only one of 'url', 'urls', or 'urls_file' may be specified")
+        return self
+
+    @model_validator(mode="after")
+    def validate_urls_are_http(self):
+        # Imported here: urls_file imports this module (for settings).
+        from soliplex.agents.common.urls_file import is_http_url
+
+        entries = [self.url] if self.url is not None else self.urls or []
+        _check_inline_urls(self.name, entries, is_http_url, "an http:// or https:// URL with a host")
         return self
 
 
