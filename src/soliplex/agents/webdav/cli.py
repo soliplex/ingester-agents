@@ -8,6 +8,8 @@ from typing import Annotated
 import aiohttp
 import typer
 
+from soliplex.agents import WebDAVListingError
+
 from . import app
 from .async_client import ClientError
 
@@ -34,6 +36,10 @@ def validate(
         str,
         typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
     ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option(help="Glob, relative to the path, of a folder or file to skip (repeatable)"),
+    ] = None,
 ):
     """
     Validate a configuration.
@@ -41,7 +47,10 @@ def validate(
     Scans the specified WebDAV directory recursively and validates discovered files.
     """
     try:
-        asyncio.run(app.validate_config(config_path, webdav_url, webdav_username, webdav_password))
+        asyncio.run(app.validate_config(config_path, webdav_url, webdav_username, webdav_password, exclude))
+    except WebDAVListingError as e:
+        print(f"Listing error: {e} (skip a folder on purpose with --exclude)", file=sys.stderr)
+        raise SystemExit(1) from None
     except (aiohttp.ClientConnectorError, ClientError, TimeoutError) as e:
         print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
         raise SystemExit(1) from None
@@ -72,6 +81,10 @@ def export_urls(
         str,
         typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
     ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option(help="Glob, relative to the path, of a folder or file to skip (repeatable)"),
+    ] = None,
 ):
     """
     Export discovered URLs to a file.
@@ -80,7 +93,10 @@ def export_urls(
     WebDAV path per line. No file content is downloaded.
     """
     try:
-        asyncio.run(app.export_urls(config_path, output, webdav_url, webdav_username, webdav_password))
+        asyncio.run(app.export_urls(config_path, output, webdav_url, webdav_username, webdav_password, exclude))
+    except WebDAVListingError as e:
+        print(f"Listing error: {e} (skip a folder on purpose with --exclude)", file=sys.stderr)
+        raise SystemExit(1) from None
     except (aiohttp.ClientConnectorError, ClientError, TimeoutError) as e:
         print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
         raise SystemExit(1) from None
@@ -109,6 +125,10 @@ def check_status(
         str,
         typer.Option(help="WebDAV password (uses WEBDAV_PASSWORD env var if not provided)"),
     ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option(help="Glob, relative to the path, of a folder or file to skip (repeatable)"),
+    ] = None,
 ):
     """
     Check the status of files in an inventory.
@@ -116,7 +136,14 @@ def check_status(
     Scans the specified WebDAV directory recursively and checks file status.
     """
     try:
-        asyncio.run(app.status_report(config_path, source, detail, webdav_url, webdav_username, webdav_password))
+        asyncio.run(
+            app.status_report(
+                config_path, source, detail, webdav_url, webdav_username, webdav_password, exclude_paths=exclude
+            )
+        )
+    except WebDAVListingError as e:
+        print(f"Listing error: {e} (skip a folder on purpose with --exclude)", file=sys.stderr)
+        raise SystemExit(1) from None
     except (aiohttp.ClientConnectorError, ClientError, TimeoutError) as e:
         print(f"Connection error: Could not connect to WebDAV server: {e}", file=sys.stderr)
         raise SystemExit(1) from None

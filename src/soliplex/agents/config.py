@@ -130,6 +130,11 @@ class Settings(BaseSettings):
 
     # WebDAV concurrency settings
     webdav_max_concurrent_requests: int = 3
+    # Passes re-walking WebDAV subtrees whose listing failed, and the pause
+    # before the first (doubling each pass). On top of the client's own
+    # per-request retries; a subtree still failing blocks stale removal.
+    webdav_listing_retries: int = 1
+    webdav_listing_retry_delay: float = 2.0
 
     # SCM concurrency and retry settings
     scm_max_concurrent_requests: int = 3
@@ -467,6 +472,10 @@ class WebDAVComponent(_ManifestModel):
     password: str | None = None
     extensions: list[str] | None = None
     metadata: dict[str, str] | None = None
+    # Globs, relative to `path`, of folders (or files) the scan skips without
+    # listing -- e.g. a folder the service account may never read. Their
+    # documents are absent on purpose, so stale removal deletes them.
+    exclude_paths: list[str] | None = None
     error_on_empty: bool = False
 
     @model_validator(mode="after")
@@ -476,6 +485,11 @@ class WebDAVComponent(_ManifestModel):
             raise ValueError(f"Component '{self.name}': one of 'path', 'urls', or 'urls_file' is required")
         if sum(sources) > 1:
             raise ValueError(f"Component '{self.name}': only one of 'path', 'urls', or 'urls_file' may be specified")
+        if self.exclude_paths is not None:
+            if self.path is None:
+                raise ValueError(f"Component '{self.name}': 'exclude_paths' applies only to a 'path' scan")
+            if any(not p.strip().strip("/") for p in self.exclude_paths):
+                raise ValueError(f"Component '{self.name}': 'exclude_paths' entries must not be empty")
         return self
 
     @model_validator(mode="after")

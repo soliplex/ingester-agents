@@ -35,10 +35,13 @@ def test_validate_config_with_webdav_path(client):
     """Test config validation with WebDAV path."""
     with patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app:
         mock_app.build_config = AsyncMock(
-            return_value=[
-                {"path": "test.md", "metadata": {"content-type": "text/markdown"}},
-                {"path": "readme.pdf", "metadata": {"content-type": "application/pdf"}},
-            ]
+            return_value=(
+                [
+                    {"path": "test.md", "metadata": {"content-type": "text/markdown"}},
+                    {"path": "readme.pdf", "metadata": {"content-type": "application/pdf"}},
+                ],
+                [],
+            )
         )
         mock_app.check_config.return_value = [
             {"path": "test.md", "valid": True, "metadata": {"content-type": "text/markdown"}},
@@ -65,10 +68,13 @@ def test_validate_config_with_invalid_files(client):
     """Test config validation with invalid files."""
     with patch("soliplex.agents.server.routes.webdav.webdav_app") as mock_app:
         mock_app.build_config = AsyncMock(
-            return_value=[
-                {"path": "doc1.md", "metadata": {"content-type": "text/markdown"}},
-                {"path": "archive.zip", "metadata": {"content-type": "application/zip"}},
-            ]
+            return_value=(
+                [
+                    {"path": "doc1.md", "metadata": {"content-type": "text/markdown"}},
+                    {"path": "archive.zip", "metadata": {"content-type": "application/zip"}},
+                ],
+                [],
+            )
         )
         mock_app.check_config.return_value = [
             {"path": "doc1.md", "valid": True, "metadata": {"content-type": "text/markdown"}},
@@ -101,10 +107,13 @@ def test_check_status_success(client):
         patch("soliplex.agents.local_state.compute_to_process") as mock_check_status,
     ):
         mock_app.build_config = AsyncMock(
-            return_value=[
-                {"path": "doc1.md", "sha256": "abc123"},
-                {"path": "doc2.md", "sha256": "def456"},
-            ]
+            return_value=(
+                [
+                    {"path": "doc1.md", "sha256": "abc123"},
+                    {"path": "doc2.md", "sha256": "def456"},
+                ],
+                [],
+            )
         )
         mock_check_status.return_value = [
             {"path": "doc1.md", "sha256": "abc123", "status": "new"},
@@ -129,7 +138,7 @@ def test_check_status_with_detail(client):
         patch("soliplex.agents.local_state.compute_to_process") as mock_check_status,
     ):
         to_process = [{"path": "doc1.md", "sha256": "abc123", "status": "new"}]
-        mock_app.build_config = AsyncMock(return_value=[{"path": "doc1.md", "sha256": "abc123"}])
+        mock_app.build_config = AsyncMock(return_value=([{"path": "doc1.md", "sha256": "abc123"}], []))
         mock_check_status.return_value = to_process
 
         response = client.post(
