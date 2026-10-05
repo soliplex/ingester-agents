@@ -9,7 +9,7 @@ the environment.
 
 The file only adds. The console handler, ``LOG_LEVEL`` (unless the file sets
 the root level), the SMTP handler and Logfire are all still installed, so a
-client file cannot turn off console output by accident.
+deployment's file cannot turn off console output by accident.
 
 Two departures from a bare ``dictConfig`` call:
 
