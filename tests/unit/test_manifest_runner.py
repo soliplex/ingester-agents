@@ -409,8 +409,10 @@ class TestRunSummary:
         assert result["summary"] == {
             "components": 2,
             "component_errors": 0,
+            "empty_components": 0,
             "components_with_file_errors": 0,
             "file_errors": 0,
+            "listing_errors": 0,
             "ingested": 4,
             "not_found": 0,
             "deleted": 0,
@@ -445,6 +447,34 @@ class TestRunSummary:
         finished = _finished_record(caplog)
         assert finished.levelno == logging.ERROR
         assert "0 component errors, 3 file errors" in finished.getMessage()
+
+    @pytest.mark.asyncio
+    async def test_listing_errors_block_the_reconcile_and_are_counted_apart(self, spans):
+        # 'wiki' could not list one subtree (and failed one download); 'notes' is clean.
+        partial = {
+            "inventory": [{"path": "listed.md", "sha256": "1"}],
+            "ingested": ["listed.md"],
+            "errors": [
+                {"uri": "/wiki/forbidden", "error": "ClientError: HTTP 403", "stage": "listing"},
+                {"uri": "broken.md", "error": "502"},
+            ],
+        }
+        handler = AsyncMock(side_effect=[partial, {"ingested": ["b"], "errors": []}])
+        with (
+            patch.dict(runner._DISPATCH, {FSComponent: handler}),
+            patch("soliplex.agents.local_state.reconcile_documents", new_callable=AsyncMock) as mock_reconcile,
+        ):
+            result = await runner.run_manifest(_two_component_manifest(delete_stale=True))
+
+        mock_reconcile.assert_not_awaited()
+        summary = result["summary"]
+        assert summary["delete_stale_skipped"] is True
+        assert summary["file_errors"] == 2
+        assert summary["listing_errors"] == 1
+        assert summary["components_with_file_errors"] == 1
+        wiki_span, notes_span = spans.named("component")
+        assert wiki_span.attributes["component.listing_errors"] == 1
+        assert notes_span.attributes["component.listing_errors"] == 0
 
     @pytest.mark.asyncio
     async def test_raised_component_is_an_error_with_a_stable_template(self, caplog):
@@ -612,6 +642,22 @@ class TestRunWebDAVComponent:
             await runner._run_webdav_component(component, manifest, {})
             mock.assert_called_once()
             assert mock.call_args.kwargs["webdav_url"] == "http://dav"
+            assert mock.call_args.kwargs["exclude_paths"] is None
+
+    @pytest.mark.asyncio
+    async def test_path_mode_passes_exclude_paths(self):
+        manifest = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            components=[
+                {"type": "webdav", "name": "d", "url": "http://dav", "path": "/docs", "exclude_paths": ["HR"]},
+            ],
+        )
+        with patch("soliplex.agents.webdav.app.load_inventory", new_callable=AsyncMock) as mock:
+            mock.return_value = {"ingested": [], "errors": []}
+            await runner._run_webdav_component(manifest.components[0], manifest, {})
+        assert mock.call_args.kwargs["exclude_paths"] == ["HR"]
 
     @pytest.mark.asyncio
     async def test_urls_file_mode(self):
@@ -1090,6 +1136,44 @@ class TestRunManifestDeleteStale:
         mock_check.assert_not_called()
         assert result["delete_stale_result"] is None
         assert "Skipping delete_stale" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_delete_stale_skipped_when_webdav_urls_file_is_html(self, tmp_path, monkeypatch, caplog):
+        # A urls_file answering 200 with an HTML page must fail the component
+        # rather than read as an empty list, which would wipe the source.
+        from soliplex.agents import store as agent_store
+
+        monkeypatch.setattr(agent_store.settings, "download_dir", str(tmp_path / "dl"))
+        monkeypatch.setattr(settings, "state_dir", str(tmp_path / "state"))
+        m = Manifest(
+            id="ds-html",
+            name="DS HTML",
+            source="src",
+            config={"delete_stale": True},
+            components=[
+                {
+                    "type": "webdav",
+                    "name": "d",
+                    "url": "https://dav.example.com",
+                    "urls_file": "http://manifest_server:8001/urls.txt",
+                }
+            ],
+        )
+
+        with (
+            patch(
+                "soliplex.agents.common.urls_file.read_text_from_url",
+                new_callable=AsyncMock,
+                return_value="<!DOCTYPE html>\n<html><body>Bad gateway</body></html>\n",
+            ),
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await runner.run_manifest(m)
+
+        mock_check.assert_not_called()
+        assert result["delete_stale_result"] is None
+        assert "returned HTML" in caplog.text
 
     @pytest.mark.asyncio
     async def test_delete_stale_skipped_on_unknown_component(self):
@@ -1863,3 +1947,224 @@ class TestRunManifestsLoadGate:
         assert "haiku.load_skipped.component_errors" not in run.attributes
         # Failed by record_summary for the same errors, not by the skip.
         assert run.status.status_code is StatusCode.ERROR
+
+
+# --- error_on_empty ---
+
+_RECONCILE = "soliplex.agents.manifest.runner.local_state.reconcile_documents"
+_LIST_SCM = "soliplex.agents.manifest.runner._list_scm_all_uris"
+
+
+def _gated_manifest(*components, delete_stale=True):
+    return Manifest(
+        id="gated",
+        name="Gated",
+        source="gated-src",
+        config={"delete_stale": delete_stale},
+        components=list(components),
+    )
+
+
+def _fs(name="docs", **extra):
+    return {"type": "fs", "name": name, "path": f"/{name}", "error_on_empty": True, **extra}
+
+
+def _incremental_scm(**extra):
+    return {
+        "type": "scm",
+        "name": "r",
+        "platform": "github",
+        "owner": "o",
+        "repo": "r",
+        "incremental": True,
+        "error_on_empty": True,
+        **extra,
+    }
+
+
+class TestErrorOnEmpty:
+    @pytest.mark.asyncio
+    async def test_empty_inventory_is_a_component_error_and_blocks_the_clean_up(self, spans, caplog):
+        handler = AsyncMock(return_value={"inventory": [], "ingested": [], "errors": []})
+        with (
+            patch.dict(runner._DISPATCH, {FSComponent: handler}),
+            patch(_RECONCILE) as mock_reconcile,
+            caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.runner"),
+        ):
+            result = await runner.run_manifest(_gated_manifest(_fs()))
+
+        (entry,) = result["results"]
+        assert "result" not in entry
+        assert "error_on_empty" in entry["error"]
+        assert "(fs)" in entry["error"]
+        assert "source 'gated-src'" in entry["error"]
+        assert "(inventory=0, not_found=0)" in entry["error"]
+        summary = result["summary"]
+        assert summary["component_errors"] == 1
+        assert summary["empty_components"] == 1
+        assert summary["delete_stale_skipped"] is True
+        mock_reconcile.assert_not_called()
+
+        (span,) = spans.named("component")
+        assert span.attributes["component.empty"] is True
+        assert span.status.status_code is StatusCode.ERROR
+        assert span.status.description == "component returned no items"
+        assert span.events == ()  # expected, so no exception recorded
+        record = next(r for r in caplog.records if r.getMessage().startswith("Component docs returned no items"))
+        assert record.levelno == logging.ERROR
+        assert record.exc_info is None
+        finished = next(r for r in caplog.records if r.getMessage().startswith("Manifest 'gated' finished"))
+        assert "1 component errors, 0 file errors, 1 empty components" in finished.getMessage()
+
+    @pytest.mark.asyncio
+    async def test_inventory_that_all_404d_is_empty(self):
+        handler = AsyncMock(
+            return_value={
+                "inventory": [{"path": "a.md", "sha256": "1"}, {"path": "b.md", "sha256": "2"}],
+                "not_found": ["a.md", "b.md"],
+                "errors": [],
+            }
+        )
+        with patch.dict(runner._DISPATCH, {FSComponent: handler}), patch(_RECONCILE) as mock_reconcile:
+            result = await runner.run_manifest(_gated_manifest(_fs()))
+
+        assert "(inventory=2, not_found=2)" in result["results"][0]["error"]
+        assert result["summary"]["empty_components"] == 1
+        assert result["summary"]["delete_stale_skipped"] is True
+        mock_reconcile.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_some_404s_pass_and_are_removed(self):
+        handler = AsyncMock(
+            return_value={
+                "inventory": [{"path": "a.md", "sha256": "1"}, {"path": "b.md", "sha256": "2"}],
+                "not_found": ["b.md"],
+                "errors": [],
+            }
+        )
+        with patch.dict(runner._DISPATCH, {FSComponent: handler}), patch(_RECONCILE, return_value=[]) as mock_reconcile:
+            result = await runner.run_manifest(_gated_manifest(_fs()))
+
+        assert "error" not in result["results"][0]
+        assert result["summary"]["empty_components"] == 0
+        mock_reconcile.assert_called_once_with("gated-src", {"a.md"})
+
+    @pytest.mark.asyncio
+    async def test_flag_off_keeps_todays_behaviour(self):
+        handler = AsyncMock(return_value={"inventory": [], "errors": []})
+        with patch.dict(runner._DISPATCH, {FSComponent: handler}), patch(_RECONCILE, return_value=[]) as mock_reconcile:
+            result = await runner.run_manifest(_gated_manifest(_fs(error_on_empty=False)))
+
+        assert result["summary"]["component_errors"] == 0
+        assert result["summary"]["empty_components"] == 0
+        mock_reconcile.assert_called_once_with("gated-src", set())
+
+    @pytest.mark.asyncio
+    async def test_path_and_uri_rows_both_count(self):
+        scm = {"type": "scm", "name": "repo", "platform": "github", "owner": "o", "repo": "r", "error_on_empty": True}
+        fs_handler = AsyncMock(return_value={"inventory": [{"path": "a.md", "sha256": "1"}], "errors": []})
+        scm_handler = AsyncMock(return_value={"inventory": [{"uri": "src/b.md", "sha256": "2"}], "errors": []})
+        with (
+            patch.dict(runner._DISPATCH, {FSComponent: fs_handler, SCMComponent: scm_handler}),
+            patch(_RECONCILE, return_value=[]) as mock_reconcile,
+        ):
+            result = await runner.run_manifest(_gated_manifest(_fs(), scm))
+
+        assert result["summary"]["component_errors"] == 0
+        mock_reconcile.assert_called_once_with("gated-src", {"a.md", "src/b.md"})
+
+    @pytest.mark.asyncio
+    async def test_one_empty_component_blocks_the_clean_up_for_the_whole_manifest(self):
+        healthy = {"inventory": [{"path": "a.md", "sha256": "1"}], "ingested": ["a.md"], "errors": []}
+        handler = AsyncMock(side_effect=[{"inventory": [], "errors": []}, healthy])
+        with patch.dict(runner._DISPATCH, {FSComponent: handler}), patch(_RECONCILE) as mock_reconcile:
+            result = await runner.run_manifest(_gated_manifest(_fs("empty"), _fs("healthy")))
+
+        empty, kept = result["results"]
+        assert "error_on_empty" in empty["error"]
+        assert kept == {"component": "healthy", "result": healthy}
+        assert result["summary"]["ingested"] == 1
+        assert result["summary"]["delete_stale_skipped"] is True
+        mock_reconcile.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_gate_applies_without_delete_stale(self):
+        handler = AsyncMock(return_value={"inventory": [], "errors": []})
+        with patch.dict(runner._DISPATCH, {FSComponent: handler}), patch(_RECONCILE) as mock_reconcile:
+            result = await runner.run_manifest(_gated_manifest(_fs(), delete_stale=False))
+
+        assert result["summary"]["empty_components"] == 1
+        assert result["summary"]["delete_stale_skipped"] is False
+        mock_reconcile.assert_not_called()
+
+
+class TestErrorOnEmptyIncrementalSCM:
+    _UP_TO_DATE = {"status": "up-to-date", "inventory": [], "ingested": [], "errors": []}
+
+    @pytest.mark.asyncio
+    async def test_empty_full_listing_is_a_component_error(self, spans):
+        with (
+            patch.dict(runner._DISPATCH, {SCMComponent: AsyncMock(return_value=self._UP_TO_DATE)}),
+            patch(_LIST_SCM, new_callable=AsyncMock, return_value=[]),
+            patch(_RECONCILE) as mock_reconcile,
+        ):
+            result = await runner.run_manifest(_gated_manifest(_incremental_scm()))
+
+        (entry,) = result["results"]
+        # The sync's own result is kept; the error marks the component failed.
+        assert entry["result"] == self._UP_TO_DATE
+        assert "(scm)" in entry["error"]
+        assert "error_on_empty" in entry["error"]
+        assert result["summary"]["component_errors"] == 1
+        assert result["summary"]["empty_components"] == 1
+        assert result["summary"]["delete_stale_skipped"] is True
+        mock_reconcile.assert_not_called()
+        (list_span,) = spans.named("list scm uris")
+        assert list_span.attributes["component.empty"] is True
+        assert list_span.status.status_code is StatusCode.ERROR
+
+    @pytest.mark.asyncio
+    async def test_non_empty_full_listing_passes(self):
+        full = [{"uri": "a.md", "sha256": "1"}]
+        with (
+            patch.dict(runner._DISPATCH, {SCMComponent: AsyncMock(return_value=self._UP_TO_DATE)}),
+            patch(_LIST_SCM, new_callable=AsyncMock, return_value=full),
+            patch(_RECONCILE, return_value=[]) as mock_reconcile,
+        ):
+            result = await runner.run_manifest(_gated_manifest(_incremental_scm()))
+
+        assert "error" not in result["results"][0]
+        mock_reconcile.assert_called_once_with("gated-src", {"a.md"})
+
+    @pytest.mark.asyncio
+    async def test_without_delete_stale_nothing_is_checked(self, caplog):
+        with (
+            patch.dict(runner._DISPATCH, {SCMComponent: AsyncMock(return_value=self._UP_TO_DATE)}),
+            patch(_LIST_SCM, new_callable=AsyncMock) as mock_list,
+            caplog.at_level(logging.DEBUG, logger="soliplex.agents.manifest.runner"),
+        ):
+            result = await runner.run_manifest(_gated_manifest(_incremental_scm(), delete_stale=False))
+
+        mock_list.assert_not_called()
+        assert result["summary"]["component_errors"] == 0
+        record = next(r for r in caplog.records if "error_on_empty not checked" in r.getMessage())
+        assert record.levelno == logging.DEBUG
+
+    @pytest.mark.asyncio
+    async def test_a_failed_full_listing_is_recorded_not_raised(self, spans, caplog):
+        with (
+            patch.dict(runner._DISPATCH, {SCMComponent: AsyncMock(return_value=self._UP_TO_DATE)}),
+            patch(_LIST_SCM, new_callable=AsyncMock, side_effect=RuntimeError("api down")),
+            patch(_RECONCILE) as mock_reconcile,
+            caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.runner"),
+        ):
+            result = await runner.run_manifest(_gated_manifest(_incremental_scm(error_on_empty=False)))
+
+        assert result["results"][0]["error"] == "api down"
+        assert result["summary"]["component_errors"] == 1
+        assert result["summary"]["empty_components"] == 0
+        assert result["summary"]["delete_stale_skipped"] is True
+        mock_reconcile.assert_not_called()
+        assert any(r.getMessage() == "Error running component r" and r.exc_info for r in caplog.records)
+        (list_span,) = spans.named("list scm uris")
+        assert list_span.status.description == "component failed: RuntimeError"

@@ -12,6 +12,12 @@ components:
     type: webdav
     url: https://webdav.example.com
     path: /documents
+    # Optional: globs (relative to `path`) skipped without listing, e.g. a
+    # folder the account may never read. Their documents are absent on
+    # purpose, so stale removal deletes them.
+    exclude_paths:
+      - HR
+      - "**/Private"
 
   # Ingest a specific list of files
   - name: curated-files
@@ -38,3 +44,5 @@ components:
     type: webdav
     url: https://webdav.example.com
     urls_file: https://webdav.example.com/manifests/urls.txt
+    # An empty list is an error, not "delete everything"
+    error_on_empty: true

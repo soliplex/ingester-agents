@@ -6,16 +6,28 @@ import json
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
+from xml.etree.ElementTree import ParseError
 
 import aiofiles
 import pytest
 
+from soliplex.agents import WebDAVListingError
 from soliplex.agents import local_state
 from soliplex.agents import local_store
 from soliplex.agents import store as agent_store
 from soliplex.agents.webdav import app as webdav_app
 from soliplex.agents.webdav.async_client import AsyncWebDAVClient
+from soliplex.agents.webdav.async_client import ClientError
+from soliplex.agents.webdav.async_client import InsufficientStorage
+from soliplex.agents.webdav.async_client import ResourceNotFound
+from soliplex.agents.webdav.async_client import RetryableHTTPError
 from soliplex.agents.webdav.async_client import WebDAVResponse
+
+
+@pytest.fixture(autouse=True)
+def _no_listing_retry_delay(monkeypatch):
+    """Retry failed subtrees without the production pause."""
+    monkeypatch.setattr(webdav_app.settings, "webdav_listing_retry_delay", 0)
 
 
 @pytest.fixture
@@ -50,14 +62,16 @@ async def test_build_config(mock_webdav_client, local_env):
     """No cached state → sha256 deferred (None)."""
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client),
-        patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
+        patch("soliplex.agents.webdav.app.walk_webdav", new_callable=AsyncMock) as mock_ls,
     ):
-        mock_ls.return_value = [
-            {"path": "/documents/test.md", "size": 100},
-            {"path": "/documents/readme.pdf", "size": 200},
-        ]
+        mock_ls.return_value = webdav_app.ListingResult(
+            [
+                {"path": "/documents/test.md", "size": 100},
+                {"path": "/documents/readme.pdf", "size": 200},
+            ]
+        )
 
-        config = await webdav_app.build_config("/documents")
+        config, _ = await webdav_app.build_config("/documents")
 
     assert len(config) == 2
     assert config[0]["path"] in ("test.md", "readme.pdf")
@@ -77,10 +91,10 @@ async def test_build_config_etag_cache_hit(local_env):
 
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
-        patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
+        patch("soliplex.agents.webdav.app.walk_webdav", new_callable=AsyncMock) as mock_ls,
     ):
-        mock_ls.return_value = [{"path": "/documents/test.md", "size": 100, "etag": '"etag1"'}]
-        config = await webdav_app.build_config("/documents", source="s")
+        mock_ls.return_value = webdav_app.ListingResult([{"path": "/documents/test.md", "size": 100, "etag": '"etag1"'}])
+        config, _ = await webdav_app.build_config("/documents", source="s")
 
     assert len(config) == 1
     assert config[0]["sha256"] == "cached_hash_abc"
@@ -99,10 +113,10 @@ async def test_build_config_etag_cache_miss(local_env):
 
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
-        patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
+        patch("soliplex.agents.webdav.app.walk_webdav", new_callable=AsyncMock) as mock_ls,
     ):
-        mock_ls.return_value = [{"path": "/documents/test.md", "size": 100, "etag": '"new_etag"'}]
-        config = await webdav_app.build_config("/documents", source="s")
+        mock_ls.return_value = webdav_app.ListingResult([{"path": "/documents/test.md", "size": 100, "etag": '"new_etag"'}])
+        config, _ = await webdav_app.build_config("/documents", source="s")
 
     assert config[0]["sha256"] is None
     assert config[0]["_etag"] == '"new_etag"'
@@ -121,10 +135,10 @@ async def test_build_config_no_etag_from_server(local_env):
 
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
-        patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
+        patch("soliplex.agents.webdav.app.walk_webdav", new_callable=AsyncMock) as mock_ls,
     ):
-        mock_ls.return_value = [{"path": "/documents/test.md", "size": 100}]
-        config = await webdav_app.build_config("/documents", source="s")
+        mock_ls.return_value = webdav_app.ListingResult([{"path": "/documents/test.md", "size": 100}])
+        config, _ = await webdav_app.build_config("/documents", source="s")
 
     assert config[0]["sha256"] is None
     assert "_etag" not in config[0]
@@ -145,13 +159,15 @@ async def test_build_config_no_downloads_on_cache_miss(local_env):
 
     with (
         patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_client),
-        patch("soliplex.agents.webdav.app.recursive_listdir_webdav", new_callable=AsyncMock) as mock_ls,
+        patch("soliplex.agents.webdav.app.walk_webdav", new_callable=AsyncMock) as mock_ls,
     ):
-        mock_ls.return_value = [
-            {"path": "/documents/good.md", "size": 100},
-            {"path": "/documents/also_good.pdf", "size": 300},
-        ]
-        config = await webdav_app.build_config("/documents")
+        mock_ls.return_value = webdav_app.ListingResult(
+            [
+                {"path": "/documents/good.md", "size": 100},
+                {"path": "/documents/also_good.pdf", "size": 300},
+            ]
+        )
+        config, _ = await webdav_app.build_config("/documents")
 
     assert len(config) == 2
     assert all(item["sha256"] is None for item in config)
@@ -209,11 +225,12 @@ async def test_recursive_listdir_webdav_reraises_connection_error():
 
 
 @pytest.mark.asyncio
-async def test_recursive_listdir_webdav_swallows_other_errors():
+async def test_recursive_listdir_webdav_raises_on_root_failure():
+    """An unexpected error at the root surfaces; it never becomes an empty listing."""
     mock_client = AsyncMock()
     mock_client.ls.side_effect = PermissionError("Access denied")
-    files = await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
-    assert files == []
+    with pytest.raises(PermissionError):
+        await webdav_app.recursive_listdir_webdav(mock_client, "/documents")
 
 
 # --- list_config ---
@@ -312,6 +329,36 @@ async def test_build_config_from_urls_blank_lines(tmp_path, mock_webdav_client, 
 
 
 @pytest.mark.asyncio
+async def test_build_config_from_urls_drops_invalid_lines(tmp_path, mock_webdav_client, local_env):
+    # Only absolute paths are WebDAV paths: comments, full URLs and relative
+    # paths never reach the client.
+    urls_file = tmp_path / "urls.txt"
+    urls_file.write_text("# list\n/documents/test.md\nhttps://dav/x.md\ndocs/y.md\n", encoding="utf-8")
+
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client):
+        config, results = await webdav_app.build_config_from_urls(str(urls_file))
+
+    assert [item["path"] for item in config] == ["/documents/test.md"]
+    assert [r["url"] for r in results] == ["/documents/test.md"]
+
+
+@pytest.mark.asyncio
+async def test_build_config_from_urls_html_raises(tmp_path, mock_webdav_client, local_env):
+    from soliplex.agents import UrlsFileFormatError
+
+    urls_file = tmp_path / "urls.txt"
+    urls_file.write_text("<!DOCTYPE html>\n<html><body>Sign in</body></html>\n", encoding="utf-8")
+
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=mock_webdav_client) as mock_create,
+        pytest.raises(UrlsFileFormatError, match="returned HTML"),
+    ):
+        await webdav_app.build_config_from_urls(str(urls_file))
+
+    mock_create.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_build_config_from_urls_info_error_all_succeed(tmp_path, local_env):
     urls_file = str(tmp_path / "urls.txt")
     async with aiofiles.open(urls_file, "w") as f:
@@ -380,9 +427,10 @@ async def test_build_config_from_urls_info_error_no_download(tmp_path, local_env
 @pytest.mark.asyncio
 async def test_validate_config_with_webdav_path(capsys):
     with patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build:
-        mock_build.return_value = [
-            {"path": "test.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}}
-        ]
+        mock_build.return_value = (
+            [{"path": "test.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}}],
+            [],
+        )
         await webdav_app.validate_config("/documents")
         captured = capsys.readouterr()
         assert "Total files: 1" in captured.out
@@ -397,7 +445,7 @@ async def test_export_urls_uses_list_config(capsys, tmp_path):
             {"path": "sub/readme.pdf", "metadata": {"size": 200, "content-type": "application/pdf"}},
         ]
         await webdav_app.export_urls("/documents", output_file)
-        mock_list.assert_called_once_with("/documents", None, None, None)
+        mock_list.assert_called_once_with("/documents", None, None, None, exclude_paths=None)
         captured = capsys.readouterr()
         assert "Found 2 files" in captured.out
         assert "Exported 2 URLs" in captured.out
@@ -412,9 +460,10 @@ async def test_load_inventory_with_webdav_path(local_env):
         patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock) as mock_build,
         patch("soliplex.agents.webdav.app.do_ingest", new_callable=AsyncMock, return_value={"result": "success"}),
     ):
-        mock_build.return_value = [
-            {"path": "test.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}}
-        ]
+        mock_build.return_value = (
+            [{"path": "test.md", "sha256": "abc", "metadata": {"size": 100, "content-type": "text/markdown"}}],
+            [],
+        )
         result = await webdav_app.load_inventory("/documents", "test-source")
 
     assert len(result["inventory"]) == 1
@@ -840,8 +889,8 @@ async def test_recursive_listdir_propagates_connection_errors_from_a_subtree():
 
 
 @pytest.mark.asyncio
-async def test_recursive_listdir_keeps_partial_results_on_a_non_connection_error():
-    """A non-connection failure drops that subtree and keeps the siblings."""
+async def test_walk_webdav_records_a_non_connection_error_and_keeps_siblings():
+    """A non-connection failure leaves that subtree out, records it, and keeps the siblings."""
 
     async def fake_ls(path, detail=True):
         if path == "/root":
@@ -856,5 +905,515 @@ async def test_recursive_listdir_keeps_partial_results_on_a_non_connection_error
     client = AsyncMock()
     client.ls = AsyncMock(side_effect=fake_ls)
 
-    files = await webdav_app.recursive_listdir_webdav(client, "/root")
-    assert [f["path"] for f in files] == ["/root/good/f.md"]
+    result = await webdav_app.walk_webdav(client, "/root")
+    assert [f["path"] for f in result.files] == ["/root/good/f.md"]
+    assert result.errors == [{"path": "/root/bad", "error": "ValueError: malformed listing"}]
+
+
+# --- listing failures: a gap in the walk must never look like a removal ---
+
+
+def _tree_client(failures: dict[str, BaseException]):
+    """A client serving /root/{a,b,c}/f.md, plus /root/a/deep/f.md.
+
+    *failures* maps a directory path to the exception its PROPFIND raises.
+    """
+    tree = {
+        "/root": [
+            {"name": "top.md", "type": "file", "content_length": 1, "etag": '"e"'},
+            {"name": "a", "type": "directory", "content_length": 0},
+            {"name": "b", "type": "directory", "content_length": 0},
+            {"name": "c", "type": "directory", "content_length": 0},
+        ],
+        "/root/a": [
+            {"name": "f.md", "type": "file", "content_length": 1, "etag": '"e"'},
+            {"name": "deep", "type": "directory", "content_length": 0},
+        ],
+        "/root/a/deep": [{"name": "f.md", "type": "file", "content_length": 1, "etag": '"e"'}],
+        "/root/b": [{"name": "f.md", "type": "file", "content_length": 1, "etag": '"e"'}],
+        "/root/c": [{"name": "f.md", "type": "file", "content_length": 1, "etag": '"e"'}],
+    }
+
+    async def fake_ls(path, detail=True):
+        if path in failures:
+            raise failures[path]
+        return tree[path]
+
+    client = AsyncMock()
+    client.ls = AsyncMock(side_effect=fake_ls)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    return client
+
+
+_ROOT_FAILURES = [
+    RetryableHTTPError(503, "unavailable"),
+    ClientError("HTTP 401: unauthorized"),
+    ClientError("HTTP 403: forbidden"),
+    InsufficientStorage("/root"),
+    ClientError("Expected 207 multistatus, got 200"),
+    ParseError("not well-formed"),
+    ResourceNotFound("/root"),
+    PermissionError("unexpected"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc", _ROOT_FAILURES, ids=lambda e: type(e).__name__)
+async def test_walk_webdav_raises_on_root_failure(exc):
+    client = _tree_client({"/root": exc})
+    with pytest.raises(type(exc)):
+        await webdav_app.walk_webdav(client, "/root")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc", _ROOT_FAILURES, ids=lambda e: type(e).__name__)
+async def test_recursive_listdir_webdav_raises_on_root_failure_of_any_kind(exc):
+    client = _tree_client({"/root": exc})
+    with pytest.raises(type(exc)):
+        await webdav_app.recursive_listdir_webdav(client, "/root")
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_records_a_forbidden_subtree():
+    client = _tree_client({"/root/b": ClientError("HTTP 403: forbidden")})
+
+    result = await webdav_app.walk_webdav(client, "/root")
+
+    assert [f["path"] for f in result.files] == [
+        "/root/top.md",
+        "/root/a/f.md",
+        "/root/a/deep/f.md",
+        "/root/c/f.md",
+    ]
+    assert result.errors == [{"path": "/root/b", "error": "ClientError: HTTP 403: forbidden"}]
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_reports_a_nested_failure_at_the_top():
+    client = _tree_client({"/root/a/deep": RetryableHTTPError(503, "unavailable")})
+
+    result = await webdav_app.walk_webdav(client, "/root")
+
+    assert "/root/a/f.md" in [f["path"] for f in result.files]
+    assert "/root/a/deep/f.md" not in [f["path"] for f in result.files]
+    assert [e["path"] for e in result.errors] == ["/root/a/deep"]
+    assert result.errors[0]["error"].startswith("RetryableHTTPError: ")
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_records_a_subtree_404_instead_of_aborting():
+    client = _tree_client({"/root/c": ResourceNotFound("/root/c")})
+
+    result = await webdav_app.walk_webdav(client, "/root")
+
+    assert [e["path"] for e in result.errors] == ["/root/c"]
+    assert len(result.files) == 4
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_records_a_malformed_subtree_body():
+    client = _tree_client({"/root/a": ParseError("not well-formed")})
+
+    result = await webdav_app.walk_webdav(client, "/root")
+
+    assert result.errors == [{"path": "/root/a", "error": "ParseError: not well-formed"}]
+    assert [f["path"] for f in result.files] == ["/root/top.md", "/root/b/f.md", "/root/c/f.md"]
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_still_aborts_on_a_subtree_timeout():
+    client = _tree_client({"/root/a/deep": TimeoutError("gone")})
+    with pytest.raises(TimeoutError):
+        await webdav_app.walk_webdav(client, "/root")
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_logs_one_summary_record_for_an_incomplete_walk(caplog):
+    client = _tree_client({"/root/a": ClientError("HTTP 403"), "/root/b": ClientError("HTTP 403")})
+
+    with caplog.at_level("ERROR", logger="soliplex.agents.webdav.app"):
+        await webdav_app.walk_webdav(client, "/root")
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages.count("Error listing WebDAV subtree /root/a") == 1
+    assert messages.count("Error listing WebDAV subtree /root/b") == 1
+    assert "WebDAV listing of /root incomplete: 2 subtree(s) failed; stale removal will be skipped" in messages
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_webdav_is_strict_about_subtrees():
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+
+    with pytest.raises(WebDAVListingError) as excinfo:
+        await webdav_app.recursive_listdir_webdav(client, "/root")
+
+    assert excinfo.value.path == "/root"
+    assert [e["path"] for e in excinfo.value.errors] == ["/root/b"]
+    assert "/root/b" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_build_config_returns_listing_errors(local_env):
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+
+    config, listing_errors = await webdav_app.build_config("/root", client=client)
+
+    assert sorted(r["path"] for r in config) == ["a/deep/f.md", "a/f.md", "c/f.md", "top.md"]
+    assert listing_errors == [{"path": "/root/b", "error": "ClientError: HTTP 403"}]
+
+
+@pytest.mark.asyncio
+async def test_build_config_raises_on_root_failure(local_env):
+    client = _tree_client({"/root": ClientError("HTTP 401")})
+    with pytest.raises(ClientError):
+        await webdav_app.build_config("/root", client=client)
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_listing_errors_block_delete_stale_but_listed_files_download(local_env):
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=client),
+        patch(
+            "soliplex.agents.webdav.app.do_ingest", new_callable=AsyncMock, return_value={"result": "success"}
+        ) as mock_ingest,
+        patch.object(webdav_app.local_state, "reconcile_documents", new_callable=AsyncMock) as mock_reconcile,
+    ):
+        result = await webdav_app.load_inventory("/root", "test-source", webdav_url="http://dav", delete_stale=True)
+
+    assert result["errors"] == [{"uri": "/root/b", "error": "ClientError: HTTP 403", "stage": "listing"}]
+    assert sorted(result["ingested"]) == ["a/deep/f.md", "a/f.md", "c/f.md", "top.md"]
+    assert mock_ingest.await_count == 4
+    assert result["delete_stale_result"] is None
+    mock_reconcile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_root_listing_failure_raises_and_deletes_nothing(local_env):
+    client = _tree_client({"/root": RetryableHTTPError(503, "unavailable")})
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=client),
+        patch.object(webdav_app.local_state, "reconcile_documents", new_callable=AsyncMock) as mock_reconcile,
+        pytest.raises(RetryableHTTPError),
+    ):
+        await webdav_app.load_inventory("/root", "test-source", webdav_url="http://dav", delete_stale=True)
+
+    mock_reconcile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_config_raises_on_a_failed_subtree():
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=client),
+        pytest.raises(WebDAVListingError),
+    ):
+        await webdav_app.list_config("/root")
+
+
+@pytest.mark.asyncio
+async def test_export_urls_writes_nothing_on_a_failed_subtree(tmp_path):
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+    output_file = tmp_path / "exported.txt"
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=client),
+        pytest.raises(WebDAVListingError),
+    ):
+        await webdav_app.export_urls("/root", str(output_file))
+
+    assert not output_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_validate_config_raises_on_a_failed_subtree(local_env):
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=client),
+        pytest.raises(WebDAVListingError),
+    ):
+        await webdav_app.validate_config("/root")
+
+
+@pytest.mark.asyncio
+async def test_status_report_raises_on_a_failed_subtree(local_env):
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=client),
+        pytest.raises(WebDAVListingError),
+    ):
+        await webdav_app.status_report("/root", "test-source")
+
+
+# --- exclude_paths: folders skipped on purpose ---
+
+
+def _paths(result):
+    return [f["path"] for f in result.files]
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_excluded_folder_is_never_listed_and_is_not_an_error():
+    client = _tree_client({"/root/b": ClientError("HTTP 403: forbidden")})
+
+    result = await webdav_app.walk_webdav(client, "/root", exclude_paths=["b"])
+
+    assert result.errors == []
+    assert result.excluded == ["/root/b"]
+    assert "/root/b" not in [c.args[0] for c in client.ls.call_args_list]
+    assert _paths(result) == ["/root/top.md", "/root/a/f.md", "/root/a/deep/f.md", "/root/c/f.md"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pattern,excluded",
+    [
+        ("a/deep", ["/root/a/deep"]),
+        ("/a/deep/", ["/root/a/deep"]),
+        ("**/deep", ["/root/a/deep"]),
+        ("*/deep", ["/root/a/deep"]),
+        ("deep", []),  # relative to the root: only a top-level 'deep'
+        ("[ab]", ["/root/a", "/root/b"]),
+        ("*.md", ["/root/top.md"]),  # '*' stays within one segment
+        ("**/f.md", ["/root/a/f.md", "/root/a/deep/f.md", "/root/b/f.md", "/root/c/f.md"]),
+    ],
+)
+async def test_walk_webdav_exclude_paths_glob_semantics(pattern, excluded):
+    client = _tree_client({})
+
+    result = await webdav_app.walk_webdav(client, "/root", exclude_paths=[pattern])
+
+    assert sorted(result.excluded) == sorted(excluded)
+    assert not set(excluded) & set(_paths(result))
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_exclude_matches_the_decoded_name():
+    async def fake_ls(path, detail=True):
+        if path == "/root":
+            return [
+                {"name": "Human%20Resources", "type": "directory", "content_length": 0},
+                {"name": "ok.md", "type": "file", "content_length": 1},
+            ]
+        raise AssertionError(f"listed {path}")
+
+    client = AsyncMock()
+    client.ls = AsyncMock(side_effect=fake_ls)
+
+    result = await webdav_app.walk_webdav(client, "/root", exclude_paths=["Human Resources"])
+
+    assert result.excluded == ["/root/Human%20Resources"]
+    assert _paths(result) == ["/root/ok.md"]
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_exclude_relative_to_the_server_root():
+    async def fake_ls(path, detail=True):
+        if path == "/":
+            return [
+                {"name": "a", "type": "directory", "content_length": 0},
+                {"name": "b", "type": "directory", "content_length": 0},
+            ]
+        return [{"name": "f.md", "type": "file", "content_length": 1}]
+
+    client = AsyncMock()
+    client.ls = AsyncMock(side_effect=fake_ls)
+
+    result = await webdav_app.walk_webdav(client, "/", exclude_paths=["a"])
+
+    assert result.excluded == ["/a"]
+    assert _paths(result) == ["/b/f.md"]
+
+
+def test_normalize_exclude_paths_rejects_an_empty_pattern():
+    with pytest.raises(ValueError, match="empty pattern"):
+        webdav_app.normalize_exclude_paths(["ok", " / "])
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_logs_exclusions(caplog):
+    client = _tree_client({})
+    with caplog.at_level("INFO", logger="soliplex.agents.webdav.app"):
+        await webdav_app.walk_webdav(client, "/root", exclude_paths=["b"])
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert "Excluding WebDAV path /root/b" in messages
+    assert "WebDAV listing of /root: 1 path(s) excluded by exclude_paths" in messages
+
+
+@pytest.mark.asyncio
+async def test_recursive_listdir_webdav_honours_exclude_paths():
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+
+    files = await webdav_app.recursive_listdir_webdav(client, "/root", exclude_paths=["b"])
+
+    assert "/root/b/f.md" not in [f["path"] for f in files]
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_excluded_folder_lets_delete_stale_run(local_env):
+    """Excluded documents are absent on purpose, so the clean-up proceeds without them."""
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=client),
+        patch("soliplex.agents.webdav.app.do_ingest", new_callable=AsyncMock, return_value={"result": "success"}),
+        patch.object(
+            webdav_app.local_state, "reconcile_documents", new_callable=AsyncMock, return_value=["b/f.md"]
+        ) as mock_reconcile,
+    ):
+        result = await webdav_app.load_inventory(
+            "/root", "test-source", webdav_url="http://dav", delete_stale=True, exclude_paths=["b"]
+        )
+
+    assert result["errors"] == []
+    mock_reconcile.assert_awaited_once_with("test-source", {"top.md", "a/f.md", "a/deep/f.md", "c/f.md"})
+    assert result["delete_stale_result"] == ["b/f.md"]
+
+
+@pytest.mark.asyncio
+async def test_export_urls_honours_exclude_paths(tmp_path):
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+    output_file = tmp_path / "exported.txt"
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=client):
+        await webdav_app.export_urls("/root", str(output_file), exclude_paths=["b"])
+
+    assert output_file.read_text().splitlines() == ["/root/top.md", "/root/a/f.md", "/root/a/deep/f.md", "/root/c/f.md"]
+
+
+@pytest.mark.asyncio
+async def test_validate_and_status_honour_exclude_paths(local_env, capsys):
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=client):
+        await webdav_app.validate_config("/root", exclude_paths=["b"])
+        await webdav_app.status_report("/root", "test-source", exclude_paths=["b"])
+
+    out = capsys.readouterr().out
+    assert "Total files: 4" in out
+
+
+# --- retries of failed subtrees ---
+
+
+def _flaky(failures: dict[str, list[BaseException]]):
+    """A tree client whose directories fail with each queued exception in turn, then list."""
+    healthy = _tree_client({})
+
+    async def fake_ls(path, detail=True):
+        queue = failures.get(path)
+        if queue:
+            raise queue.pop(0)
+        return await healthy.ls(path, detail=detail)
+
+    client = AsyncMock()
+    client.ls = AsyncMock(side_effect=fake_ls)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_retry_recovers_a_transient_subtree_failure(caplog):
+    client = _flaky({"/root/a": [RetryableHTTPError(503, "unavailable")]})
+
+    with caplog.at_level("INFO", logger="soliplex.agents.webdav.app"):
+        result = await webdav_app.walk_webdav(client, "/root")
+
+    assert result.errors == []
+    assert sorted(_paths(result)) == ["/root/a/deep/f.md", "/root/a/f.md", "/root/b/f.md", "/root/c/f.md", "/root/top.md"]
+    messages = [r.getMessage() for r in caplog.records]
+    assert "Retrying 1 failed WebDAV subtree(s) under /root in 0.0s (pass 1 of 1)" in messages
+    assert "WebDAV subtree /root/a listed on retry" in messages
+    # Recovered: nothing reported at ERROR.
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_retry_gives_up_after_the_configured_passes(monkeypatch):
+    monkeypatch.setattr(webdav_app.settings, "webdav_listing_retries", 2)
+    failures = [ClientError("HTTP 403")] * 5
+    client = _flaky({"/root/b": list(failures)})
+
+    result = await webdav_app.walk_webdav(client, "/root")
+
+    assert result.errors == [{"path": "/root/b", "error": "ClientError: HTTP 403"}]
+    assert [c.args[0] for c in client.ls.call_args_list].count("/root/b") == 3
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_retry_disabled(monkeypatch):
+    monkeypatch.setattr(webdav_app.settings, "webdav_listing_retries", 0)
+    client = _flaky({"/root/b": [ClientError("HTTP 403")]})
+
+    result = await webdav_app.walk_webdav(client, "/root")
+
+    assert [e["path"] for e in result.errors] == ["/root/b"]
+    assert [c.args[0] for c in client.ls.call_args_list].count("/root/b") == 1
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_retry_reports_a_nested_failure_found_on_retry():
+    # '/root/a' fails, then lists on retry, but its 'deep' child fails that time.
+    client = _flaky(
+        {
+            "/root/a": [RetryableHTTPError(503, "unavailable")],
+            "/root/a/deep": [ParseError("not well-formed")],
+        }
+    )
+
+    result = await webdav_app.walk_webdav(client, "/root")
+
+    assert result.errors == [{"path": "/root/a/deep", "error": "ParseError: not well-formed"}]
+    assert "/root/a/f.md" in _paths(result)
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_retry_still_aborts_on_a_connection_error():
+    client = _flaky({"/root/a": [ClientError("HTTP 403"), TimeoutError("gone")]})
+    with pytest.raises(TimeoutError):
+        await webdav_app.walk_webdav(client, "/root")
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_retry_backs_off(monkeypatch):
+    monkeypatch.setattr(webdav_app.settings, "webdav_listing_retries", 3)
+    monkeypatch.setattr(webdav_app.settings, "webdav_listing_retry_delay", 1.5)
+    client = _flaky({"/root/b": [ClientError("HTTP 403")] * 4})
+
+    with patch("soliplex.agents.webdav.app.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        await webdav_app.walk_webdav(client, "/root")
+
+    assert [c.args[0] for c in mock_sleep.await_args_list] == [1.5, 3.0, 6.0]
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_does_not_retry_a_complete_walk():
+    client = _tree_client({})
+    with patch("soliplex.agents.webdav.app.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await webdav_app.walk_webdav(client, "/root")
+
+    assert result.errors == []
+    mock_sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_walk_webdav_final_error_log_carries_the_exception(caplog):
+    client = _tree_client({"/root/b": ClientError("HTTP 403")})
+    with caplog.at_level("ERROR", logger="soliplex.agents.webdav.app"):
+        await webdav_app.walk_webdav(client, "/root")
+
+    (record,) = [r for r in caplog.records if r.getMessage() == "Error listing WebDAV subtree /root/b"]
+    assert isinstance(record.exc_info[1], ClientError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc",
+    [ClientError("HTTP 401: unauthorized"), ClientError("HTTP 403: forbidden")],
+    ids=["401", "403"],
+)
+async def test_walk_webdav_retries_auth_failures(exc):
+    """401/403 are fixed upstream (credential, ACL), so they are retried like a 5xx."""
+    client = _flaky({"/root/b": [exc]})
+
+    result = await webdav_app.walk_webdav(client, "/root")
+
+    assert result.errors == []
+    assert "/root/b/f.md" in _paths(result)

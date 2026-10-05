@@ -18,6 +18,8 @@ components:
   - name: from-local-file
     type: web
     urls_file: web-urls.txt
+    # An empty list is an error, not "delete everything"
+    error_on_empty: true
 
   # Load URL list from S3
   - name: from-s3-file

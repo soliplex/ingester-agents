@@ -39,6 +39,7 @@ MIME types are detected from file **content** (via [puremagic](https://pypi.org/
   - Supports all agent types (fs, scm, webdav, web) in a single manifest
   - Shared configuration (metadata, extensions, haiku-rag load config)
   - Stale document removal (`delete_stale`) across all components in a manifest
+  - Per-component `error_on_empty` guard, so an empty listing can't wipe a source
   - Cron-based scheduling via the REST API server
   - Per-component credential and extension overrides
   - Directory-level execution for running multiple manifests at once
@@ -167,6 +168,8 @@ EXTENSIONS=md,pdf,doc,docx
 
 # Logging level (default: INFO)
 LOG_LEVEL=INFO
+# LOG_CONFIG_FILE=/etc/ingester/logging.yaml   # extra handlers; see Custom Logging below
+# LOG_CONFIG_STRICT=false                      # fail startup when that file can't be applied
 
 # API Server Configuration
 SERVER_HOST=127.0.0.1
@@ -229,6 +232,58 @@ haiku-rag config file needs a further set of its own — model and service
 endpoints, and the bucket variables in S3 mode — which fail the load when
 unset; see [Variables the haiku-rag config
 needs](#variables-the-haiku-rag-config-needs).
+
+### Custom Logging
+
+`LOG_CONFIG_FILE` names a YAML (or JSON) file in
+[`logging.config.dictConfig`](https://docs.python.org/3/library/logging.config.html#logging-config-dictschema)
+form, which is applied on top of the built-in setup. Use it to send particular
+loggers somewhere else, for example to an HTTP log sink. `()` names any
+factory importable in the environment, so a package installed alongside this
+one can supply its own handler classes.
+
+```yaml
+version: 1
+handlers:
+  sink:
+    class: logging.handlers.QueueHandler   # sends from a background thread
+    level: ERROR
+    listener: logging.handlers.QueueListener
+    handlers: [sink_http]
+    queue:
+      (): queue.Queue
+      maxsize: 1000                        # a down sink can't grow it forever
+  sink_http:
+    (): my_package.log_handlers.MyHTTPHandler
+    level: ERROR
+    host: logs.example.com
+root:
+  handlers: [sink]
+```
+
+How the file is applied:
+
+- **It only adds.** The console handler, the SMTP handler and Logfire are
+  installed whether or not the file names the root logger. `LOG_LEVEL` still
+  sets the root level, unless the file sets `root.level`.
+- **Existing loggers stay on.** `disable_existing_loggers` defaults to `false`.
+  The stdlib default would silence every module logger, since they all exist
+  by the time logging is configured.
+- **Queue listeners are started for you.** `dictConfig` builds a
+  `QueueHandler`'s listener but doesn't start it. Each time logging is
+  configured, the previous listeners are stopped and the queued records
+  delivered first; they are stopped the same way at exit. Put any handler that
+  makes network calls behind a `QueueHandler`, so a slow destination never
+  blocks the event loop.
+- **A file that can't be applied doesn't stop the process.** This covers a
+  missing file, invalid YAML, a document that isn't a mapping, and a config
+  `dictConfig` rejects. The built-in setup is used, a warning is logged, and
+  whatever the file had partly configured is removed. Set
+  `LOG_CONFIG_STRICT=true` to fail instead.
+
+The file covers this process only. The `haiku-ingester` and `haiku-rag`
+subprocesses configure their own logging; their output reaches this process's
+log through the `soliplex.agents.manifest.haiku_process` logger.
 
 ### Tracing with Logfire
 
@@ -581,6 +636,52 @@ Each URL in a URL list is processed independently: if a file fails to
 download, the error is recorded and processing continues with the rest. See
 `example-manifests/webdav.yml` for every source form.
 
+A `path` scan never mistakes a listing failure for an empty directory:
+
+- If the root `path` can't be listed (401/403, a 5xx that outlasts the
+  retries, a non-207 reply, a malformed body), the component fails and
+  nothing is deleted.
+- If a subdirectory can't be listed, the rest of the tree is listed first,
+  then each failed subdirectory is re-walked (`WEBDAV_LISTING_RETRIES`
+  passes, default 1, after a pause of `WEBDAV_LISTING_RETRY_DELAY` seconds,
+  default 2, doubling each pass). This is on top of the client's own
+  per-request retries of 5xx replies. 401 and 403 are retried too, since a
+  renewed credential or a restored permission upstream can clear them.
+- A subdirectory still failing after its retries is recorded as a file error
+  with `"stage": "listing"` (counted under `listing_errors` in the run
+  summary). The files that were listed are still downloaded, but stale
+  removal is skipped for that run.
+- A timeout or connection error anywhere aborts the whole scan.
+
+A folder the service account can never read would therefore block stale
+removal on every run. Skip it on purpose with `exclude_paths`:
+
+```yaml
+  - name: shared-drive
+    type: webdav
+    url: https://webdav.example.com
+    path: /documents
+    exclude_paths:
+      - HR                # /documents/HR
+      - Projects/*/Legal  # Legal one level under any project
+      - "**/Private"      # a Private folder at any depth
+```
+
+Each entry is a glob matched against the path relative to `path`, after
+percent-decoding (write `Human Resources`, not `Human%20Resources`). The
+syntax is `pathlib`'s `full_match`: `*` matches within one path segment and
+`**` across any number of them, so a pattern without `**` is anchored at
+`path`. Matching is case-sensitive. A matching folder is never listed, so a
+403 on it is not an error. A pattern matching a file skips that file. The
+documents of an excluded path are absent from the inventory on purpose, so
+stale removal deletes any copies left from earlier runs. `exclude_paths` is
+valid only with `path`.
+
+`export-urls`, `validate-config` and `check-status` are strict: a
+subdirectory that still can't be listed makes them fail and write no output,
+rather than produce a partial list. They take the same globs as repeatable
+`--exclude` options.
+
 #### Commands
 
 **1. Export URLs**
@@ -741,16 +842,18 @@ Top-level fields:
 - **path** (required): Path to a local directory.
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
+- **error_on_empty**: Treat an empty result as a component error, which blocks stale-document removal (default: false). See [Empty-result protection](#empty-result-protection).
 
 **Web (`web`):**
 
 - **name** (required): Component name.
-- **url**: Single URL to fetch.
-- **urls**: List of URLs to fetch.
-- **urls_file**: Path to a file containing URLs (one per line). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` WebDAV URLs.
+- **url**: Single URL to fetch (`http://` or `https://`, with a host).
+- **urls**: List of URLs to fetch (same rule as `url`).
+- **urls_file**: Path to a file containing URLs (one per line; see [URL list files](#url-list-files)). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` URLs.
 - Exactly one of `url`, `urls`, or `urls_file` must be specified.
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
+- **error_on_empty**: Treat an empty result as a component error, which blocks stale-document removal (default: false). See [Empty-result protection](#empty-result-protection).
 
 **SCM (`scm`):**
 
@@ -765,19 +868,50 @@ Top-level fields:
 - **auth_token**: Override auth token name (resolved via Docker secrets or env vars).
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
+- **error_on_empty**: Treat an empty result as a component error, which blocks stale-document removal (default: false). See [Empty-result protection](#empty-result-protection).
 
 **WebDAV (`webdav`):**
 
 - **name** (required): Component name.
 - **url** (required): WebDAV server URL.
 - **path**: WebDAV directory path to scan recursively.
-- **urls**: List of specific WebDAV file paths to ingest.
-- **urls_file**: Path to a file containing WebDAV URLs (one per line). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` WebDAV URLs (fetched using the same WebDAV credentials).
+- **urls**: List of specific WebDAV file paths to ingest (each an absolute path starting with `/`).
+- **urls_file**: Path to a file containing WebDAV paths (one per line; see [URL list files](#url-list-files)). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` URLs (fetched with the WebDAV credentials when on the WebDAV host, otherwise with a plain GET).
 - Exactly one of `path`, `urls`, or `urls_file` must be specified.
+- **exclude_paths**: With `path` only: globs, relative to `path`, of folders or files to skip without listing them; their documents are removed by stale removal. See [Ingesting from WebDAV](#ingesting-from-webdav).
 - **username**: Override WebDAV username (resolved via Docker secrets or env vars).
 - **password**: Override WebDAV password (resolved via Docker secrets or env vars).
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
+- **error_on_empty**: Treat an empty result as a component error, which blocks stale-document removal (default: false). See [Empty-result protection](#empty-result-protection).
+
+#### URL list files
+
+A `urls_file` holds one entry per line:
+
+- Leading and trailing whitespace is stripped; blank lines are ignored.
+- Lines starting with `#` are comments and are ignored.
+- Each remaining line must match the component type: an absolute path
+  starting with `/` for `webdav` (full URLs are not accepted), or an
+  `http://` / `https://` URL with a host for `web`. Invalid lines are dropped
+  with one warning per file, giving the count and up to five examples.
+
+The file is refused -- the component fails, so `delete_stale` is skipped for
+the run -- when:
+
+- it is an HTML document (an error, login or maintenance page served with a
+  200 status by a proxy or upstream server);
+- it is not UTF-8 text;
+- it has content but no valid line once comments and invalid lines are
+  dropped.
+
+An empty list from a non-empty file means the file is wrong, not that the
+source is empty; ingesting it would remove every document of the source. A
+genuinely empty file (no non-blank lines) still yields an empty list.
+
+Inline `urls` (and a `web` component's `url`) are held to the same rule
+when the manifest is loaded, so a bad entry fails manifest loading (and
+`POST /api/v1/manifest/validate`) before any run.
 
 #### Configuration Precedence
 
@@ -807,8 +941,30 @@ When `delete_stale: true` is set in a manifest's `config` block, the runner remo
 
 **Safety:**
 
-- If **any** component raises, hits an unknown type, or reports a **transient per-file error** (timeout / 5xx), `delete_stale` is **skipped entirely** for that manifest run. This prevents accidental deletions when the URI set may be incomplete. (A 404 is a removal signal, not a transient error, so it does not trigger this skip.)
+- If **any** component raises, hits an unknown type, reports a **transient per-file error** (timeout / 5xx), or (with `error_on_empty`) returns nothing, `delete_stale` is **skipped entirely** for that manifest run. This prevents accidental deletions when the URI set may be incomplete. (A 404 is a removal signal, not a transient error, so it does not trigger this skip.)
 - Components that succeed still have their documents ingested normally — only the stale deletion step is skipped.
+- The same errors also skip the run's **haiku load**, which would otherwise delete from the database whatever is missing from the folder; so does a download location left empty. See [haiku-rag Loading](#haiku-rag-loading).
+- A component that returns **no items** counts as a success unless it sets `error_on_empty: true` (see below), so an empty listing would otherwise delete every document the source holds.
+
+**Empty-result protection:**
+
+For most sources an empty result is never legitimate: it means a `urls_file` that came back blank (an HTML page, non-UTF-8 text or a comments-only file is already refused; see [URL list files](#url-list-files)), an fs path that isn't mounted, or a WebDAV list whose every entry returned 404. Set `error_on_empty: true` on such a component to make "nothing came back" a component error, which skips `delete_stale` for the run like any other component error:
+
+```yaml
+components:
+  - name: pubs
+    type: webdav
+    url: https://webdav.example.com
+    urls_file: https://webdav.example.com/manifests/urls.txt
+    error_on_empty: true
+```
+
+- The check is on the component's *effective* set: its inventory minus the URIs that returned 404. A list whose every URL 404s is as empty as a blank one.
+- Extension filtering happens first, so a source holding only disallowed file types counts as empty.
+- The error message gives the inventory and `not_found` counts, telling "the list was empty" apart from "everything 404'd".
+- The run's `summary` counts these in `empty_components` as well as in `component_errors`; the component span carries `component.empty: true`.
+- An incremental SCM component (`incremental: true`) is checked against its full listing, which is only fetched when `delete_stale` is on. With `delete_stale` off there is no clean-up to protect, so the flag does nothing for it.
+- Default `false`, so existing manifests behave as before.
 
 **Example:**
 
@@ -830,7 +986,7 @@ components:
 
 If a file is removed from `/data/docs` or from the WebDAV server (dropped from the listing, or returning 404 on fetch), the next manifest run detects that its URI is no longer present and deletes it — and its sidecar — from the download directory.
 
-**Note:** SCM components using `incremental: true` only return files changed since the last sync, not the full file listing. When `delete_stale` is enabled with incremental SCM components, the stale detection may not have complete URI coverage for those components. Consider using full inventory mode (`incremental: false`) when `delete_stale` is needed with SCM sources.
+**Note:** SCM components using `incremental: true` only return files changed since the last sync, not the full file listing. When `delete_stale` is enabled, the runner therefore fetches each incremental component's full file listing after the sync and reconciles against that, not against the partial inventory. That listing is one extra walk of the repository per run; if it fails, it is recorded as a component error and `delete_stale` is skipped. With `error_on_empty: true`, an empty full listing is an error too.
 
 #### Scheduling
 

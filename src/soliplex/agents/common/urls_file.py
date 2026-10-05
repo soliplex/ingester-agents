@@ -1,22 +1,126 @@
 """Shared utility for reading URL list files from local paths, S3, or WebDAV."""
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
 
 import aiofiles
 import aiohttp
 
+from soliplex.agents import UrlsFileFormatError
 from soliplex.agents.common.s3 import is_s3_url
 from soliplex.agents.common.s3 import read_text_from_s3
 from soliplex.agents.config import settings
 
 logger = logging.getLogger(__name__)
 
+LineValidator = Callable[[str], bool]
+
+# Tags that mark a document as HTML when it also starts with "<" (see
+# _looks_like_html). Only the first _HTML_SNIFF_CHARS are inspected.
+_HTML_MARKERS = ("<!doctype html", "<html", "<head", "<body")
+_HTML_SNIFF_CHARS = 4096
+
+# How many dropped lines the warning quotes, and how much of each.
+_MAX_EXAMPLES = 5
+_MAX_EXAMPLE_CHARS = 120
+
 
 def is_webdav_url(path: str) -> bool:
     """Return True if *path* looks like an HTTP(S) URL."""
     return path.startswith("http://") or path.startswith("https://")
+
+
+def is_webdav_path(line: str) -> bool:
+    """Return True if *line* is an absolute path on a WebDAV server.
+
+    Full URLs are not accepted: the WebDAV client joins a path onto its base
+    URL, so ``https://host/path`` would become ``base/https://host/path``.
+    """
+    return line.startswith("/")
+
+
+def is_http_url(line: str) -> bool:
+    """Return True if *line* is an ``http://`` or ``https://`` URL with a host."""
+    parsed = urlparse(line)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+def _looks_like_html(content: str) -> bool:
+    """Return True if *content* is an HTML document rather than a URL list.
+
+    The document must start with ``<`` (after a BOM and whitespace) **and**
+    contain one of :data:`_HTML_MARKERS` near its start, so a list line that
+    merely contains ``<html`` can't trip it.
+    """
+    head = content[:_HTML_SNIFF_CHARS].lstrip("\ufeff \t\r\n").lower()
+    return head.startswith("<") and any(marker in head for marker in _HTML_MARKERS)
+
+
+def _example(line: str) -> str:
+    """Return *line* quoted and truncated for a log or error message."""
+    if len(line) > _MAX_EXAMPLE_CHARS:
+        line = line[:_MAX_EXAMPLE_CHARS] + "..."
+    return repr(line)
+
+
+def parse_urls_content(
+    content: str,
+    urls_file: str,
+    *,
+    is_valid_line: LineValidator | None = None,
+) -> list[str]:
+    """Turn the text of a URL list file into its list of URLs.
+
+    - An HTML document raises :class:`UrlsFileFormatError`.
+    - Lines are stripped; blank lines and ``#`` comment lines are dropped.
+    - When *is_valid_line* is given, lines it rejects are dropped, with one
+      WARNING per file giving the count and a few examples.
+    - If lines were dropped and none remain, :class:`UrlsFileFormatError` is
+      raised: an empty list from a non-empty file means the file is wrong,
+      and returning it would read as "the source is empty".
+    - A file with no non-blank lines at all returns ``[]``.
+
+    Args:
+        content: The decoded file contents.
+        urls_file: The file's location, for messages.
+        is_valid_line: Optional per-line check (e.g. :func:`is_webdav_path`).
+
+    Returns:
+        The valid lines, in file order.
+    """
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if _looks_like_html(content):
+        first = lines[0] if lines else ""
+        raise UrlsFileFormatError(
+            f"urls_file {urls_file} returned HTML, not a URL list (first line: {_example(first)}); refusing to use it"
+        )
+
+    entries = [line for line in lines if not line.startswith("#")]
+    if is_valid_line is None:
+        valid, invalid = entries, []
+    else:
+        valid = [line for line in entries if is_valid_line(line)]
+        invalid = [line for line in entries if not is_valid_line(line)]
+
+    if lines and not valid:
+        if invalid:
+            raise UrlsFileFormatError(
+                f"urls_file {urls_file}: all {len(invalid)} lines were invalid; first: {_example(invalid[0])}"
+            )
+        raise UrlsFileFormatError(f"urls_file {urls_file}: contains only comment lines, no URLs")
+
+    if invalid:
+        examples = ", ".join(_example(line) for line in invalid[:_MAX_EXAMPLES])
+        logger.warning(
+            "urls_file %s: dropped %d invalid line(s) of %d, e.g. %s",
+            urls_file,
+            len(invalid),
+            len(entries),
+            examples,
+        )
+    return valid
 
 
 def resolve_local_path(
@@ -133,8 +237,10 @@ async def read_urls_file(
     webdav_url: str | None = None,
     webdav_username: str | None = None,
     webdav_password: str | None = None,
+    *,
+    is_valid_line: LineValidator | None = None,
 ) -> list[str]:
-    """Read a URL list file and return non-empty, stripped lines.
+    """Read a URL list file and return its URLs.
 
     Supports S3 URLs (``s3://bucket/key``), HTTP(S) URLs, and local filesystem
     paths.  For local paths, relative paths are resolved against *base_dir* when
@@ -146,6 +252,8 @@ async def read_urls_file(
     GET (:func:`read_text_from_url`) -- its host is honored as given rather than
     rewritten to the WebDAV server.
 
+    The text is then checked and filtered by :func:`parse_urls_content`.
+
     Args:
         urls_file: Path, S3 URL, or HTTP(S) URL to the URL list file.
         base_dir: Optional directory for resolving relative local paths.
@@ -153,19 +261,28 @@ async def read_urls_file(
             host and, for WebDAV-host URLs, the base).
         webdav_username: Optional WebDAV username (for WebDAV-host URLs).
         webdav_password: Optional WebDAV password (for WebDAV-host URLs).
+        is_valid_line: Optional per-line check; lines it rejects are dropped.
+            When *None*, comments are still stripped and HTML still rejected.
 
     Returns:
-        List of non-empty, whitespace-stripped lines.
+        List of non-empty, whitespace-stripped, non-comment lines.
+
+    Raises:
+        UrlsFileFormatError: The file isn't UTF-8 text, is an HTML document, or
+            has no valid line left after filtering.
     """
-    if is_s3_url(urls_file):
-        content = await read_text_from_s3(urls_file, settings.s3_endpoint_url)
-    elif is_webdav_url(urls_file):
-        if _is_on_webdav_host(urls_file, webdav_url):
-            content = await read_text_from_webdav(urls_file, webdav_url, webdav_username, webdav_password)
+    try:
+        if is_s3_url(urls_file):
+            content = await read_text_from_s3(urls_file, settings.s3_endpoint_url)
+        elif is_webdav_url(urls_file):
+            if _is_on_webdav_host(urls_file, webdav_url):
+                content = await read_text_from_webdav(urls_file, webdav_url, webdav_username, webdav_password)
+            else:
+                content = await read_text_from_url(urls_file)
         else:
-            content = await read_text_from_url(urls_file)
-    else:
-        resolved = resolve_local_path(urls_file, base_dir)
-        async with aiofiles.open(resolved) as f:
-            content = await f.read()
-    return [line.strip() for line in content.splitlines() if line.strip()]
+            resolved = resolve_local_path(urls_file, base_dir)
+            async with aiofiles.open(resolved, encoding="utf-8") as f:
+                content = await f.read()
+    except UnicodeDecodeError as exc:
+        raise UrlsFileFormatError(f"urls_file {urls_file} is not UTF-8 text, not a URL list: {exc}") from exc
+    return parse_urls_content(content, urls_file, is_valid_line=is_valid_line)

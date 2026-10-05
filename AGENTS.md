@@ -33,6 +33,7 @@ si-agent manifest run example-manifests/fs.yml --no-load
 src/soliplex/agents/
 ├── cli.py              # Main Typer CLI entry point
 ├── config.py           # Pydantic settings + manifest models
+├── log_config.py       # LOG_CONFIG_FILE: a dictConfig file applied by configure_logging()
 ├── local_state.py      # Local sync state (content hashes, commit SHAs)
 ├── store.py            # DownloadTarget + DocumentStore (local | s3) -- where documents live
 ├── sidecar/            # Sidecar kinds (.meta.json), their format and addressing

@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
+from soliplex.agents import EmptyComponentError
 from soliplex.agents import ValidationError
 from soliplex.agents import store as agent_store
 from soliplex.agents.config import SCM
@@ -42,6 +43,7 @@ class TestConfigureLogging:
         with patch("soliplex.agents.config.settings") as mock_settings:
             mock_settings.log_level = "INVALID_LEVEL"
             mock_settings.log_format = None
+            mock_settings.log_config_file = None
             # Force basicConfig to raise on first call
             with patch("logging.basicConfig", side_effect=[ValueError("bad"), None]):
                 configure_logging()
@@ -171,6 +173,27 @@ class TestWebDAVComponent:
         assert c.username == "USER_VAR"
         assert c.password == "PASS_VAR"
 
+    def test_exclude_paths(self):
+        c = WebDAVComponent(name="test", url="http://dav", path="/docs", exclude_paths=["HR", "**/Private"])
+        assert c.exclude_paths == ["HR", "**/Private"]
+
+    def test_exclude_paths_defaults_to_none(self):
+        assert WebDAVComponent(name="test", url="http://dav", path="/docs").exclude_paths is None
+
+    def test_exclude_paths_requires_a_path_scan(self):
+        with pytest.raises(ValueError, match="applies only to a 'path' scan"):
+            WebDAVComponent(name="test", url="http://dav", urls=["/a.pdf"], exclude_paths=["HR"])
+
+    @pytest.mark.parametrize("pattern", ["", "  ", "/", "//"])
+    def test_exclude_paths_rejects_an_empty_pattern(self, pattern):
+        with pytest.raises(ValueError, match="must not be empty"):
+            WebDAVComponent(name="test", url="http://dav", path="/docs", exclude_paths=[pattern])
+
+    @pytest.mark.parametrize("bad", ["https://dav/a.pdf", "a/b.pdf"])
+    def test_urls_entry_not_absolute_path_raises(self, bad):
+        with pytest.raises(ValueError, match="absolute WebDAV path"):
+            WebDAVComponent(name="test", url="http://dav", urls=["/a.pdf", bad])
+
 
 # --- WebComponent ---
 
@@ -195,6 +218,15 @@ class TestWebComponent:
     def test_multiple_sources_raises(self):
         with pytest.raises(ValueError, match="only one"):
             WebComponent(name="test", url="http://a.com", urls=["http://b.com"])
+
+    @pytest.mark.parametrize("bad", ["/a", "ftp://x/a", "https://", "example.com/a"])
+    def test_non_http_url_raises(self, bad):
+        with pytest.raises(ValueError, match="http:// or https:// URL"):
+            WebComponent(name="test", url=bad)
+
+    def test_non_http_urls_entry_raises(self):
+        with pytest.raises(ValueError, match=r"invalid: \['/b'\]"):
+            WebComponent(name="test", urls=["http://a.com", "/b"])
 
 
 # --- ManifestConfig ---
@@ -521,3 +553,46 @@ class TestHookSteps:
         assert manifest.config.pre_run[0].timeout == 15
         assert manifest.config.pre_process[0].mime_types == ["application/pdf"]
         assert self._manifest({"pre_process": []}).config.pre_process == []
+
+
+# --- error_on_empty ---
+
+_ERROR_ON_EMPTY_COMPONENTS = [
+    {"type": "fs", "name": "c", "path": "/d"},
+    {"type": "scm", "name": "c", "platform": "github", "owner": "o", "repo": "r"},
+    {"type": "webdav", "name": "c", "url": "http://dav", "path": "/"},
+    {"type": "web", "name": "c", "url": "http://x"},
+]
+
+
+@pytest.mark.parametrize("component", _ERROR_ON_EMPTY_COMPONENTS, ids=lambda c: c["type"])
+def test_error_on_empty_defaults_to_false(component):
+    assert Manifest(**_raw(components=[component])).components[0].error_on_empty is False
+
+
+@pytest.mark.parametrize("component", _ERROR_ON_EMPTY_COMPONENTS, ids=lambda c: c["type"])
+def test_error_on_empty_parses(component):
+    manifest = Manifest(**_raw(components=[{**component, "error_on_empty": True}]))
+    assert manifest.components[0].error_on_empty is True
+
+
+def test_error_on_empty_typo_is_rejected():
+    with pytest.raises(PydanticValidationError) as excinfo:
+        Manifest(**_raw(components=[{"type": "fs", "name": "c", "path": "/d", "error_on_emtpy": True}]))
+    errors = excinfo.value.errors()
+    assert [e["loc"] for e in errors if e["type"] == "extra_forbidden"] == [("components", 0, "fs", "error_on_emtpy")]
+
+
+def test_empty_component_error_message():
+    err = EmptyComponentError("pubs", "webdav", "pubs-webdav", 3, 3)
+    assert str(err) == (
+        "Component 'pubs' (webdav) returned no items (after extension filtering) and has error_on_empty set; "
+        "skipping stale-document removal for source 'pubs-webdav' (inventory=3, not_found=3)"
+    )
+    assert (err.component, err.component_type, err.source, err.inventory, err.not_found) == (
+        "pubs",
+        "webdav",
+        "pubs-webdav",
+        3,
+        3,
+    )
