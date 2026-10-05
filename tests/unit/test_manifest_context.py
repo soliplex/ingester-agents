@@ -1,5 +1,7 @@
 """Unit tests for soliplex.agents.manifest.context."""
 
+from pathlib import Path
+
 import pytest
 
 from soliplex.agents import store as agent_store
@@ -33,8 +35,35 @@ def test_download_uri_is_the_source_base(ctx):
 def test_env_carries_the_context(ctx, tmp_path):
     env = ctx.env({})
     assert env["SOURCE"] == "gitea_admin_r_all"
-    assert env["DOWNLOAD_DIR"] == str(tmp_path / "dl")
+    assert env["DOWNLOAD_DIR"] == str((tmp_path / "dl").resolve())
     assert env["DOWNLOAD_URI"] == ctx.download_uri
+
+
+def test_env_exports_a_relative_local_download_dir_resolved(tmp_path, monkeypatch):
+    """A relative DOWNLOAD_DIR would be re-resolved against the consumer's cwd (HAIKU_LOAD_CWD)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(agent_store.settings, "download_dir", "dl")
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", None)
+    agent_store.reset_store_cache()
+    try:
+        env = LoadContext.for_source("src").env({})
+    finally:
+        agent_store.reset_store_cache()
+    assert env["DOWNLOAD_DIR"] == str((tmp_path / "dl").resolve())
+    assert Path(env["DOWNLOAD_DIR"]).is_absolute()
+
+
+def test_env_exports_an_object_target_dir_as_configured(monkeypatch, memory_store):
+    """An S3 target's dir is a key prefix, not a path: it is not resolved."""
+    monkeypatch.setattr(agent_store.settings, "download_dir", "downloads")
+    monkeypatch.setattr(agent_store.settings, "download_s3_bucket", "s3://bucket/pfx")
+    agent_store.reset_store_cache()
+    try:
+        env = LoadContext.for_source("src").env({})
+    finally:
+        agent_store.reset_store_cache()
+    assert env["DOWNLOAD_DIR"] == "downloads"
+    assert env["DOWNLOAD_URI"] == "s3://bucket/pfx/downloads/src"
 
 
 def test_env_defaults_to_the_process_environment(ctx, monkeypatch):

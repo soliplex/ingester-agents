@@ -183,6 +183,62 @@ class TestWorker:
         assert mock_load.await_args.kwargs["run_result"] == {"results": [], "summary": {}}
 
     @pytest.mark.asyncio
+    async def test_a_run_with_errors_queues_no_load(self, tmp_path, caplog):
+        path = _write_manifest(tmp_path, "a.yml", "aaa")
+        manifest_queue.start_worker()
+        failed = {"results": [], "summary": {"component_errors": 1, "file_errors": 2}}
+        with (
+            patch("soliplex.agents.server.manifest_queue.settings") as ms,
+            patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock, return_value=failed),
+            patch("soliplex.agents.server.manifest_queue.enqueue_load", new_callable=AsyncMock) as mock_load,
+            caplog.at_level(logging.ERROR, logger="soliplex.agents.server.manifest_queue"),
+        ):
+            ms.haiku_load_enabled = True
+            ms.haiku_load_on_error = False
+            await manifest_queue.enqueue_manifest("aaa", path)
+            await _drain()
+        mock_load.assert_not_called()
+        assert "Manifest 'aaa' had errors (component_errors=1, file_errors=2); haiku load not queued" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_run_with_only_404s_queues_a_load(self, tmp_path):
+        path = _write_manifest(tmp_path, "a.yml", "aaa")
+        manifest_queue.start_worker()
+        with (
+            patch("soliplex.agents.server.manifest_queue.settings") as ms,
+            patch(
+                "soliplex.agents.manifest.runner.run_manifest",
+                new_callable=AsyncMock,
+                return_value={"results": [], "summary": {"not_found": 3}},
+            ),
+            patch("soliplex.agents.server.manifest_queue.enqueue_load", new_callable=AsyncMock) as mock_load,
+        ):
+            ms.haiku_load_enabled = True
+            ms.haiku_load_on_error = False
+            await manifest_queue.enqueue_manifest("aaa", path)
+            await _drain()
+        assert mock_load.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_load_on_error_queues_a_load_anyway(self, tmp_path):
+        path = _write_manifest(tmp_path, "a.yml", "aaa")
+        manifest_queue.start_worker()
+        with (
+            patch("soliplex.agents.server.manifest_queue.settings") as ms,
+            patch(
+                "soliplex.agents.manifest.runner.run_manifest",
+                new_callable=AsyncMock,
+                return_value={"results": [], "summary": {"file_errors": 1}},
+            ),
+            patch("soliplex.agents.server.manifest_queue.enqueue_load", new_callable=AsyncMock) as mock_load,
+        ):
+            ms.haiku_load_enabled = True
+            ms.haiku_load_on_error = True
+            await manifest_queue.enqueue_manifest("aaa", path)
+            await _drain()
+        assert mock_load.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_a_run_skipped_by_pre_run_queues_no_load(self, tmp_path, caplog):
         path = _write_manifest(tmp_path, "a.yml", "aaa")
         manifest_queue.start_worker()

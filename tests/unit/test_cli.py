@@ -53,7 +53,7 @@ def test_without_otel_nothing_is_configured_or_traced(monkeypatch, configure, sp
 
 
 def test_otel_opens_one_root_span_that_the_command_runs_under(monkeypatch, configure, spans, tmp_path):
-    async def fake_run_manifests(path, load=False):
+    async def fake_run_manifests(path, load=False, load_on_error=None, allow_empty_load=None):
         # Spans opened by the command -- inside asyncio.run -- nest under it.
         with telemetry.span("inner", "inner"):
             pass

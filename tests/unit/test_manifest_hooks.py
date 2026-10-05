@@ -133,6 +133,57 @@ async def test_run_result_is_handed_to_the_load(env, tmp_path):
     assert result["haiku_load"] == {}
 
 
+def boom_document(document):
+    raise RuntimeError("cannot process")
+
+
+def _write_run(tmp_path, config):
+    path = tmp_path / "m.yml"
+    path.write_text(_manifest(tmp_path, config).model_dump_json(), encoding="utf-8")
+    return path
+
+
+@pytest.mark.asyncio
+async def test_a_pre_process_fail_blocks_the_load(env, monkeypatch):
+    """``on_error: fail`` stops the write, which is a file error, which holds back the load."""
+    monkeypatch.setattr(settings, "haiku_load_on_error", False)
+    _upstream(env, "valid.pdf")
+    path = _write_run(env, ManifestConfig(pre_process=[PreProcessStep(method=f"{__name__}:boom_document", on_error="fail")]))
+    with patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock) as run_load:
+        (result,) = await runner.run_manifests(str(path), load=True)
+    run_load.assert_not_called()
+    assert result["summary"]["file_errors"] == 1
+    assert result["haiku_load_skipped"]["errors"] == {"file_errors": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_pre_process_continue_error_does_not_block_the_load(env, monkeypatch):
+    """``on_error: continue`` declared the failure tolerable: the document is stored and the load runs."""
+    monkeypatch.setattr(settings, "haiku_load_on_error", False)
+    _upstream(env, "valid.pdf")
+    path = _write_run(
+        env, ManifestConfig(pre_process=[PreProcessStep(method=f"{__name__}:boom_document", on_error="continue")])
+    )
+    with patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock, return_value={}) as run_load:
+        (result,) = await runner.run_manifests(str(path), load=True)
+    run_load.assert_awaited_once()
+    assert result["summary"]["pre_process_errors"] == 1
+    assert result["summary"]["file_errors"] == 0
+    assert "haiku_load_skipped" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_pre_run_continue_error_does_not_block_the_load(env, monkeypatch):
+    monkeypatch.setattr(settings, "haiku_load_on_error", False)
+    _upstream(env, "valid.pdf")
+    # os.getcwd takes no context argument, so the step errors under `continue`.
+    path = _write_run(env, ManifestConfig(pre_run=[PreRunStep(method="os:getcwd", on_error="continue")]))
+    with patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock, return_value={}) as run_load:
+        (result,) = await runner.run_manifests(str(path), load=True)
+    run_load.assert_awaited_once()
+    assert [s["status"] for s in result["pre_run"]] == ["error"]
+
+
 @pytest.mark.asyncio
 async def test_pre_process_is_cleared_after_the_run(env):
     _upstream(env)

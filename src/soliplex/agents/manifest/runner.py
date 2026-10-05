@@ -610,22 +610,66 @@ async def _run_components(manifest: Manifest, run) -> dict:
     }
 
 
-async def run_manifests(path: str, load: bool = False) -> list[dict]:
+def load_blockers(result: dict) -> dict[str, int]:
+    """The errors in a manifest run that should stop its haiku load.
+
+    A load sweeps the download location and deletes from the database whatever
+    it does not find there, so it must not follow a run that may have left
+    that location incomplete. These are the counts that make a run a failure
+    -- the same two :func:`~soliplex.agents.telemetry.record_summary` fails the
+    span on. Two things are deliberately absent: a 404 on an individual
+    document (``not_found``) is a removal the load should apply, and a hook
+    error under ``on_error: continue`` is one the manifest declared tolerable
+    (a pre-process step failing under ``on_error: fail`` still counts, because
+    the document's write fails and is recorded as a file error).
+
+    Args:
+        result: A :func:`run_manifest` result.
+
+    Returns:
+        The non-zero counts by kind; empty when the load may run.
+    """
+    summary = result.get("summary") or {}
+    blockers = {
+        "component_errors": summary.get("component_errors", 0),
+        "file_errors": summary.get("file_errors", 0),
+    }
+    return {kind: count for kind, count in blockers.items() if count}
+
+
+def describe_blockers(blockers: dict[str, int]) -> str:
+    """``component_errors=1, file_errors=2`` -- *blockers* for a log line."""
+    return ", ".join(f"{kind}={count}" for kind, count in blockers.items())
+
+
+async def run_manifests(
+    path: str,
+    load: bool = False,
+    load_on_error: bool | None = None,
+    allow_empty_load: bool | None = None,
+) -> list[dict]:
     """Load and run manifests from a file or directory.
 
     When *load* is true, a haiku-rag batch load runs (awaited) after each
-    manifest. The sequential loop guarantees only one load runs at a time.
+    manifest whose run had no errors (see :func:`load_blockers`). The
+    sequential loop guarantees only one load runs at a time.
 
     Args:
         path: ``"all"`` (every manifest in ``settings.manifest_dir``), a
             single YAML file, or a directory of YAML files.
         load: Run a haiku-rag load after each manifest.
+        load_on_error: Load even after a run with errors; ``None`` defers to
+            ``settings.haiku_load_on_error``.
+        allow_empty_load: Load even over an empty download location (see
+            :func:`~soliplex.agents.manifest.haiku_loader.run_load`); ``None``
+            defers to each manifest's ``config.allow_empty_load``.
 
     A failure while running or loading one manifest is isolated to that
     manifest: it is logged and recorded (an ``error`` on the result, or a
     ``haiku_load_error`` when the load/post-process step is the one that failed)
     and the remaining manifests still run. A manifest a pre-run step skipped is
-    returned with ``skipped`` set and is not loaded.
+    returned with ``skipped`` set and is not loaded; one whose run had errors
+    is returned with ``haiku_load_skipped`` set and is not loaded either.
 
     Returns:
         List of per-manifest result dicts.
@@ -634,6 +678,8 @@ async def run_manifests(path: str, load: bool = False) -> list[dict]:
         FileNotFoundError: If the path does not exist.
         ValueError: If duplicate manifest IDs are found (directory mode).
     """
+    if load_on_error is None:
+        load_on_error = settings.haiku_load_on_error
     manifests = resolve_manifests(path)
     results = []
     for manifest in manifests:
@@ -656,8 +702,24 @@ async def run_manifests(path: str, load: bool = False) -> list[dict]:
             if load:
                 from soliplex.agents.manifest import haiku_loader
 
+                blockers = load_blockers(result)
+                if blockers and not load_on_error:
+                    # The download location may be incomplete, and a load
+                    # would delete whatever is missing from it.
+                    logger.error(
+                        "Skipping haiku load for manifest '%s' (source '%s'): run had errors (%s)",
+                        manifest.id,
+                        manifest.source,
+                        describe_blockers(blockers),
+                    )
+                    result["haiku_load_skipped"] = {"reason": "run had errors", "errors": blockers}
+                    telemetry.mark_load_skipped(span, blockers)
+                    results.append(result)
+                    continue
                 try:
-                    result["haiku_load"] = await haiku_loader.run_load(manifest, run_result=dict(result))
+                    result["haiku_load"] = await haiku_loader.run_load(
+                        manifest, run_result=dict(result), allow_empty_load=allow_empty_load
+                    )
                 except Exception as e:
                     logger.exception("haiku load failed for manifest '%s' (%s)", manifest.id, manifest.name)
                     result["haiku_load_error"] = str(e)

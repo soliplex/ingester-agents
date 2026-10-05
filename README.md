@@ -188,6 +188,7 @@ MANIFEST_DIR=/path/to/manifests
 
 # haiku-rag loading (runs `haiku-ingester run-batch` after each manifest run)
 HAIKU_LOAD_ENABLED=false
+# HAIKU_LOAD_ON_ERROR=false            # load even after a run with errors (see "haiku-rag Loading")
 LANCEDB_DIR=/var/lib/lancedb          # read by the haiku-rag config, which
                                       # places <source>.lancedb under it
 HAIKU_PATH=/etc/haiku                  # base dir for haiku-rag config files
@@ -725,6 +726,7 @@ Top-level fields:
   - **metadata**: Key-value pairs attached to all ingested documents.
   - **extensions**: File extensions to include (overrides the global `EXTENSIONS` setting).
   - **delete_stale**: Remove locally-stored documents that no longer appear in any component (default: true). See [Stale Document Removal](#stale-document-removal) below.
+  - **allow_empty_load**: Run the haiku-rag load even when the download location holds no documents, i.e. empty the source's database on purpose (default: false). See [haiku-rag Loading](#haiku-rag-loading).
   - **haiku_config**: Override the haiku-rag config file used when loading this manifest's source. Absolute paths are used as-is; relative values resolve under `HAIKU_PATH`. Defaults to `${HAIKU_PATH}/haiku.rag.default.yaml`. See [haiku-rag Loading](#haiku-rag-loading).
   - **pre_run**: Ordered steps run once before any component; one may skip the run. See [Pre-run steps](#pre-run-steps) below.
   - **pre_process**: Ordered steps run on each new or changed document before it is stored; one may skip or modify it. None run unless listed. See [Pre-process steps](#pre-process-steps) below.
@@ -932,6 +934,43 @@ places it. See [Where the database comes from](#where-the-database-comes-from)
 below — a config that does not place one per source is the one
 misconfiguration here that fails quietly.
 
+- **No load after a run with errors.** The load deletes from the database
+  every document it no longer finds in the download folder, and a run that
+  failed may have left that folder incomplete. So when a run has any
+  component error (a component raised) or file error (a document failed to
+  download, fetch or write, including a pre-process step failing under
+  `on_error: fail`), its load is skipped, and its post-process callbacks with
+  it. The folder is left as it is, and the next clean run loads everything at
+  once. Two things do **not** count as errors: a 404 on an individual
+  document (a removal, which the load should apply), and a hook error under
+  `on_error: continue` (which the manifest declared tolerable). A skipped
+  load is logged at ERROR (`Skipping haiku load for manifest ...` from the
+  CLI, `Manifest ... had errors (...); haiku load not queued` from the
+  server), marked `haiku.load_skipped` on the manifest span, and printed by
+  `si-agent manifest run` as `haiku load: SKIPPED (...)`. To load anyway --
+  say, after deciding one document that never downloads is harmless -- set
+  `HAIKU_LOAD_ON_ERROR=true`, or pass `--load-on-error` for one CLI run.
+  Mind that a document that fails on every run holds back its source's load
+  on every run, so alert on that log record.
+- **No load over an empty download location.** Independently of the run's
+  errors, the load itself checks, when it is about to start, that the
+  location it will read holds at least one document (sidecars don't count).
+  If it holds none, or cannot be listed at all, the load is skipped, with its
+  post-process callbacks: over an empty location the load would delete every
+  document of the source from the database. This catches a folder emptied
+  for reasons no run reported, such as files lost earlier or a component
+  whose empty listing the agent's own clean-up acted on. Because the check
+  runs at load time, it also covers a load that waited in the server's queue.
+  It logs `Skipping haiku load for manifest ... : no documents in download
+  location (...)` (or `... could not be listed`) at ERROR, records a skipped
+  `haiku load` span, and the CLI prints `haiku load: SKIPPED (...)`. A
+  manifest that means to empty its source -- decommissioning it, or
+  clearing it before a re-ingest -- sets `config.allow_empty_load: true`;
+  `--allow-empty-load` does the same for one CLI run. `HAIKU_LOAD_ON_ERROR`
+  does **not** turn this check off. The check only holds if the haiku-rag
+  config reads the same location the agent lists, so read it from
+  `${DOWNLOAD_URI}` (S3) or `${DOWNLOAD_DIR}/${SOURCE}` (filesystem), as the
+  example configs do.
 - **One load at a time.** Inside the server, loads are drained from a
   single global FIFO queue by one worker, so only one `haiku-ingester`
   process runs at any moment (a capacity constraint). The CLI achieves the
@@ -952,9 +991,17 @@ misconfiguration here that fails quietly.
     `databases: {db: ${LANCEDB_DIR}/${SOURCE}.lancedb}` gets a database per
     source.
   - `DOWNLOAD_DIR` — `settings.download_dir`, so the path above resolves
-    even when it was left at its default.
-  - `DOWNLOAD_URI` — the resolved base URI of the download store, set in
-    both filesystem and S3 mode so one config form works either way.
+    even when it was left at its default. A local directory is passed
+    **resolved to an absolute path**, so a relative setting can't name a
+    different folder under the subprocess's working directory
+    (`HAIKU_LOAD_CWD`). In S3 mode it is the configured key prefix, as is.
+  - `DOWNLOAD_URI` — the resolved base URI of this source's documents:
+    `file://...` locally, `s3://<bucket>/<prefix>/<source>` in S3 mode. An
+    S3 source should read `uri: ${DOWNLOAD_URI}` rather than rebuilding it
+    from `${DOWNLOAD_S3_BUCKET}${DOWNLOAD_DIR}/${SOURCE}`, which joins raw
+    text and lists an empty prefix (so deletes every document) when the
+    slashes are spelled differently. A filesystem source can't use it:
+    haiku-rag's `root` is a plain path, not a URI.
 
   Any other `${VAR}` interpolated by the haiku-rag config (`LANCEDB_DIR`
   included, along with e.g. `OLLAMA_BASE_URL`, `DOCLING1_BASE_URL`,
@@ -971,7 +1018,8 @@ si-agent serve
 ```
 
 The CLI honors the same `HAIKU_LOAD_ENABLED` default; override per
-invocation with `si-agent manifest run <path> --load` / `--no-load`.
+invocation with `si-agent manifest run <path> --load` / `--no-load`. Likewise
+`HAIKU_LOAD_ON_ERROR`, with `--load-on-error` / `--no-load-on-error`.
 
 ##### Where the database comes from
 
@@ -1156,6 +1204,9 @@ fire:
 pre_run steps ─► components ─┬─► write ─► pre_process steps ─► store
                              │   (per new / changed document)
                              └─► stale reconcile ─► haiku load ─► post_process
+                                                    (skipped, with post_process,
+                                                     when the run had errors or
+                                                     the location is empty)
 ```
 
 Every step names a `method` -- a dotted import path, `pkg.mod:func` or

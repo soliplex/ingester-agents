@@ -17,6 +17,7 @@ import re
 import shlex
 from pathlib import Path
 
+from soliplex.agents import telemetry
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import settings
 from soliplex.agents.manifest.context import LoadContext
@@ -128,15 +129,13 @@ async def _run_post_process(manifest: Manifest, ingester: HaikuRun, run_result: 
     return await post_process.run_post_process(manifest, ingester=ingester, run_result=run_result)
 
 
-async def _log_if_no_documents(manifest: Manifest, context: LoadContext) -> None:
-    """Log an error when the load is about to run over an empty download folder.
+async def _document_count(manifest: Manifest, context: LoadContext) -> int | None:
+    """Documents at the location the load will read; ``None`` if it can't be listed.
 
     Checks the same location handed to the subprocess as ``DOWNLOAD_DIR`` /
     ``DOWNLOAD_URI``, counting documents only -- a folder holding nothing but
-    sidecars still has nothing to index. The load itself still runs: this
-    only makes an empty source visible, it does not change what happens next.
-    A listing failure is logged and otherwise ignored, so the check can never
-    be what stops a load.
+    sidecars still has nothing to index. A missing local folder lists as
+    empty (``0``), not as a failure.
     """
     try:
         keys = await context.store.list()
@@ -146,18 +145,32 @@ async def _log_if_no_documents(manifest: Manifest, context: LoadContext) -> None
             context.download_uri,
             manifest.id,
         )
-        return
+        return None
     sidecar_suffixes = tuple(kind.suffix for kind in sidecar_kinds().values())
-    if not any(not key.endswith(sidecar_suffixes) for key in keys):
-        logger.error(
-            "Manifest '%s' finished with no documents in %s; haiku load for source '%s' has nothing to index",
-            manifest.id,
-            context.download_uri,
-            manifest.source,
-        )
+    return sum(1 for key in keys if not key.endswith(sidecar_suffixes))
 
 
-async def run_load(manifest: Manifest, *, queue_wait_s: float | None = None, run_result: dict | None = None) -> dict:
+def _skipped(source: str, db: str, reason: str) -> dict:
+    """A :func:`run_load` result for a load that never started."""
+    return {
+        "source": source,
+        "db": db,
+        "returncode": None,
+        "stdout": "",
+        "stderr": "",
+        "timed_out": False,
+        "skipped": {"reason": reason},
+        "post_process": [],
+    }
+
+
+async def run_load(
+    manifest: Manifest,
+    *,
+    queue_wait_s: float | None = None,
+    run_result: dict | None = None,
+    allow_empty_load: bool | None = None,
+) -> dict:
     """Run a single haiku-rag batch load for *manifest*.
 
     Spawns the configured load command with ``SOURCE`` set to the
@@ -167,16 +180,28 @@ async def run_load(manifest: Manifest, *, queue_wait_s: float | None = None, run
     :mod:`.haiku_process`. Failures and timeouts are logged and reported in the
     result rather than raised.
 
+    The load does not start -- and neither do the post-process callbacks --
+    when the download location holds no documents or cannot be listed. The
+    load deletes from the database every document it does not find there, so
+    over an empty location it would delete them all; the result then carries
+    ``skipped``. The check happens here, at load time, so it covers the CLI and
+    the server's queue alike, and sees the folder the subprocess would read
+    even after the load waited in the queue. A manifest that means to empty its
+    source sets ``config.allow_empty_load``.
+
     Args:
         manifest: The manifest whose source should be loaded.
         queue_wait_s: Seconds the load waited in the haiku queue, recorded on
             the load's span (``None`` when it wasn't queued, as from the CLI).
         run_result: The result of the manifest run that asked for this load,
             handed to post-process callbacks that accept ``run_result``.
+        allow_empty_load: Load even over an empty location; ``None`` defers to
+            the manifest's ``config.allow_empty_load``.
 
     Returns:
-        Dict with ``source``, ``db``, ``returncode`` (``None`` on timeout),
-        ``timed_out``, the captured ``stdout``/``stderr`` and ``post_process``.
+        Dict with ``source``, ``db``, ``returncode`` (``None`` on timeout or
+        when skipped), ``timed_out``, the captured ``stdout``/``stderr``,
+        ``post_process`` and, when the load did not start, ``skipped``.
     """
     source = manifest.source
     haiku_cfg = resolve_haiku_cfg(manifest)
@@ -184,6 +209,28 @@ async def run_load(manifest: Manifest, *, queue_wait_s: float | None = None, run
     argv = build_load_argv(haiku_cfg, db, source)
 
     context = LoadContext.for_source(source)
+    if allow_empty_load is None:
+        allow_empty_load = bool(manifest.config and manifest.config.allow_empty_load)
+    count = await _document_count(manifest, context)
+    if not count and not allow_empty_load:
+        reason = "download location could not be listed" if count is None else "no documents in download location"
+        logger.error(
+            "Skipping haiku load for manifest '%s' (source '%s'): %s (%s)",
+            manifest.id,
+            source,
+            reason,
+            context.download_uri,
+        )
+        # A span of its own: under the server the manifest span has ended by
+        # the time a queued load runs.
+        with telemetry.span(
+            "haiku load",
+            f"haiku load {source} skipped",
+            {"haiku.source": source, "haiku.db": db, "manifest.id": manifest.id, "haiku.queue_wait_s": queue_wait_s},
+        ) as span:
+            telemetry.mark_load_skipped(span, {"empty_location": 1})
+        return _skipped(source, db, reason)
+
     env = context.env()
     env["OTEL_SERVICE_NAME"] = env.get("OTEL_SERVICE_NAME", "ingester-agent") + f".haiku-ingester.{source}"
     # Flush promptly, so a timed-out child's last output is not lost in its buffer.
@@ -191,7 +238,6 @@ async def run_load(manifest: Manifest, *, queue_wait_s: float | None = None, run
     if settings.logfire_token is not None:
         env["LOGFIRE_TOKEN"] = settings.logfire_token.get_secret_value()
 
-    await _log_if_no_documents(manifest, context)
     run = await run_haiku(
         argv,
         operation="load",
