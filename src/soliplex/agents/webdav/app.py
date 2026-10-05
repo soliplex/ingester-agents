@@ -4,11 +4,16 @@ import asyncio
 import hashlib
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
+from pathlib import PurePosixPath
+from urllib.parse import unquote
 
 import aiofiles
 import aiohttp
 
+from soliplex.agents import WebDAVListingError
 from soliplex.agents import local_state
 from soliplex.agents import local_store
 from soliplex.agents.common.config import check_config
@@ -109,7 +114,13 @@ def _version_token(etag, modified) -> tuple[str | None, str | None]:
     return None, None
 
 
-async def validate_config(path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None):
+async def validate_config(
+    path: str,
+    webdav_url: str = None,
+    webdav_username: str = None,
+    webdav_password: str = None,
+    exclude_paths: list[str] | None = None,
+):
     """
     Validate a configuration and print out validation results.
 
@@ -120,11 +131,15 @@ async def validate_config(path: str, webdav_url: str = None, webdav_username: st
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
+        exclude_paths: Globs of paths under *path* to skip (see walk_webdav)
 
     Returns:
         None
     """
-    config = await build_config(path, webdav_url, webdav_username, webdav_password)
+    config, listing_errors = await build_config(
+        path, webdav_url, webdav_username, webdav_password, exclude_paths=exclude_paths
+    )
+    raise_if_incomplete(path, listing_errors)
     validated = check_config(config)
     invalid = [row for row in validated if "valid" in row and not row["valid"]]
     print(f"Validation for {path}")
@@ -136,7 +151,12 @@ async def validate_config(path: str, webdav_url: str = None, webdav_username: st
 
 
 async def export_urls(
-    path: str, output_path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None
+    path: str,
+    output_path: str,
+    webdav_url: str = None,
+    webdav_username: str = None,
+    webdav_password: str = None,
+    exclude_paths: list[str] | None = None,
 ):
     """
     Export discovered WebDAV URLs to a file without downloading content.
@@ -150,11 +170,12 @@ async def export_urls(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
+        exclude_paths: Globs of paths under *path* to skip (see walk_webdav)
 
     Returns:
         None
     """
-    config = await list_config(path, webdav_url, webdav_username, webdav_password)
+    config = await list_config(path, webdav_url, webdav_username, webdav_password, exclude_paths=exclude_paths)
     count = await export_urls_to_file(config, path, output_path)
     print(f"Found {len(config)} files in {path}")
     print(f"Exported {count} URLs to {output_path}")
@@ -323,7 +344,11 @@ async def build_config_from_urls(
 
 
 async def list_config(
-    webdav_path: str, webdav_url: str = None, webdav_username: str = None, webdav_password: str = None
+    webdav_path: str,
+    webdav_url: str = None,
+    webdav_username: str = None,
+    webdav_password: str = None,
+    exclude_paths: list[str] | None = None,
 ) -> list[dict]:
     """
     List files in a WebDAV directory without downloading content.
@@ -336,6 +361,7 @@ async def list_config(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
+        exclude_paths: Globs of paths under *webdav_path* to skip (see walk_webdav)
 
     Returns:
         List of file configuration dictionaries (without sha256)
@@ -345,7 +371,7 @@ async def list_config(
     config = []
 
     async with webdav_client:
-        files = await recursive_listdir_webdav(webdav_client, webdav_path)
+        files = await recursive_listdir_webdav(webdav_client, webdav_path, exclude_paths=exclude_paths)
 
     for file_info in files:
         full_path = file_info["path"]
@@ -391,12 +417,16 @@ async def build_config(
     webdav_password: str = None,
     source: str | None = None,
     client: AsyncWebDAVClient | None = None,
-) -> list[dict]:
+    exclude_paths: list[str] | None = None,
+) -> tuple[list[dict], list[dict]]:
     """
     Scan a WebDAV directory and create inventory configuration.
 
     Uses ETag-based caching (against the per-source local state) to avoid
-    re-downloading unchanged files.
+    re-downloading unchanged files. A subdirectory that cannot be listed is
+    left out of the config and reported in the listing errors, so the caller
+    can refuse to delete anything on the strength of an incomplete listing;
+    a failure at the root raises (see :func:`walk_webdav`).
 
     Args:
         webdav_path: Path within WebDAV server (e.g., "/documents")
@@ -406,9 +436,12 @@ async def build_config(
         source: Source identifier used for the ETag cache lookup
         client: Existing client to reuse; one is created and closed here when
             omitted.
+        exclude_paths: Globs of paths under *webdav_path* to skip without
+            listing them (see :func:`walk_webdav`)
 
     Returns:
-        List of file configuration dictionaries
+        Tuple of (config list, listing errors). Each listing error is a
+        ``{"path", "error"}`` dict naming a subtree that could not be listed.
     """
     allowed_extensions = settings.extensions
     config = []
@@ -428,9 +461,9 @@ async def build_config(
 
     async with _client_for(client, webdav_url, webdav_username, webdav_password) as webdav_client:
         # Recursively list all files
-        files = await recursive_listdir_webdav(webdav_client, webdav_path)
+        listing = await walk_webdav(webdav_client, webdav_path, exclude_paths=exclude_paths)
 
-        for file_info in files:
+        for file_info in listing.files:
             full_path = file_info["path"]  # This is the absolute WebDAV path
 
             if not passes_extension_prefilter(full_path, allowed_extensions):
@@ -538,101 +571,285 @@ async def build_config(
         via_modified,
         via_none,
     )
-    return config
+    return config, listing.errors
 
 
-# Failures that mean the server or the network is unusable, rather than one
-# directory being unreadable. These propagate; anything else degrades to
-# partial results for that subtree.
-_LISTING_FATAL = (TimeoutError, ConnectionError, aiohttp.ClientError, ResourceNotFound)
+# Failures that mean the server or the network is unusable. These abort the
+# whole walk wherever they occur. Any failure at the walk's root aborts it
+# too, whatever its type: an empty listing would otherwise reach the clean-up
+# and delete every document of the source. Everything else -- the client's
+# own ClientError family (401/403/404/5xx after retries, 507, a non-207
+# reply) and a malformed multistatus body -- is recorded per subtree.
+_LISTING_CONNECTION = (TimeoutError, ConnectionError, aiohttp.ClientError)
 
 
-async def recursive_listdir_webdav(
+@dataclass
+class ListingResult:
+    """Outcome of :func:`walk_webdav`.
+
+    ``files`` are the file rows listed; ``errors`` holds one
+    ``{"path", "error"}`` entry per subtree that could not be listed, even
+    after retrying. A non-empty ``errors`` means ``files`` is incomplete, so
+    nothing may be deleted on the strength of it. ``excluded`` names the
+    paths skipped on purpose by ``exclude_paths``; those are not errors.
+    """
+
+    files: list[dict] = field(default_factory=list)
+    errors: list[dict] = field(default_factory=list)
+    excluded: list[str] = field(default_factory=list)
+    # The exception behind each entry in ``errors``, for the final log record.
+    exceptions: dict[str, BaseException] = field(default_factory=dict, repr=False, compare=False)
+
+    def merge(self, other: "ListingResult") -> None:
+        """Fold a subtree's result into this one."""
+        self.files.extend(other.files)
+        self.errors.extend(other.errors)
+        self.excluded.extend(other.excluded)
+        self.exceptions.update(other.exceptions)
+
+    def record(self, path: str, exc: BaseException) -> None:
+        """Record that the subtree at *path* could not be listed."""
+        self.errors.append({"path": path, "error": f"{type(exc).__name__}: {exc}"})
+        self.exceptions[path] = exc
+
+
+def normalize_exclude_paths(patterns: list[str] | None) -> tuple[str, ...]:
+    """Strip the slashes around each pattern; reject an empty one.
+
+    Patterns are relative to the walk's root, so ``/HR/`` and ``HR`` mean the
+    same folder.
+    """
+    normalized = []
+    for pattern in patterns or ():
+        stripped = pattern.strip().strip("/")
+        if not stripped:
+            raise ValueError(f"exclude_paths: empty pattern {pattern!r}")
+        normalized.append(stripped)
+    return tuple(normalized)
+
+
+@dataclass
+class _Walk:
+    """State shared by every PROPFIND of one walk."""
+
+    root: str
+    semaphore: asyncio.Semaphore
+    exclude_paths: tuple[str, ...] = ()
+
+    def is_excluded(self, full_path: str) -> bool:
+        """Whether *full_path* matches an ``exclude_paths`` glob.
+
+        Matched against the percent-decoded path relative to the root, with
+        :meth:`PurePosixPath.full_match` semantics: ``*`` stays within one
+        path segment and ``**`` spans any number of them, so ``HR`` matches
+        only the top-level folder and ``**/Private`` a folder of that name at
+        any depth.
+        """
+        if not self.exclude_paths:
+            return False
+        root = self.root.strip("/")
+        rel = full_path.strip("/")
+        if root and rel.startswith(root + "/"):
+            rel = rel[len(root) + 1 :]
+        candidate = PurePosixPath(unquote(rel))
+        return any(candidate.full_match(pattern) for pattern in self.exclude_paths)
+
+
+async def _listdir_once(webdav_client: AsyncWebDAVClient, path: str, walk: _Walk) -> tuple[ListingResult, list[str]]:
+    """List one directory: ``(its files and exclusions, subdirectory paths)``."""
+    result = ListingResult()
+    subdirs: list[str] = []
+
+    logger.debug(f"Listing WebDAV directory: {path}")
+    # Held for this PROPFIND only. Keeping it across the recursive gather in
+    # the caller would deadlock as soon as the tree is deeper than the limit.
+    async with walk.semaphore:
+        resources = await webdav_client.ls(path, detail=True)
+    for resource in resources:
+        rel_name = resource["name"]
+        logger.debug(f"Found resource: {rel_name}, type: {resource.get('type', 'unknown')}")
+
+        basename = rel_name.rstrip("/").split("/")[-1]
+        if not basename or basename == "_data":
+            continue
+
+        full_resource_path = f"{path.rstrip('/')}/{rel_name.lstrip('/')}"
+        is_dir = resource["type"] == "directory"
+
+        if walk.is_excluded(full_resource_path):
+            # Skipped on purpose: a folder is never PROPFINDed, so one the
+            # account cannot read raises nothing, and its documents are
+            # legitimately absent from the inventory.
+            logger.log(logging.INFO if is_dir else logging.DEBUG, "Excluding WebDAV path %s", full_resource_path)
+            result.excluded.append(full_resource_path)
+        elif is_dir:
+            subdirs.append(full_resource_path)
+        else:
+            rec = {"path": full_resource_path, "size": resource.get("content_length", 0)}
+            if "etag" in resource:
+                rec["etag"] = resource["etag"]
+            for key in [x for x in resource.keys() if x not in ["href", "etag", "type", "name"]]:
+                rec[key] = resource.get(key)
+            result.files.append(rec)
+    return result, subdirs
+
+
+async def _walk_subtree(webdav_client: AsyncWebDAVClient, path: str, walk: _Walk) -> ListingResult:
+    """List *path* and everything below it.
+
+    A failure listing *path* itself propagates; the caller decides whether it
+    is fatal (the root) or recorded (a subtree). Failures further down are
+    recorded in the result, except connection-class ones, which abort.
+    """
+    result, subdirs = await _listdir_once(webdav_client, path, walk)
+    if not subdirs:
+        return result
+
+    outcomes = await asyncio.gather(
+        *(_walk_subtree(webdav_client, sub, walk) for sub in subdirs),
+        return_exceptions=True,
+    )
+    # Results stay in directory order regardless of completion order.
+    for sub, outcome in zip(subdirs, outcomes, strict=True):
+        if isinstance(outcome, _LISTING_CONNECTION):
+            raise outcome
+        if isinstance(outcome, BaseException):
+            # A subtree 404 lands here too: a directory that vanished between
+            # its parent's listing and its own is rare, and recording it costs
+            # one skipped clean-up rather than risking a wrong deletion.
+            result.record(sub, outcome)
+            continue
+        result.merge(outcome)
+    return result
+
+
+async def _retry_failed_subtrees(webdav_client: AsyncWebDAVClient, result: ListingResult, walk: _Walk) -> ListingResult:
+    """Re-walk each failed subtree, up to ``webdav_listing_retries`` passes.
+
+    The client already retries a 5xx per request; this second tier catches
+    an outage that outlasts those retries, after a pause (doubling each
+    pass). Every recorded failure is retried, 401 and 403 included: those
+    are fixed upstream (a renewed credential, a restored ACL), so one may
+    clear between passes. A folder that is forbidden for good belongs in
+    ``exclude_paths`` instead. Subtrees that list are folded in; ones that fail again, or whose
+    own descendants fail, stay in ``errors`` for the next pass. A
+    connection-class failure during a retry aborts the walk, as in the first
+    pass.
+    """
+    for attempt in range(settings.webdav_listing_retries):
+        if not result.errors:
+            break
+        failed = [e["path"] for e in result.errors]
+        delay = settings.webdav_listing_retry_delay * 2**attempt
+        logger.warning(
+            "Retrying %d failed WebDAV subtree(s) under %s in %.1fs (pass %d of %d)",
+            len(failed),
+            walk.root,
+            delay,
+            attempt + 1,
+            settings.webdav_listing_retries,
+        )
+        await asyncio.sleep(delay)
+        outcomes = await asyncio.gather(
+            *(_walk_subtree(webdav_client, sub, walk) for sub in failed),
+            return_exceptions=True,
+        )
+        retried = ListingResult(files=result.files, excluded=result.excluded)
+        for sub, outcome in zip(failed, outcomes, strict=True):
+            if isinstance(outcome, _LISTING_CONNECTION):
+                raise outcome
+            if isinstance(outcome, BaseException):
+                retried.record(sub, outcome)
+                continue
+            logger.info("WebDAV subtree %s listed on retry", sub)
+            retried.merge(outcome)
+        result = retried
+    return result
+
+
+async def walk_webdav(
     webdav_client: AsyncWebDAVClient,
     path: str,
     semaphore: asyncio.Semaphore | None = None,
-) -> list[dict]:
+    *,
+    exclude_paths: list[str] | None = None,
+) -> ListingResult:
     """
-    Recursively list files in a WebDAV directory.
+    Recursively list files in a WebDAV directory, recording subtree failures.
 
     Sibling directories are listed concurrently, bounded by
     ``webdav_max_concurrent_requests``. The upstream server only honours
     ``Depth: 1``, so the number of PROPFINDs is fixed at one per directory;
     overlapping them is what removes the round-trip-per-directory wait.
 
+    Failure handling:
+
+    * the root cannot be listed, for any reason: raises;
+    * a connection-class failure (timeout, refused, aiohttp error) anywhere:
+      raises, since the server or the network is unusable;
+    * any other failure listing a subdirectory (401/403/404/5xx, a malformed
+      body, ...): the rest of the tree is still listed, then that subtree is
+      retried (``webdav_listing_retries`` passes); one that still fails is
+      left out and recorded in ``.errors``.
+
     Args:
         webdav_client: Async WebDAV client instance
         path: Directory path to list
-        semaphore: Shared request limiter; created on the first call and
-            passed down so the whole walk shares one budget.
+        semaphore: Shared request limiter; created here when omitted, and
+            shared by the whole walk.
+        exclude_paths: Globs, relative to *path*, of folders (or files) to
+            skip without listing them -- e.g. a folder the account may never
+            read. See :meth:`_Walk.is_excluded` for the matching rules.
+
+    Returns:
+        A :class:`ListingResult`; file rows carry 'path' and 'size'.
+    """
+    walk = _Walk(path, semaphore or _listing_semaphore(), normalize_exclude_paths(exclude_paths))
+    try:
+        result = await _walk_subtree(webdav_client, path, walk)
+        result = await _retry_failed_subtrees(webdav_client, result, walk)
+    except Exception:
+        logger.exception("Error listing WebDAV directory %s", path)
+        raise
+    if result.excluded:
+        logger.info("WebDAV listing of %s: %d path(s) excluded by exclude_paths", path, len(result.excluded))
+    if result.errors:
+        for err in result.errors:
+            logger.error("Error listing WebDAV subtree %s", err["path"], exc_info=result.exceptions[err["path"]])
+        logger.error(
+            "WebDAV listing of %s incomplete: %d subtree(s) failed; stale removal will be skipped",
+            path,
+            len(result.errors),
+        )
+    return result
+
+
+async def recursive_listdir_webdav(
+    webdav_client: AsyncWebDAVClient,
+    path: str,
+    semaphore: asyncio.Semaphore | None = None,
+    *,
+    exclude_paths: list[str] | None = None,
+) -> list[dict]:
+    """
+    Recursively list files in a WebDAV directory, strictly.
+
+    As :func:`walk_webdav`, but any subtree failure raises
+    :class:`~soliplex.agents.WebDAVListingError` instead of returning partial
+    results, for callers whose output must be complete (exports, validation).
 
     Returns:
         List of file info dictionaries with 'path' and 'size'
     """
-    semaphore = semaphore or _listing_semaphore()
-    file_list: list[dict] = []
-    subdirs: list[str] = []
+    result = await walk_webdav(webdav_client, path, semaphore, exclude_paths=exclude_paths)
+    raise_if_incomplete(path, result.errors)
+    return result.files
 
-    logger.debug(f"Listing WebDAV directory: {path}")
 
-    try:
-        # Held for this PROPFIND only. Keeping it across the recursive gather
-        # below would deadlock as soon as the tree is deeper than the limit.
-        async with semaphore:
-            resources = await webdav_client.ls(path, detail=True)
-        for resource in resources:
-            rel_name = resource["name"]
-            logger.debug(f"Found resource: {rel_name}, type: {resource.get('type', 'unknown')}")
-
-            basename = rel_name.rstrip("/").split("/")[-1]
-            if not basename or basename == "_data":
-                continue
-
-            full_resource_path = f"{path.rstrip('/')}/{rel_name.lstrip('/')}"
-
-            if resource["type"] == "directory":
-                subdirs.append(full_resource_path)
-            else:
-                rec = {"path": full_resource_path, "size": resource.get("content_length", 0)}
-                if "etag" in resource:
-                    rec["etag"] = resource["etag"]
-                for key in [x for x in resource.keys() if x not in ["href", "etag", "type", "name"]]:
-                    rec[key] = resource.get(key)
-                file_list.append(rec)
-    except _LISTING_FATAL:
-        logger.exception("Connection error listing %s", path)
-        raise
-    except Exception:
-        logger.error(
-            "Error listing WebDAV directory %s, returning partial results",
-            path,
-            exc_info=True,
-        )
-        return file_list
-
-    if not subdirs:
-        return file_list
-
-    results = await asyncio.gather(
-        *(recursive_listdir_webdav(webdav_client, sub, semaphore) for sub in subdirs),
-        return_exceptions=True,
-    )
-    # Preserve the two-tier contract: a connection-class failure anywhere in
-    # the tree aborts the walk, while any other error leaves that subtree out
-    # and keeps the rest. Results stay in directory order regardless.
-    for sub, result in zip(subdirs, results, strict=True):
-        if isinstance(result, _LISTING_FATAL):
-            raise result
-        if isinstance(result, BaseException):
-            logger.error(
-                "Error listing WebDAV subtree %s, returning partial results",
-                sub,
-                exc_info=result,
-            )
-            continue
-        file_list.extend(result)
-
-    return file_list
+def raise_if_incomplete(path: str, listing_errors: list[dict]) -> None:
+    """Raise :class:`~soliplex.agents.WebDAVListingError` if any subtree failed to list."""
+    if listing_errors:
+        raise WebDAVListingError(path, listing_errors)
 
 
 async def load_inventory(
@@ -647,6 +864,7 @@ async def load_inventory(
     config: list[dict] | None = None,
     extra_metadata: dict[str, str] | None = None,
     delete_stale: bool = False,
+    exclude_paths: list[str] | None = None,
 ):
     """
     Load an inventory and write changed files to the download directory.
@@ -665,6 +883,8 @@ async def load_inventory(
         config: Pre-built config (skips discovery when provided)
         extra_metadata: Extra metadata attached to every document
         delete_stale: Remove documents not in inventory (default: False)
+        exclude_paths: Globs of paths under *path* to skip during discovery
+            (see :func:`walk_webdav`); their documents count as removed
 
     Returns:
         Dictionary with inventory, to_process, ingested, errors, and
@@ -684,6 +904,7 @@ async def load_inventory(
             extra_metadata=extra_metadata,
             delete_stale=delete_stale,
             client=webdav_client,
+            exclude_paths=exclude_paths,
         )
 
 
@@ -701,14 +922,24 @@ async def _load_inventory(
     extra_metadata: dict[str, str] | None,
     delete_stale: bool,
     client: AsyncWebDAVClient | None,
+    exclude_paths: list[str] | None = None,
 ):
     """Body of :func:`load_inventory`, with the run's client already open.
 
     *client* is ``None`` when no WebDAV URL is configured; callees then fall
     back to creating their own, exactly as before.
     """
+    listing_errors: list[dict] = []
     if config is None:
-        config = await build_config(path, webdav_url, webdav_username, webdav_password, source=source, client=client)
+        config, listing_errors = await build_config(
+            path,
+            webdav_url,
+            webdav_username,
+            webdav_password,
+            source=source,
+            client=client,
+            exclude_paths=exclude_paths,
+        )
     base_path = path
     if skip_invalid:
         filtered = check_config(config)
@@ -723,7 +954,11 @@ async def _load_inventory(
     logger.info(f"found {len(to_process)} out of {len(config)} to process in {base_path}")
 
     ingested = []
-    errors = []
+    # A subtree that could not be listed is an error like a failed download:
+    # its documents are absent from `config`, so the clean-up below (and the
+    # runner's) must not treat them as removed. The listed files are still
+    # fetched.
+    errors = [{"uri": e["path"], "error": e["error"], "stage": "listing"} for e in listing_errors]
     not_found = []
     ret = {
         "inventory": config,
@@ -958,6 +1193,7 @@ async def status_report(
     webdav_url: str = None,
     webdav_username: str = None,
     webdav_password: str = None,
+    exclude_paths: list[str] | None = None,
 ):
     """
     Generate a status report for an inventory.
@@ -971,10 +1207,14 @@ async def status_report(
         webdav_url: Optional WebDAV server URL
         webdav_username: Optional WebDAV username
         webdav_password: Optional WebDAV password
+        exclude_paths: Globs of paths under *config_path* to skip (see walk_webdav)
     """
 
     print(f"checking status for {config_path} source={source} ")
-    config = await build_config(config_path, webdav_url, webdav_username, webdav_password, source=source)
+    config, listing_errors = await build_config(
+        config_path, webdav_url, webdav_username, webdav_password, source=source, exclude_paths=exclude_paths
+    )
+    raise_if_incomplete(config_path, listing_errors)
     to_process = local_state.compute_to_process(config, source)
     print(f"Files to process: {len(to_process)}")
     print(f"Total files: {len(config)}")

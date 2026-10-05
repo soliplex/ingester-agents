@@ -292,6 +292,7 @@ async def _run_webdav_component(component: WebDAVComponent, manifest: Manifest, 
                 webdav_username=username,
                 webdav_password=password,
                 extra_metadata=metadata or None,
+                exclude_paths=component.exclude_paths,
             )
 
 
@@ -478,6 +479,7 @@ async def _run_components(manifest: Manifest, run) -> dict:
         "component_errors": 0,
         "components_with_file_errors": 0,
         "file_errors": 0,
+        "listing_errors": 0,
         "ingested": 0,
         "not_found": 0,
         "deleted": 0,
@@ -525,10 +527,15 @@ async def _run_components(manifest: Manifest, run) -> dict:
                 # Per-file transient errors (timeout/5xx) block the reconcile to
                 # stay safe, mirroring a raised component exception.
                 file_errors = _count(result, "errors")
+                # Listing gaps (a WebDAV subtree that could not be listed) are
+                # file errors too, but counted apart: a folder the account can
+                # never read would otherwise pass for a flaky download forever.
+                listing_errors = sum(1 for e in result.get("errors") or [] if e.get("stage") == "listing")
                 component_span.set_attributes(
                     {
                         "component.ingested": _count(result, "ingested"),
                         "component.errors": file_errors,
+                        "component.listing_errors": listing_errors,
                         "component.not_found": _count(result, "not_found"),
                     }
                 )
@@ -536,6 +543,7 @@ async def _run_components(manifest: Manifest, run) -> dict:
                     has_errors = True
                     summary["components_with_file_errors"] += 1
                     summary["file_errors"] += file_errors
+                    summary["listing_errors"] += listing_errors
                     logger.warning("Component '%s' finished with %d file errors", component.name, file_errors)
                     telemetry.fail(component_span, f"{file_errors} file errors")
                 else:

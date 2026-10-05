@@ -37,7 +37,8 @@ async def validate_config(
     """
     try:
         pwd = webdav_password.get_secret_value() if webdav_password else None
-        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, pwd)
+        config, listing_errors = await webdav_app.build_config(config_path, webdav_url, webdav_username, pwd)
+        webdav_app.raise_if_incomplete(config_path, listing_errors)
         validated = webdav_app.check_config(config)
         invalid = [row for row in validated if "valid" in row and not row["valid"]]
 
@@ -75,7 +76,8 @@ async def check_status(
         from soliplex.agents import local_state
 
         pwd = webdav_password.get_secret_value() if webdav_password else None
-        config = await webdav_app.build_config(config_path, webdav_url, webdav_username, pwd, source=source)
+        config, listing_errors = await webdav_app.build_config(config_path, webdav_url, webdav_username, pwd, source=source)
+        webdav_app.raise_if_incomplete(config_path, listing_errors)
         to_process = local_state.compute_to_process(config, source)
 
         result = {

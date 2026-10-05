@@ -580,6 +580,52 @@ Each URL in a URL list is processed independently: if a file fails to
 download, the error is recorded and processing continues with the rest. See
 `example-manifests/webdav.yml` for every source form.
 
+A `path` scan never mistakes a listing failure for an empty directory:
+
+- If the root `path` can't be listed (401/403, a 5xx that outlasts the
+  retries, a non-207 reply, a malformed body), the component fails and
+  nothing is deleted.
+- If a subdirectory can't be listed, the rest of the tree is listed first,
+  then each failed subdirectory is re-walked (`WEBDAV_LISTING_RETRIES`
+  passes, default 1, after a pause of `WEBDAV_LISTING_RETRY_DELAY` seconds,
+  default 2, doubling each pass). This is on top of the client's own
+  per-request retries of 5xx replies. 401 and 403 are retried too, since a
+  renewed credential or a restored permission upstream can clear them.
+- A subdirectory still failing after its retries is recorded as a file error
+  with `"stage": "listing"` (counted under `listing_errors` in the run
+  summary). The files that were listed are still downloaded, but stale
+  removal is skipped for that run.
+- A timeout or connection error anywhere aborts the whole scan.
+
+A folder the service account can never read would therefore block stale
+removal on every run. Skip it on purpose with `exclude_paths`:
+
+```yaml
+  - name: shared-drive
+    type: webdav
+    url: https://webdav.example.com
+    path: /documents
+    exclude_paths:
+      - HR                # /documents/HR
+      - Projects/*/Legal  # Legal one level under any project
+      - "**/Private"      # a Private folder at any depth
+```
+
+Each entry is a glob matched against the path relative to `path`, after
+percent-decoding (write `Human Resources`, not `Human%20Resources`). The
+syntax is `pathlib`'s `full_match`: `*` matches within one path segment and
+`**` across any number of them, so a pattern without `**` is anchored at
+`path`. Matching is case-sensitive. A matching folder is never listed, so a
+403 on it is not an error. A pattern matching a file skips that file. The
+documents of an excluded path are absent from the inventory on purpose, so
+stale removal deletes any copies left from earlier runs. `exclude_paths` is
+valid only with `path`.
+
+`export-urls`, `validate-config` and `check-status` are strict: a
+subdirectory that still can't be listed makes them fail and write no output,
+rather than produce a partial list. They take the same globs as repeatable
+`--exclude` options.
+
 #### Commands
 
 **1. Export URLs**

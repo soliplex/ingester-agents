@@ -411,6 +411,7 @@ class TestRunSummary:
             "component_errors": 0,
             "components_with_file_errors": 0,
             "file_errors": 0,
+            "listing_errors": 0,
             "ingested": 4,
             "not_found": 0,
             "deleted": 0,
@@ -445,6 +446,34 @@ class TestRunSummary:
         finished = _finished_record(caplog)
         assert finished.levelno == logging.ERROR
         assert "0 component errors, 3 file errors" in finished.getMessage()
+
+    @pytest.mark.asyncio
+    async def test_listing_errors_block_the_reconcile_and_are_counted_apart(self, spans):
+        # 'wiki' could not list one subtree (and failed one download); 'notes' is clean.
+        partial = {
+            "inventory": [{"path": "listed.md", "sha256": "1"}],
+            "ingested": ["listed.md"],
+            "errors": [
+                {"uri": "/wiki/forbidden", "error": "ClientError: HTTP 403", "stage": "listing"},
+                {"uri": "broken.md", "error": "502"},
+            ],
+        }
+        handler = AsyncMock(side_effect=[partial, {"ingested": ["b"], "errors": []}])
+        with (
+            patch.dict(runner._DISPATCH, {FSComponent: handler}),
+            patch("soliplex.agents.local_state.reconcile_documents", new_callable=AsyncMock) as mock_reconcile,
+        ):
+            result = await runner.run_manifest(_two_component_manifest(delete_stale=True))
+
+        mock_reconcile.assert_not_awaited()
+        summary = result["summary"]
+        assert summary["delete_stale_skipped"] is True
+        assert summary["file_errors"] == 2
+        assert summary["listing_errors"] == 1
+        assert summary["components_with_file_errors"] == 1
+        wiki_span, notes_span = spans.named("component")
+        assert wiki_span.attributes["component.listing_errors"] == 1
+        assert notes_span.attributes["component.listing_errors"] == 0
 
     @pytest.mark.asyncio
     async def test_raised_component_is_an_error_with_a_stable_template(self, caplog):
@@ -612,6 +641,22 @@ class TestRunWebDAVComponent:
             await runner._run_webdav_component(component, manifest, {})
             mock.assert_called_once()
             assert mock.call_args.kwargs["webdav_url"] == "http://dav"
+            assert mock.call_args.kwargs["exclude_paths"] is None
+
+    @pytest.mark.asyncio
+    async def test_path_mode_passes_exclude_paths(self):
+        manifest = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            components=[
+                {"type": "webdav", "name": "d", "url": "http://dav", "path": "/docs", "exclude_paths": ["HR"]},
+            ],
+        )
+        with patch("soliplex.agents.webdav.app.load_inventory", new_callable=AsyncMock) as mock:
+            mock.return_value = {"ingested": [], "errors": []}
+            await runner._run_webdav_component(manifest.components[0], manifest, {})
+        assert mock.call_args.kwargs["exclude_paths"] == ["HR"]
 
     @pytest.mark.asyncio
     async def test_urls_file_mode(self):

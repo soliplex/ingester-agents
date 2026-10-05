@@ -171,6 +171,22 @@ class TestWebDAVComponent:
         assert c.username == "USER_VAR"
         assert c.password == "PASS_VAR"
 
+    def test_exclude_paths(self):
+        c = WebDAVComponent(name="test", url="http://dav", path="/docs", exclude_paths=["HR", "**/Private"])
+        assert c.exclude_paths == ["HR", "**/Private"]
+
+    def test_exclude_paths_defaults_to_none(self):
+        assert WebDAVComponent(name="test", url="http://dav", path="/docs").exclude_paths is None
+
+    def test_exclude_paths_requires_a_path_scan(self):
+        with pytest.raises(ValueError, match="applies only to a 'path' scan"):
+            WebDAVComponent(name="test", url="http://dav", urls=["/a.pdf"], exclude_paths=["HR"])
+
+    @pytest.mark.parametrize("pattern", ["", "  ", "/", "//"])
+    def test_exclude_paths_rejects_an_empty_pattern(self, pattern):
+        with pytest.raises(ValueError, match="must not be empty"):
+            WebDAVComponent(name="test", url="http://dav", path="/docs", exclude_paths=[pattern])
+
 
 # --- WebComponent ---
 
