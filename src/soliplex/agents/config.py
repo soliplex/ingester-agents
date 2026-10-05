@@ -20,6 +20,7 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
 
+from soliplex.agents import log_config
 from soliplex.agents.common.s3 import split_bucket
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,12 @@ def _checked_bucket(value: str | None) -> str | None:
     return value
 
 
+def _blank_is_none(value: str | None) -> str | None:
+    """Treat a blank (or whitespace-only) value as unset, as a compose ``.env`` must."""
+    value = value.strip() if value else value
+    return value or None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(**_secrets_kwargs)
     # SCM settings
@@ -88,6 +95,14 @@ class Settings(BaseSettings):
     extensions: list[str] = ["md", "pdf", "doc", "docx"]
     log_level: str = "INFO"
     log_format: str = "{name}|{asctime}|{levelname}|{message}"
+    # A logging.config.dictConfig file (YAML or JSON) applied on top of the
+    # built-in setup, e.g. to send particular loggers to an HTTP sink. When it
+    # cannot be applied, the built-in setup is used and a warning logged --
+    # or, with LOG_CONFIG_STRICT, logging setup (and so startup) fails.
+    log_config_file: str | None = None
+    log_config_strict: bool = False
+
+    _validate_log_config_file = field_validator("log_config_file", mode="after")(_blank_is_none)
 
     # SMTP email alert settings (handler only added when smtp_host is set)
     smtp_host: str | None = None
@@ -299,27 +314,46 @@ def configure_logging():
     When ``settings.log_format`` equals ``"json"``, a
     `JsonFormatter` is installed; otherwise the value is
     used as a ``str.format``-style pattern.
+
+    ``settings.log_config_file``, when set, is applied on top (see
+    :mod:`soliplex.agents.log_config`): it adds handlers and may set the root
+    level, but the console and SMTP handlers are installed either way. Safe to
+    call repeatedly; each call replaces what the last one installed.
     """
     root = logging.getLogger()
+    log_config.stop_listeners()
+    root.handlers.clear()
     try:
         root.setLevel(settings.log_level)
-        handler = logging.StreamHandler()
-        handler.setFormatter(_make_formatter())
-        root.handlers.clear()
-        root.addHandler(handler)
+        formatter = _make_formatter()
+        invalid_settings = False
     except Exception:
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter(
-                fmt="{name}|{asctime}|{levelname}|{message}",
-                datefmt="%Y-%m-%dT%H:%M:%S",
-                style="{",
-            )
-        )
-        root.handlers.clear()
-        root.addHandler(handler)
         root.setLevel(logging.INFO)
+        formatter = logging.Formatter(
+            fmt="{name}|{asctime}|{levelname}|{message}",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+            style="{",
+        )
+        invalid_settings = True
+
+    # Before the console handler is created: dictConfig closes every handler
+    # that already exists.
+    config_error = None
+    if settings.log_config_file:
+        try:
+            log_config.apply_file(settings.log_config_file)
+        except log_config.LogConfigError as exc:
+            config_error = exc
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    root.addHandler(handler)
+    if invalid_settings:
         root.warning("invalid settings. environment variables might not be set. ")
+    if config_error is not None:
+        if settings.log_config_strict:
+            raise config_error
+        logger.warning("%s; using the built-in logging setup", config_error)
     _add_smtp_handler()
 
 

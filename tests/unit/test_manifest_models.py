@@ -42,6 +42,7 @@ class TestConfigureLogging:
         with patch("soliplex.agents.config.settings") as mock_settings:
             mock_settings.log_level = "INVALID_LEVEL"
             mock_settings.log_format = None
+            mock_settings.log_config_file = None
             # Force basicConfig to raise on first call
             with patch("logging.basicConfig", side_effect=[ValueError("bad"), None]):
                 configure_logging()
