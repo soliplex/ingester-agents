@@ -25,3 +25,13 @@ class EmptyComponentError(Exception):
             f"and has error_on_empty set; skipping stale-document removal for source '{source}' "
             f"(inventory={inventory}, not_found={not_found})"
         )
+
+
+class UrlsFileFormatError(ValueError):
+    """A URL list file whose content isn't a URL list.
+
+    Raised for an HTML document, a body that isn't UTF-8 text, or a non-empty
+    file with no valid line left once comments and invalid lines are dropped.
+    Raising (rather than returning an empty list) fails the component, so the
+    stale-document clean-up is skipped instead of wiping the source.
+    """

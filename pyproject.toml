@@ -74,6 +74,11 @@ exclude-newer-package = {haiku-rag = false, haiku-rag-slim = false, haiku-skills
 [project.scripts]
 si-agent = "soliplex.agents.cli:cli"
 
+[project.entry-points."haiku.rag.metadata_providers"]
+soliplex-pdf-metadata = "soliplex.agents.haiku_metadata:PdfMetadataProvider"
+soliplex-sidecar-metadata = "soliplex.agents.haiku_metadata:SidecarMetadataProvider"
+soliplex-metadata = "soliplex.agents.haiku_metadata:SoliplexMetadataProvider"
+
 [tool.pytest_env]
 
 scm_auth_username="gitea_admin"

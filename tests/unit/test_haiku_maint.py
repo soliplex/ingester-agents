@@ -234,6 +234,93 @@ class TestRunVerb:
             await haiku_maint.run_verb("src", "vacuum", haiku_cfg=None)
 
 
+# --- backfill-metadata ---
+
+
+def test_build_backfill_argv_runs_this_interpreter():
+    import sys
+
+    argv = haiku_maint.build_backfill_argv(
+        "/etc/my haiku/h.yaml",
+        missing=["page_count", "pdf_title"],
+        content_types=["application/pdf"],
+        doc_filter="uri LIKE '%x y%'",
+        db_name="db",
+        batch_size=50,
+        check=True,
+    )
+    assert argv == [
+        sys.executable,
+        "-m",
+        "soliplex.agents.haiku_backfill",
+        "--config=/etc/my haiku/h.yaml",
+        "--db-name=db",
+        "--missing=page_count",
+        "--missing=pdf_title",
+        "--content-type=application/pdf",
+        "--filter=uri LIKE '%x y%'",
+        "--batch-size=50",
+        "--check",
+    ]
+
+
+def test_build_backfill_argv_without_config_or_options():
+    assert haiku_maint.build_backfill_argv(None)[3:] == []
+
+
+def test_build_backfill_argv_without_attachments():
+    assert haiku_maint.build_backfill_argv(None, attachments=False)[3:] == ["--no-attachments"]
+
+
+@pytest.mark.parametrize(
+    "stdout, expected",
+    [
+        ('noise\nBACKFILL_SUMMARY {"updated": 1}\n', {"updated": 1}),
+        ('BACKFILL_SUMMARY {"updated": 1}\nBACKFILL_SUMMARY {"updated": 2}', {"updated": 2}),
+        ("BACKFILL_SUMMARY {not json", None),
+        ("no summary here", None),
+        ("", None),
+    ],
+)
+def test_parse_backfill_summary(stdout, expected):
+    assert haiku_maint.parse_backfill_summary(stdout) == expected
+
+
+@pytest.mark.asyncio
+class TestBackfillVerb:
+    async def test_dry_run_builds_the_backfill_command(self, maint_env):
+        result = await haiku_maint.run_verb(
+            "src", "backfill-metadata", haiku_cfg="/etc/h.yaml", dry_run=True, options={"missing": ["page_count"]}
+        )
+        assert result["argv"][1:] == ["-m", "soliplex.agents.haiku_backfill", "--config=/etc/h.yaml", "--missing=page_count"]
+        assert result["dry_run"] is True
+
+    async def test_run_reports_the_summary(self, maint_env):
+        proc = _fake_proc(returncode=0, stdout_lines=[b'INFO ...\nBACKFILL_SUMMARY {"updated": 4}\n'])
+        with patch(_EXEC, new_callable=AsyncMock, return_value=proc) as mock_exec:
+            result = await haiku_maint.run_verb("src", "backfill-metadata", haiku_cfg="/etc/h.yaml")
+        assert result["summary"] == {"updated": 4}
+        assert mock_exec.call_args.args[1:3] == ("-m", "soliplex.agents.haiku_backfill")
+        assert mock_exec.call_args.kwargs["env"]["SOURCE"] == "src"
+
+    async def test_other_verbs_have_no_summary(self, maint_env):
+        with patch(_EXEC, new_callable=AsyncMock, return_value=_fake_proc()):
+            result = await haiku_maint.run_verb("src", "vacuum", haiku_cfg=None)
+        assert "summary" not in result
+
+    async def test_other_verbs_take_no_options(self, maint_env):
+        with pytest.raises(ValueError, match="haiku vacuum takes no options"):
+            await haiku_maint.run_verb("src", "vacuum", haiku_cfg=None, options={"missing": ["x"]})
+
+    async def test_run_maintenance_passes_options(self, tmp_path, maint_env):
+        path = tmp_path / "m.yml"
+        path.write_text("id: m\nname: M\nsource: src\ncomponents:\n  - type: fs\n    name: c\n    path: /data\n")
+        results = await haiku_maint.run_maintenance(
+            "backfill-metadata", str(path), dry_run=True, options={"content_types": ["application/pdf"]}
+        )
+        assert results[0]["argv"][-1] == "--content-type=application/pdf"
+
+
 # --- plan_targets ---
 
 

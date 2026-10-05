@@ -23,6 +23,7 @@ class TestConfigureLogging:
         with patch("soliplex.agents.config.settings") as mock_settings:
             mock_settings.log_level = "DEBUG"
             mock_settings.log_format = "{message}"
+            mock_settings.log_config_file = None
             mock_settings.smtp_host = None
             mock_settings.smtp_from = None
             mock_settings.smtp_to = None
@@ -37,6 +38,7 @@ class TestConfigureLogging:
         with patch("soliplex.agents.config.settings") as mock_settings:
             mock_settings.log_level = "INFO"
             mock_settings.log_format = "json"
+            mock_settings.log_config_file = None
             mock_settings.smtp_host = None
             mock_settings.smtp_from = None
             mock_settings.smtp_to = None
@@ -50,6 +52,7 @@ class TestConfigureLogging:
         with patch("soliplex.agents.config.settings") as mock_settings:
             mock_settings.log_level = "INVALID_LEVEL"
             mock_settings.log_format = "{message}"
+            mock_settings.log_config_file = None
             mock_settings.smtp_host = None
             mock_settings.smtp_from = None
             mock_settings.smtp_to = None
@@ -67,6 +70,7 @@ class TestConfigureLogging:
         ):
             mock_settings.log_level = "INFO"
             mock_settings.log_format = "{message}"
+            mock_settings.log_config_file = None
             configure_logging()
             mock_smtp.assert_called_once()
 
@@ -176,6 +180,7 @@ class TestAddSmtpHandler:
             mock_settings.smtp_use_tls = True
             mock_settings.smtp_log_level = "ERROR"
             mock_settings.smtp_cooldown = 30
+            mock_settings.log_config_file = None
             configure_logging()
             configure_logging()
         smtp_handlers = [h for h in root.handlers if isinstance(h, logging.handlers.SMTPHandler)]

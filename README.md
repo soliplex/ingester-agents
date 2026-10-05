@@ -49,6 +49,9 @@ MIME types are detected from file **content** (via [puremagic](https://pypi.org/
   - One per-source `.lancedb` database, configurable command and config file
   - Globally serialized — only one load runs at a time
   - `manifest migrate` / `manifest vacuum` maintain those databases
+  - Metadata providers add each document's sidecar and a PDF's page count and
+    document information to its haiku-rag metadata; `manifest
+    backfill-metadata` fills them in for documents already indexed
 
 - **REST API Server**: Run agents as a web service
   - FastAPI-based HTTP endpoints for all operations
@@ -165,6 +168,8 @@ EXTENSIONS=md,pdf,doc,docx
 
 # Logging level (default: INFO)
 LOG_LEVEL=INFO
+# LOG_CONFIG_FILE=/etc/ingester/logging.yaml   # extra handlers; see Custom Logging below
+# LOG_CONFIG_STRICT=false                      # fail startup when that file can't be applied
 
 # API Server Configuration
 SERVER_HOST=127.0.0.1
@@ -194,8 +199,8 @@ HAIKU_PATH=/etc/haiku                  # base dir for haiku-rag config files
 # HAIKU_LOAD_TIMEOUT=1800
 # HAIKU_LOAD_CWD=/var/lib/ingester     # subprocess working dir (default: inherit)
 
-# haiku-rag maintenance (`si-agent manifest migrate` / `manifest vacuum`)
-# HAIKU_MAINTENANCE_COMMAND=haiku-rag --config={haiku_cfg} {verb}
+# haiku-rag maintenance (`si-agent manifest migrate` / `vacuum` / `backfill-metadata`)
+# HAIKU_MAINTENANCE_COMMAND=haiku-rag --config={haiku_cfg} {verb}   # not backfill-metadata
 # HAIKU_MAINTENANCE_TIMEOUT=3600
 
 # haiku subprocess output (load and maintenance) is logged in parts, inside
@@ -226,6 +231,58 @@ haiku-rag config file needs a further set of its own — model and service
 endpoints, and the bucket variables in S3 mode — which fail the load when
 unset; see [Variables the haiku-rag config
 needs](#variables-the-haiku-rag-config-needs).
+
+### Custom Logging
+
+`LOG_CONFIG_FILE` names a YAML (or JSON) file in
+[`logging.config.dictConfig`](https://docs.python.org/3/library/logging.config.html#logging-config-dictschema)
+form, which is applied on top of the built-in setup. Use it to send particular
+loggers somewhere else, for example to an HTTP log sink. `()` names any
+factory importable in the environment, so a package installed alongside this
+one can supply its own handler classes.
+
+```yaml
+version: 1
+handlers:
+  sink:
+    class: logging.handlers.QueueHandler   # sends from a background thread
+    level: ERROR
+    listener: logging.handlers.QueueListener
+    handlers: [sink_http]
+    queue:
+      (): queue.Queue
+      maxsize: 1000                        # a down sink can't grow it forever
+  sink_http:
+    (): my_package.log_handlers.MyHTTPHandler
+    level: ERROR
+    host: logs.example.com
+root:
+  handlers: [sink]
+```
+
+How the file is applied:
+
+- **It only adds.** The console handler, the SMTP handler and Logfire are
+  installed whether or not the file names the root logger. `LOG_LEVEL` still
+  sets the root level, unless the file sets `root.level`.
+- **Existing loggers stay on.** `disable_existing_loggers` defaults to `false`.
+  The stdlib default would silence every module logger, since they all exist
+  by the time logging is configured.
+- **Queue listeners are started for you.** `dictConfig` builds a
+  `QueueHandler`'s listener but doesn't start it. Each time logging is
+  configured, the previous listeners are stopped and the queued records
+  delivered first; they are stopped the same way at exit. Put any handler that
+  makes network calls behind a `QueueHandler`, so a slow destination never
+  blocks the event loop.
+- **A file that can't be applied doesn't stop the process.** This covers a
+  missing file, invalid YAML, a document that isn't a mapping, and a config
+  `dictConfig` rejects. The built-in setup is used, a warning is logged, and
+  whatever the file had partly configured is removed. Set
+  `LOG_CONFIG_STRICT=true` to fail instead.
+
+The file covers this process only. The `haiku-ingester` and `haiku-rag`
+subprocesses configure their own logging; their output reaches this process's
+log through the `soliplex.agents.manifest.haiku_process` logger.
 
 ### Tracing with Logfire
 
@@ -659,6 +716,7 @@ Maintain the databases those manifests load into (see
 ```bash
 si-agent manifest migrate           # every manifest in $MANIFEST_DIR
 si-agent manifest vacuum --dry-run  # print the commands without running them
+si-agent manifest backfill-metadata --missing page_count --check  # what a back-fill would change
 ```
 
 #### Manifest YAML Format
@@ -741,9 +799,9 @@ Top-level fields:
 **Web (`web`):**
 
 - **name** (required): Component name.
-- **url**: Single URL to fetch.
-- **urls**: List of URLs to fetch.
-- **urls_file**: Path to a file containing URLs (one per line). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` WebDAV URLs.
+- **url**: Single URL to fetch (`http://` or `https://`, with a host).
+- **urls**: List of URLs to fetch (same rule as `url`).
+- **urls_file**: Path to a file containing URLs (one per line; see [URL list files](#url-list-files)). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` URLs.
 - Exactly one of `url`, `urls`, or `urls_file` must be specified.
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
@@ -769,14 +827,42 @@ Top-level fields:
 - **name** (required): Component name.
 - **url** (required): WebDAV server URL.
 - **path**: WebDAV directory path to scan recursively.
-- **urls**: List of specific WebDAV file paths to ingest.
-- **urls_file**: Path to a file containing WebDAV URLs (one per line). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` WebDAV URLs (fetched using the same WebDAV credentials).
+- **urls**: List of specific WebDAV file paths to ingest (each an absolute path starting with `/`).
+- **urls_file**: Path to a file containing WebDAV paths (one per line; see [URL list files](#url-list-files)). Supports local paths, `s3://bucket/key` URLs, and `http(s)://` URLs (fetched with the WebDAV credentials when on the WebDAV host, otherwise with a plain GET).
 - Exactly one of `path`, `urls`, or `urls_file` must be specified.
 - **username**: Override WebDAV username (resolved via Docker secrets or env vars).
 - **password**: Override WebDAV password (resolved via Docker secrets or env vars).
 - **extensions**: Override extensions for this component.
 - **metadata**: Additional metadata merged with config-level metadata.
 - **error_on_empty**: Treat an empty result as a component error, which blocks stale-document removal (default: false). See [Empty-result protection](#empty-result-protection).
+
+#### URL list files
+
+A `urls_file` holds one entry per line:
+
+- Leading and trailing whitespace is stripped; blank lines are ignored.
+- Lines starting with `#` are comments and are ignored.
+- Each remaining line must match the component type: an absolute path
+  starting with `/` for `webdav` (full URLs are not accepted), or an
+  `http://` / `https://` URL with a host for `web`. Invalid lines are dropped
+  with one warning per file, giving the count and up to five examples.
+
+The file is refused -- the component fails, so `delete_stale` is skipped for
+the run -- when:
+
+- it is an HTML document (an error, login or maintenance page served with a
+  200 status by a proxy or upstream server);
+- it is not UTF-8 text;
+- it has content but no valid line once comments and invalid lines are
+  dropped.
+
+An empty list from a non-empty file means the file is wrong, not that the
+source is empty; ingesting it would remove every document of the source. A
+genuinely empty file (no non-blank lines) still yields an empty list.
+
+Inline `urls` (and a `web` component's `url`) are held to the same rule
+when the manifest is loaded, so a bad entry fails manifest loading (and
+`POST /api/v1/manifest/validate`) before any run.
 
 #### Configuration Precedence
 
@@ -812,7 +898,7 @@ When `delete_stale: true` is set in a manifest's `config` block, the runner remo
 
 **Empty-result protection:**
 
-For most sources an empty result is never legitimate: it means a `urls_file` that came back blank or comments-only, an fs path that isn't mounted, or a WebDAV list whose every entry returned 404. Set `error_on_empty: true` on such a component to make "nothing came back" a component error, which skips `delete_stale` for the run like any other component error:
+For most sources an empty result is never legitimate: it means a `urls_file` that came back blank (an HTML page, non-UTF-8 text or a comments-only file is already refused; see [URL list files](#url-list-files)), an fs path that isn't mounted, or a WebDAV list whose every entry returned 404. Set `error_on_empty: true` on such a component to make "nothing came back" a component error, which skips `delete_stale` for the run like any other component error:
 
 ```yaml
 components:
@@ -1090,16 +1176,21 @@ costs nothing.
 
 #### Database Maintenance
 
-Two verbs operate on the per-source LanceDB databases rather than on the
+Three verbs operate on the per-source LanceDB databases rather than on the
 downloaded documents:
 
 ```bash
 si-agent manifest migrate [PATH] [--json] [--timeout N] [--dry-run]
 si-agent manifest vacuum  [PATH] [--json] [--timeout N] [--dry-run]
+si-agent manifest backfill-metadata [PATH] [--missing KEY]... [--content-type TYPE]...
+                                    [--filter SQL] [--db-name NAME] [--batch-size N]
+                                    [--check] [--no-attachments] [--json] [--timeout N] [--dry-run]
 ```
 
 - `migrate` runs pending haiku-rag schema migrations; `vacuum` optimizes and
-  compacts the tables to reclaim disk space.
+  compacts the tables to reclaim disk space; `backfill-metadata` re-runs each
+  source's haiku-rag `metadata_provider` over documents already indexed (see
+  [Back-filling metadata](#back-filling-metadata)).
 - `PATH` is optional and defaults to `all`:
 
   | `PATH`               | Scope                                            |
@@ -1110,8 +1201,10 @@ si-agent manifest vacuum  [PATH] [--json] [--timeout N] [--dry-run]
 
   `all` is a reserved word, so a file or directory literally named `all`
   cannot be addressed by name.
-- **Command** is configurable via `HAIKU_MAINTENANCE_COMMAND` (default
-  `haiku-rag --config={haiku_cfg} {verb}`). Placeholders: `{verb}`,
+- **Command** for `migrate` / `vacuum` is configurable via
+  `HAIKU_MAINTENANCE_COMMAND` (default
+  `haiku-rag --config={haiku_cfg} {verb}`). `backfill-metadata` always runs
+  `python -m soliplex.agents.haiku_backfill` with the agent's own interpreter. Placeholders: `{verb}`,
   `{haiku_cfg}`, `{db}`, `{source}`, `{lancedb_dir}`, `{haiku_path}`. As with
   the load command, the template is tokenized before substitution, so values
   containing spaces cannot inject extra arguments.
@@ -1432,6 +1525,14 @@ Built-in callbacks (`soliplex.agents.manifest.post_processors`):
   loop and making the pass killable via its `timeout` kwarg (default 1800s),
   so a stuck compaction can't hang the run. Retention comes from the haiku
   config's `storage.vacuum_retention_seconds`.
+- **`backfill_metadata`** runs the same subprocess as `si-agent manifest
+  backfill-metadata` for the manifest's source, right after its load, so
+  nothing else is writing the database. Takes `missing` and `content_types`
+  (lists), `doc_filter`, `full`, `database`, `batch_size`, `attachments`
+  (default `true`) and `timeout` (default 1800s). It must be scoped -- `missing` or `doc_filter` -- or given
+  `full: true`, since it runs after every load. Documents it could not fill
+  are logged and do not stop the chain; the subprocess crashing or timing out
+  raises. See [Back-filling metadata](#back-filling-metadata).
 - **`notify_webhook`** POSTs `{"event": "load.finished", "source", "status",
   "returncode", "timed_out", "summary", "manifest_id"}`, where `status` is
   `ok`, `failed`, `timed_out` or `no_load`, plus `stderr_tail` (the last
@@ -1506,6 +1607,10 @@ Every agent records one, but what it points at differs by source:
 The field is omitted entirely when an agent has no URL to record -- for
 example an SCM provider whose response carried neither key. Consumers should
 treat it as optional.
+
+The `soliplex-sidecar-metadata` haiku-rag metadata provider copies the
+sidecar into each document's haiku-rag metadata at load time; see [Document
+Metadata in haiku-rag](#document-metadata-in-haiku-rag).
 
 #### `downloaded_time`
 
@@ -1704,6 +1809,174 @@ The example config also interpolates `${STATE_DIR}` and the model/service URLs
 (`QA_MODEL`, `QA_BASE_URL`, `OLLAMA_BASE_URL`, `DOCLING1_BASE_URL`,
 `DOCLING2_BASE_URL`, `EMBEDDINGS_BASE_URL`); every one must be exported too, or
 the load fails on the missing variable.
+
+### Document Metadata in haiku-rag
+
+`haiku-ingester` reads only the document bytes. This package registers haiku-rag
+[metadata providers](https://github.com/ggozad/haiku.rag/blob/main/docs/ingester.md#metadata-providers)
+that add more to each document's haiku-rag metadata. A haiku source names one
+`metadata_provider`, so pick the one covering what you want:
+
+| Provider | Adds |
+| --- | --- |
+| `soliplex-sidecar-metadata` | The document's [`.meta.json` sidecar](#metadata-sidecars), flattened |
+| `soliplex-pdf-metadata` | A PDF's page count and document information |
+| `soliplex-metadata` | Both; the sidecar is applied last, so manifest metadata wins a clash |
+
+haiku-rag does not call providers for the PDF attachments it extracts into
+documents of their own; [back-fill](#pdf-attachments) them.
+
+Both example configs in `example-haiku-configs/` name `soliplex-metadata`:
+
+```yaml
+  sources:
+    - type: fs
+      id: ${SOURCE}
+      root: ${DOWNLOAD_DIR}/${SOURCE}
+      metadata_provider: soliplex-metadata
+```
+
+#### Sidecar metadata
+
+`soliplex-sidecar-metadata` reads the sidecar the manifest run wrote beside
+the document and returns it flattened, as
+[Metadata Sidecars](#metadata-sidecars) describes: `mime_type`, `source`,
+`source_uri`, `ingestion_type`, `sha256`, `size`, `source_url` and
+`downloaded_time` when set, and the manifest's `metadata` entries at the top
+level (nested values JSON-encoded). It finds the download store the same way
+the agent does: the haiku source's `id` is the sanitized manifest source
+(`${SOURCE}`), and `DOWNLOAD_DIR` / `DOWNLOAD_S3_*` come from the load's
+environment, so it works on the local and S3 stores alike.
+
+A missing, unreadable or malformed sidecar gives the document no sidecar keys
+and a log line; it never fails the document. A sidecar that changes while its
+document does not -- new manifest metadata -- is not picked up by a load,
+because haiku-rag skips an unchanged document before calling any provider
+(and does not ingest `*.meta.json` itself). Back-fill those with a
+`--filter`, or a pass without `--missing`.
+
+#### PDF metadata
+
+| Key | Value |
+| --- | --- |
+| `page_count` | Number of pages (an integer) |
+| `pdf_version` | PDF version from the header, e.g. `"1.7"` |
+| `pdf_title`, `pdf_author`, `pdf_subject`, `pdf_keywords`, `pdf_creator`, `pdf_producer` | The PDF's document information entries |
+| `pdf_creation_date`, `pdf_mod_date` | The PDF's dates, as ISO 8601 (kept as written if they do not parse) |
+
+Only `page_count` is always present; an information entry the PDF leaves
+empty is left out. A document is a PDF when its content type is
+`application/pdf` or its first 1024 bytes hold a `%PDF-` header; anything else
+gets no keys. A PDF pdfium cannot open (password protected, truncated) gets no
+keys either, and a warning is logged -- the provider never fails the document.
+
+The provider runs inside `haiku-ingester`, so this package must be installed
+in the environment that runs it (the `haiku_load_command` default runs it from
+the agent's own). haiku-rag calls a provider only when it fetches a new or
+changed document: after enabling it, existing documents gain the keys the next
+time they change, unless you back-fill them -- `--missing source_uri` for the
+sidecar keys (every sidecar has one), `--missing page_count` for the PDF keys.
+
+#### Back-filling metadata
+
+`backfill-metadata` adds a provider's keys to documents indexed before the
+provider was configured, without re-ingesting them -- nothing is converted,
+chunked or embedded:
+
+```bash
+# What would change, without writing anything
+si-agent manifest backfill-metadata --missing page_count --check
+
+# Every manifest in $MANIFEST_DIR, PDFs still lacking a page count
+si-agent manifest backfill-metadata --missing page_count --content-type application/pdf
+
+# One manifest; print the command instead of running it
+si-agent manifest backfill-metadata /manifests/handbook.yml --missing page_count --dry-run
+```
+
+For each source in the haiku config that names a `metadata_provider`, it
+lists the documents that source ingested, fetches each selected one again
+through that source (so the provider sees what the ingester would hand it),
+calls the provider, and merges the keys it returns into the document's
+metadata. The provider is the one code path: the ingester calls it for new
+documents, the back-fill for old ones.
+
+Which documents run:
+
+- **Scoped in LanceDB.** `--missing KEY` becomes a `WHERE` clause on the
+  stored metadata, `(metadata IS NULL OR metadata NOT LIKE '%"KEY"%' ...)`, so
+  a document that already has every key is never listed, let alone fetched.
+  `--filter` adds a clause of your own (AND-ed with it), e.g.
+  `--filter "uri LIKE '%/reports/%'"`. A key may only contain letters, digits,
+  `_`, `.` and `-`.
+- **Then by type.** Of those, a document runs when its stored `content_type`
+  is one of the `--content-type` values, if any are given.
+- **Unscoped, everything.** With neither `--missing` nor `--filter` every
+  document of the source is fetched again. Documents whose metadata the
+  provider would not change are never written either way.
+- **Database.** The haiku config must place the database
+  (`lancedb.databases`), as the load's does; `--db-name` picks one when it
+  places several. `--batch-size` (default 500) sizes the listing's pages, all
+  of which are read before the first write.
+- **Stale documents are left alone.** A document whose bytes changed since it
+  was indexed (its stored `md5` differs) is counted as `stale`: the next load
+  re-ingests it, which runs the provider anyway.
+- **Providers can opt out.**  Its documents
+  are counted as skipped and it is never called: run over stored documents it
+  would record the time of the back-fill. Third-party providers of that kind
+  should do the same.
+- **Never alongside a load.** It writes the same database the load does, so
+  do not run the CLI verb while a load for that source is in progress. As a
+  post-process step it runs after the load by construction, and must be
+  scoped (`missing` or `doc_filter`) or given `full: true`, so that a
+  scheduled load with nothing new does not fetch every document again:
+
+  ```yaml
+  config:
+    post_process:
+      - method: soliplex.agents.manifest.post_processors:backfill_metadata
+        kwargs:
+          missing: [page_count]
+          content_types: [application/pdf]
+  ```
+
+##### PDF attachments
+
+haiku-rag stores each file embedded in a PDF as a document of its own:
+`<parent uri>#attachment=<percent-encoded name>` (nested ones chaining
+fragments), linked by `parent_uri` and owned by **no** source. It does not
+call a metadata provider for them, and no source can fetch that URI, so the
+back-fill derives each one from its parent instead:
+
+1. walk `parent_uri` up to the top-level document, which a source owns;
+2. fetch it once through that source, however many attachments it has;
+3. extract the attachment from it, following nested ones down, exactly as
+   haiku-rag does (same URI, content type and MD5);
+4. call that source's provider with the attachment's bytes and
+   `extra_metadata["parent_uri"]` set, and merge as for any document.
+
+So `soliplex-pdf-metadata` gives an attached PDF its **own** page count, and
+`soliplex-sidecar-metadata` gives every attachment its **parent's** sidecar:
+an attachment has no download of its own. An attachment never gains a
+`source_id`, and no provider can change its `parent_uri`. An attachment whose
+top-level document changed since it was indexed, or whose stored `md5` no
+longer matches what the parent embeds, is `stale`. One whose parent is no
+longer indexed, or no longer embeds it, is `orphaned`: haiku-rag removes such
+a child only when it re-ingests the parent, and not at all when the new
+parent cannot be opened, so these are worth a look. `--no-attachments`
+(`attachments: false`) leaves attachments alone.
+
+##### Outcome
+
+The outcome line reports what it did, e.g.
+`(scanned 6: 3 updated (2 attachments), 1 unchanged, 0 stale, 1 orphaned,
+1 skipped, 0 errors)` -- under `--check`, `would update`; `--json` has the full
+counts. `skipped` covers documents no source with a provider owns
+(`haiku-rag add-src` documents and their attachments), providers that opt out,
+and ones `--content-type` or the exact `--missing` check left out. A document that fails (gone from the store, provider raised) is listed
+and the run continues; the subprocess then exits 3 and the verb exits 1. A PDF
+the provider cannot read gets no keys and counts as `unchanged`, so
+`--missing page_count` selects it again on every run.
 
 ## Server API
 
@@ -2023,6 +2296,8 @@ soliplex.agents/
 │   ├── local_store.py      # Writes downloaded documents + .meta.json sidecars
 │   ├── local_state.py      # Per-source SQLite sync state (hashes + commit SHA)
 │   ├── config.py           # Configuration, settings, and manifest models
+│   ├── haiku_metadata.py   # haiku-rag metadata providers (sidecar, PDF, combined)
+│   ├── haiku_backfill.py   # Re-runs metadata providers over indexed documents
 │   ├── server/             # FastAPI server
 │   │   ├── __init__.py     # FastAPI app initialization, scheduler
 │   │   ├── auth.py         # Authentication (API key & OAuth2 proxy)
@@ -2049,7 +2324,8 @@ soliplex.agents/
 │   ├── manifest/           # Manifest runner
 │   │   ├── runner.py       # YAML loading, validation, dispatch
 │   │   ├── haiku_loader.py # haiku-ingester batch load subprocess
-│   │   ├── haiku_maint.py  # haiku-rag migrate/vacuum subprocesses
+│   │   ├── haiku_maint.py  # haiku-rag migrate/vacuum/backfill-metadata subprocesses
+│   │   ├── post_processors.py  # Built-in post-process callbacks
 │   │   └── cli.py          # Manifest CLI commands
 │   └── scm/                # SCM agent
 │       ├── app.py          # Core SCM logic
@@ -2093,6 +2369,13 @@ soliplex.agents/
 - `manifest/runner.py` - Manifest loading, validation, and dispatch to agents
 - `local_store.py` - Writes fetched documents and metadata sidecars to `DOWNLOAD_DIR`
 - `local_state.py` - Local synchronization state (content hashes + SCM commit markers)
+
+**haiku-rag Layer:**
+
+- `manifest/haiku_loader.py` - The `haiku-ingester run-batch` load after each manifest run
+- `manifest/haiku_maint.py` - `migrate` / `vacuum` / `backfill-metadata` subprocesses
+- `haiku_metadata.py` - Metadata providers run inside `haiku-ingester` (registered entry points)
+- `haiku_backfill.py` - Back-fill subprocess re-running those providers over indexed documents
 
 **Configuration:**
 

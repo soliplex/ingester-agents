@@ -1,5 +1,6 @@
 """Tests for built-in manifest post-process callbacks — 100% branch coverage."""
 
+import logging
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -114,6 +115,94 @@ async def test_vacuum_kills_and_raises_on_timeout(lancedb_env):
 
     proc.kill.assert_called_once()
     proc.wait.assert_awaited()
+
+
+# --- backfill_metadata ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backfill_metadata_runs_the_backfill_subprocess(lancedb_env, caplog):
+    proc = _fake_proc(returncode=0, stdout_lines=[b'BACKFILL_SUMMARY {"updated": 2, "errors": []}\n'])
+    with caplog.at_level(logging.INFO), patch(_EXEC, new_callable=AsyncMock, return_value=proc) as mock_exec:
+        await post_processors.backfill_metadata(
+            "src",
+            config="/etc/haiku/h.yaml",
+            missing=["page_count"],
+            content_types=["application/pdf"],
+            doc_filter="uri LIKE '%.pdf'",
+            database="db",
+            batch_size=100,
+        )
+
+    argv = list(mock_exec.call_args.args)
+    assert argv[1:] == [
+        "-m",
+        "soliplex.agents.haiku_backfill",
+        "--config=/etc/haiku/h.yaml",
+        "--db-name=db",
+        "--missing=page_count",
+        "--content-type=application/pdf",
+        "--filter=uri LIKE '%.pdf'",
+        "--batch-size=100",
+    ]
+    assert mock_exec.call_args.kwargs["env"]["SOURCE"] == "src"
+    assert "Metadata back-fill completed for source 'src'" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_backfill_metadata_refuses_an_unscoped_pass(lancedb_env):
+    with patch(_EXEC, new_callable=AsyncMock) as mock_exec, pytest.raises(ValueError, match="`full: true`"):
+        await post_processors.backfill_metadata("src")
+    mock_exec.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_backfill_metadata_full_pass_when_asked(lancedb_env):
+    with patch(_EXEC, new_callable=AsyncMock, return_value=_fake_proc()) as mock_exec:
+        await post_processors.backfill_metadata("src", full=True)
+    assert list(mock_exec.call_args.args)[3:] == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_metadata_can_leave_attachments_alone(lancedb_env):
+    with patch(_EXEC, new_callable=AsyncMock, return_value=_fake_proc()) as mock_exec:
+        await post_processors.backfill_metadata("src", full=True, attachments=False)
+    assert list(mock_exec.call_args.args)[3:] == ["--no-attachments"]
+
+
+@pytest.mark.asyncio
+async def test_backfill_metadata_doc_filter_alone_scopes_it(lancedb_env):
+    with patch(_EXEC, new_callable=AsyncMock, return_value=_fake_proc()) as mock_exec:
+        await post_processors.backfill_metadata("src", doc_filter="uri LIKE '%.pdf'")
+    assert list(mock_exec.call_args.args)[3:] == ["--filter=uri LIKE '%.pdf'"]
+
+
+@pytest.mark.asyncio
+async def test_backfill_metadata_logs_partial_failure_without_raising(lancedb_env, caplog):
+    summary = b'BACKFILL_SUMMARY {"errors": [{"uri": "file:///a.pdf", "error": "boom"}]}\n'
+    proc = _fake_proc(returncode=3, stdout_lines=[summary])
+    with caplog.at_level(logging.WARNING), patch(_EXEC, new_callable=AsyncMock, return_value=proc):
+        await post_processors.backfill_metadata("src", missing=["page_count"])
+    assert "could not fill 1 document(s): file:///a.pdf" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_backfill_metadata_raises_on_crash(lancedb_env):
+    proc = _fake_proc(returncode=1, stdout_lines=[], stderr_lines=[b"Traceback\n"])
+    with patch(_EXEC, new_callable=AsyncMock, return_value=proc), pytest.raises(RuntimeError, match="rc=1"):
+        await post_processors.backfill_metadata("src", missing=["page_count"])
+
+
+@pytest.mark.asyncio
+async def test_backfill_metadata_raises_on_timeout(lancedb_env):
+    proc = _fake_proc(returncode=0)
+    with (
+        patch(_EXEC, new_callable=AsyncMock, return_value=proc),
+        patch(_TIMEOUT, _RaisingTimeout),
+        pytest.raises(RuntimeError, match="timed out"),
+    ):
+        await post_processors.backfill_metadata("src", missing=["page_count"], timeout=1)
+    proc.kill.assert_called_once()
 
 
 # --- notify_webhook -------------------------------------------------------------

@@ -33,10 +33,13 @@ si-agent manifest run example-manifests/fs.yml --no-load
 src/soliplex/agents/
 ├── cli.py              # Main Typer CLI entry point
 ├── config.py           # Pydantic settings + manifest models
+├── log_config.py       # LOG_CONFIG_FILE: a dictConfig file applied by configure_logging()
 ├── local_state.py      # Local sync state (content hashes, commit SHAs)
 ├── store.py            # DownloadTarget + DocumentStore (local | s3) -- where documents live
 ├── sidecar/            # Sidecar kinds (.meta.json), their format and addressing
 ├── local_store.py      # Writing documents + sidecars through the store
+├── haiku_metadata.py   # haiku-rag metadata providers (sidecar, PDF, combined), run inside haiku-ingester
+├── haiku_backfill.py   # Subprocess re-running metadata providers over already-indexed documents
 ├── retry.py            # Retry helpers
 ├── common/
 │   └── config.py       # File validation utilities
@@ -62,10 +65,10 @@ src/soliplex/agents/
 │   ├── pre_process.py  # pre_process hook: per document, inside write_document
 │   ├── pre_processors.py   # Built-in pre-process steps (check_pdf_password, fix_asciidoc)
 │   ├── post_process.py # post_process hook: after the haiku load
-│   ├── post_processors.py  # Built-in post-process callbacks (vacuum, notify_webhook)
+│   ├── post_processors.py  # Built-in post-process callbacks (vacuum, backfill_metadata, notify_webhook)
 │   ├── webhook.py      # JSON POST helper shared by both notify_webhook steps
 │   ├── haiku_loader.py # haiku-rag batch load subprocess
-│   └── haiku_maint.py  # haiku-rag migrate/vacuum subprocesses
+│   └── haiku_maint.py  # haiku-rag migrate/vacuum/backfill-metadata subprocesses
 └── server/             # FastAPI REST API
     ├── __init__.py     # App setup, CORS, scheduler, lifespan
     ├── auth.py         # Authentication
@@ -169,6 +172,7 @@ LANCEDB_DIR=/var/lib/lancedb                  # Interpolated by the haiku-rag co
 HAIKU_PATH=/etc/haiku                         # Base dir for haiku-rag config files
 # HAIKU_LOAD_COMMAND, HAIKU_DEFAULT_CONFIG, HAIKU_LOAD_TIMEOUT, HAIKU_LOAD_CWD also available
 # HAIKU_MAINTENANCE_COMMAND, HAIKU_MAINTENANCE_TIMEOUT for `manifest migrate` / `manifest vacuum`
+# (HAIKU_MAINTENANCE_TIMEOUT also bounds `manifest backfill-metadata`)
 # HAIKU_OUTPUT_CHUNK_BYTES, HAIKU_OUTPUT_FLUSH_SECONDS, HAIKU_OUTPUT_MAX_BYTES shape how the
 # subprocess output is logged (in parts, inside the run's span)
 # HAIKU_TRACE_WRAPPER=true runs haiku commands via `python -m soliplex.agents.traced_run`,
@@ -365,6 +369,48 @@ sequentially, manifests sharing a database are deduplicated, no post-process
 callbacks fire, and `--dry-run` prints the command lines without spawning.
 `post_processors.vacuum` delegates to the same `run_verb` code path but
 raises on failure, because the post-process chain stops on the first error.
+
+`backfill-metadata` is a third verb on that path with its own argv
+(`build_backfill_argv`: `python -m soliplex.agents.haiku_backfill`, not the
+`HAIKU_MAINTENANCE_COMMAND` template). It re-runs each haiku source's
+`metadata_provider` over documents already indexed: the listing is scoped in
+LanceDB (`--missing KEY` becomes `metadata NOT LIKE '%"KEY"%'`, AND-ed with
+`--filter`), every page is read before the first write, documents are
+re-fetched through the haiku source that ingested them, and only changed
+metadata is written (metadata-only `update_document`, no re-embedding).
+`--check` writes nothing. The last stdout line is `BACKFILL_SUMMARY <json>`;
+exit 3 means some documents failed, 1 a crash.
+`post_processors.backfill_metadata` refuses to run unscoped (no `missing` /
+`doc_filter`) unless given `full: true`, since it runs after every load.
+
+PDF attachments (`parent_uri` set, no `source_id`) have no source and no
+fetchable URI, so `_Run.attachments` fills them from their top-level
+ancestor: walk `parent_uri` up (`get_document_by_uri`, cached), fetch the
+ancestor once per group through its source, re-extract the chain with
+`extract_attachments` (a copy of haiku-rag's private extractor -- same URI,
+content type, MD5, `PDFIUM_LOCK` -- pinned by a conformance test), and call the
+ancestor source's provider with `extra_metadata["parent_uri"]`. Children must
+never gain a `source_id` (haiku-rag's reconcile would orphan-delete them), and
+`parent_uri` is a reserved key. A provider with `backfill = False` (an
+ingestion timestamp) is never run by the back-fill.
+
+### haiku-rag Metadata Providers
+
+`haiku_metadata.py` registers `haiku.rag.metadata_providers` entry points in
+`pyproject.toml`; `haiku-ingester` calls the one a source names (one per
+source) for each new or changed document:
+
+- `soliplex-sidecar-metadata` -- the `.meta.json` sidecar, flattened, read
+  through `Sidecars` from the store `get_document_store(source_id)` resolves
+  (the haiku source id is the sanitized manifest source; sanitizing is
+  idempotent);
+- `soliplex-pdf-metadata` -- `page_count`, `pdf_version` and the `pdf_*`
+  information entries, via pypdfium2 under haiku-rag's process-wide
+  `PDFIUM_LOCK` in a worker thread (pdfium is not thread-safe);
+- `soliplex-metadata` -- both, the sidecar last.
+
+Providers must never raise for a bad document (haiku-rag dead-letters on a
+provider exception): return `{}` and log instead.
 
 ### Manifest Hooks
 

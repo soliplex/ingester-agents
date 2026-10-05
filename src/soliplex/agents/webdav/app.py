@@ -209,6 +209,7 @@ async def build_config_from_urls(
         successfully processed files. The results list contains one entry
         per URL with status and optional error_message.
     """
+    from soliplex.agents.common.urls_file import is_webdav_path
     from soliplex.agents.common.urls_file import read_urls_file
 
     allowed_extensions = settings.extensions
@@ -220,6 +221,7 @@ async def build_config_from_urls(
         webdav_url=webdav_url,
         webdav_username=webdav_username,
         webdav_password=webdav_password,
+        is_valid_line=is_webdav_path,
     )
 
     async with _client_for(client, webdav_url, webdav_username, webdav_password) as webdav_client:

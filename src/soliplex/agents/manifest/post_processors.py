@@ -10,6 +10,7 @@ This module holds the callbacks that ship with ingester-agents.
 
 import logging
 
+from soliplex.agents import haiku_backfill
 from soliplex.agents.manifest import haiku_maint
 from soliplex.agents.manifest import webhook
 from soliplex.agents.manifest.haiku_process import HaikuRun
@@ -63,6 +64,88 @@ async def vacuum(
     if result["returncode"] != 0:
         raise RuntimeError(f"Vacuum for source '{source}' failed (rc={result['returncode']})")
     logger.info("Vacuum completed for source '%s'", source)
+
+
+async def backfill_metadata(
+    source: str,
+    *,
+    config: str | None = None,
+    missing: list[str] | None = None,
+    content_types: list[str] | None = None,
+    doc_filter: str | None = None,
+    full: bool = False,
+    database: str | None = None,
+    batch_size: int | None = None,
+    attachments: bool = True,
+    timeout: float = DEFAULT_VACUUM_TIMEOUT,
+) -> None:
+    """Re-run the source's haiku-rag ``metadata_provider`` over documents already indexed.
+
+    Delegates to :func:`soliplex.agents.manifest.haiku_maint.run_verb` with
+    the ``backfill-metadata`` verb -- the same subprocess the ``si-agent
+    manifest backfill-metadata`` CLI verb runs (see
+    :mod:`soliplex.agents.haiku_backfill`). As a post-process step it runs
+    right after the load, so nothing else is writing the database.
+
+    Scoped, never a full pass by default: this runs after *every* load,
+    including scheduled ones where nothing changed, and an unscoped pass would
+    fetch every document of the source each time to find there is no work.
+    Give ``missing`` (e.g. ``[page_count]``) or ``doc_filter``; after the
+    first run only documents that still lack a key are fetched, which is the
+    few the provider could not fill. ``full: true`` asks for the full pass
+    anyway -- for a one-off after changing what the provider returns.
+
+    Documents that could not be filled are logged, not raised, so the steps
+    after this one still run; the run itself failing or timing out is raised.
+
+    Args:
+        source: The manifest source; slugified to locate the database.
+        config: Optional haiku.rag config path (auto-injected by the
+            post-process runner).
+        missing: Only documents lacking one of these metadata keys.
+        content_types: Only documents of one of these content types.
+        doc_filter: A LanceDB ``WHERE`` clause scoping which documents run.
+        full: Run without ``missing`` / ``doc_filter`` scoping.
+        database: Name of the database in the config's ``lancedb.databases``;
+            only needed when it places more than one.
+        batch_size: Pagination size for the document listing.
+        attachments: Fill PDF attachments too, from their parent document.
+        timeout: Seconds before the subprocess is killed.
+
+    Raises:
+        ValueError: when neither ``missing``, ``doc_filter`` nor ``full`` is
+            given.
+        RuntimeError: if the back-fill times out or crashes.
+    """
+    if not (missing or doc_filter or full):
+        raise ValueError("backfill_metadata needs `missing` or `doc_filter` to scope it, or `full: true`")
+    result = await haiku_maint.run_verb(
+        source,
+        haiku_maint.BACKFILL_VERB,
+        haiku_cfg=str(config) if config else None,
+        timeout=timeout,
+        options={
+            "missing": missing or [],
+            "content_types": content_types or [],
+            "doc_filter": doc_filter,
+            "db_name": database,
+            "batch_size": batch_size,
+            "attachments": attachments,
+        },
+    )
+    if result["timed_out"]:
+        raise RuntimeError(f"Metadata back-fill for source '{source}' timed out after {timeout}s")
+    summary = result["summary"]
+    if result["returncode"] == haiku_backfill.EXIT_PARTIAL:
+        logger.warning(
+            "Metadata back-fill for source '%s' could not fill %d document(s): %s",
+            source,
+            len(summary["errors"]),
+            ", ".join(error["uri"] for error in summary["errors"]),
+        )
+    elif result["returncode"] != 0:
+        raise RuntimeError(f"Metadata back-fill for source '{source}' failed (rc={result['returncode']})")
+    logger.info("Metadata back-fill completed for source '%s': %s", source, summary)
 
 
 # Lines of the load's stderr included in a failure notification.
