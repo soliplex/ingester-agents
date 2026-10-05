@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
+from soliplex.agents import EmptyComponentError
 from soliplex.agents import ValidationError
 from soliplex.agents import store as agent_store
 from soliplex.agents.config import SCM
@@ -531,3 +532,46 @@ class TestHookSteps:
         assert manifest.config.pre_run[0].timeout == 15
         assert manifest.config.pre_process[0].mime_types == ["application/pdf"]
         assert self._manifest({"pre_process": []}).config.pre_process == []
+
+
+# --- error_on_empty ---
+
+_ERROR_ON_EMPTY_COMPONENTS = [
+    {"type": "fs", "name": "c", "path": "/d"},
+    {"type": "scm", "name": "c", "platform": "github", "owner": "o", "repo": "r"},
+    {"type": "webdav", "name": "c", "url": "http://dav", "path": "/"},
+    {"type": "web", "name": "c", "url": "http://x"},
+]
+
+
+@pytest.mark.parametrize("component", _ERROR_ON_EMPTY_COMPONENTS, ids=lambda c: c["type"])
+def test_error_on_empty_defaults_to_false(component):
+    assert Manifest(**_raw(components=[component])).components[0].error_on_empty is False
+
+
+@pytest.mark.parametrize("component", _ERROR_ON_EMPTY_COMPONENTS, ids=lambda c: c["type"])
+def test_error_on_empty_parses(component):
+    manifest = Manifest(**_raw(components=[{**component, "error_on_empty": True}]))
+    assert manifest.components[0].error_on_empty is True
+
+
+def test_error_on_empty_typo_is_rejected():
+    with pytest.raises(PydanticValidationError) as excinfo:
+        Manifest(**_raw(components=[{"type": "fs", "name": "c", "path": "/d", "error_on_emtpy": True}]))
+    errors = excinfo.value.errors()
+    assert [e["loc"] for e in errors if e["type"] == "extra_forbidden"] == [("components", 0, "fs", "error_on_emtpy")]
+
+
+def test_empty_component_error_message():
+    err = EmptyComponentError("pubs", "webdav", "pubs-webdav", 3, 3)
+    assert str(err) == (
+        "Component 'pubs' (webdav) returned no items (after extension filtering) and has error_on_empty set; "
+        "skipping stale-document removal for source 'pubs-webdav' (inventory=3, not_found=3)"
+    )
+    assert (err.component, err.component_type, err.source, err.inventory, err.not_found) == (
+        "pubs",
+        "webdav",
+        "pubs-webdav",
+        3,
+        3,
+    )
