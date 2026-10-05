@@ -167,6 +167,8 @@ EXTENSIONS=md,pdf,doc,docx
 
 # Logging level (default: INFO)
 LOG_LEVEL=INFO
+# LOG_CONFIG_FILE=/etc/ingester/logging.yaml   # extra handlers; see Custom Logging below
+# LOG_CONFIG_STRICT=false                      # fail startup when that file can't be applied
 
 # API Server Configuration
 SERVER_HOST=127.0.0.1
@@ -228,6 +230,58 @@ haiku-rag config file needs a further set of its own — model and service
 endpoints, and the bucket variables in S3 mode — which fail the load when
 unset; see [Variables the haiku-rag config
 needs](#variables-the-haiku-rag-config-needs).
+
+### Custom Logging
+
+`LOG_CONFIG_FILE` names a YAML (or JSON) file in
+[`logging.config.dictConfig`](https://docs.python.org/3/library/logging.config.html#logging-config-dictschema)
+form, which is applied on top of the built-in setup. Use it to send particular
+loggers somewhere else, for example to an HTTP log sink. `()` names any
+factory importable in the environment, so a package installed alongside this
+one can supply its own handler classes.
+
+```yaml
+version: 1
+handlers:
+  sink:
+    class: logging.handlers.QueueHandler   # sends from a background thread
+    level: ERROR
+    listener: logging.handlers.QueueListener
+    handlers: [sink_http]
+    queue:
+      (): queue.Queue
+      maxsize: 1000                        # a down sink can't grow it forever
+  sink_http:
+    (): my_package.log_handlers.MyHTTPHandler
+    level: ERROR
+    host: logs.example.com
+root:
+  handlers: [sink]
+```
+
+How the file is applied:
+
+- **It only adds.** The console handler, the SMTP handler and Logfire are
+  installed whether or not the file names the root logger. `LOG_LEVEL` still
+  sets the root level, unless the file sets `root.level`.
+- **Existing loggers stay on.** `disable_existing_loggers` defaults to `false`.
+  The stdlib default would silence every module logger, since they all exist
+  by the time logging is configured.
+- **Queue listeners are started for you.** `dictConfig` builds a
+  `QueueHandler`'s listener but doesn't start it. Each time logging is
+  configured, the previous listeners are stopped and the queued records
+  delivered first; they are stopped the same way at exit. Put any handler that
+  makes network calls behind a `QueueHandler`, so a slow destination never
+  blocks the event loop.
+- **A file that can't be applied doesn't stop the process.** This covers a
+  missing file, invalid YAML, a document that isn't a mapping, and a config
+  `dictConfig` rejects. The built-in setup is used, a warning is logged, and
+  whatever the file had partly configured is removed. Set
+  `LOG_CONFIG_STRICT=true` to fail instead.
+
+The file covers this process only. The `haiku-ingester` and `haiku-rag`
+subprocesses configure their own logging; their output reaches this process's
+log through the `soliplex.agents.manifest.haiku_process` logger.
 
 ### Tracing with Logfire
 
