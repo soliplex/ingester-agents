@@ -1417,3 +1417,131 @@ async def test_walk_webdav_retries_auth_failures(exc):
 
     assert result.errors == []
     assert "/root/b/f.md" in _paths(result)
+
+
+# --- probe failures are errors (WEBDAV2) ---
+
+
+def _probe_client():
+    """A client whose every request succeeds; documents download as text."""
+    client = AsyncMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.info.return_value = {"etag": '"e"'}
+    client.head.return_value = WebDAVResponse(status=200, headers={})
+    client.download.return_value = (b"# doc", "text/markdown")
+    return client
+
+
+def _failing_probe_for(name):
+    """A detect_mime_type that raises while probing *name*, and works otherwise."""
+    real = webdav_app.detect_mime_type
+
+    def detect(path, *args, **kwargs):
+        if path.endswith(name):
+            raise ValueError(f"cannot type {path}")
+        return real(path, *args, **kwargs)
+
+    return detect
+
+
+async def _write_urls(tmp_path, *lines):
+    urls_file = str(tmp_path / "urls.txt")
+    async with aiofiles.open(urls_file, "w") as f:
+        await f.write("\n".join(lines) + "\n")
+    return urls_file
+
+
+@pytest.mark.asyncio
+async def test_a_failed_probe_is_an_error_and_blocks_the_clean_up(tmp_path, local_env):
+    urls_file = await _write_urls(tmp_path, "/docs/a.md", "/docs/bad.md", "/docs/c.md")
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=_probe_client()),
+        patch("soliplex.agents.webdav.app.detect_mime_type", side_effect=_failing_probe_for("bad.md")),
+        patch("soliplex.agents.webdav.app.local_state.reconcile_documents", new_callable=AsyncMock) as reconcile,
+    ):
+        result = await webdav_app.load_inventory_from_urls(urls_file, "src", delete_stale=True)
+
+    assert result["errors"] == [{"uri": "/docs/bad.md", "error": "cannot type /docs/bad.md", "stage": "probe"}]
+    # The URLs that probed are still fetched ...
+    assert sorted(result["ingested"]) == ["/docs/a.md", "/docs/c.md"]
+    # ... but nothing is removed on the strength of an incomplete inventory.
+    reconcile.assert_not_called()
+    assert result["delete_stale_result"] is None
+    # url_results keeps reporting the failure, unchanged.
+    assert [r["status"] for r in result["url_results"]] == ["success", "error", "success"]
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_extension_is_not_an_error(tmp_path, local_env, monkeypatch):
+    monkeypatch.setattr(webdav_app.settings, "extensions", ["md"])
+    urls_file = await _write_urls(tmp_path, "/docs/a.md", "/docs/b.exe")
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=_probe_client()),
+        patch(
+            "soliplex.agents.webdav.app.local_state.reconcile_documents", new_callable=AsyncMock, return_value=[]
+        ) as reconcile,
+    ):
+        result = await webdav_app.load_inventory_from_urls(urls_file, "src", delete_stale=True)
+
+    assert result["errors"] == []
+    assert [r["status"] for r in result["url_results"]] == ["success", "skipped"]
+    reconcile.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_without_probe_failures_errors_are_unchanged(tmp_path, local_env):
+    urls_file = await _write_urls(tmp_path, "/docs/a.md")
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=_probe_client()):
+        result = await webdav_app.load_inventory_from_urls(urls_file, "src")
+    assert result["errors"] == []
+    assert result["ingested"] == ["/docs/a.md"]
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_reports_listing_and_discovery_errors_together(local_env):
+    listing = [{"path": "/docs/sub", "error": "HTTP 503"}]
+    discovery = [{"uri": "/docs/x.md", "error": "boom", "stage": "probe"}]
+    with patch("soliplex.agents.webdav.app.build_config", new_callable=AsyncMock, return_value=([], listing)):
+        result = await webdav_app._load_inventory(
+            path="/docs",
+            source="src",
+            start=0,
+            end=None,
+            skip_invalid=False,
+            webdav_url=None,
+            webdav_username=None,
+            webdav_password=None,
+            config=None,
+            extra_metadata=None,
+            delete_stale=False,
+            client=None,
+            discovery_errors=discovery,
+        )
+    assert result["errors"] == [
+        {"uri": "/docs/sub", "error": "HTTP 503", "stage": "listing"},
+        {"uri": "/docs/x.md", "error": "boom", "stage": "probe"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_document_survives_a_run_where_its_probe_fails(tmp_path, local_env):
+    """End to end: the document stays on disk and in state, and comes back clean next run."""
+    urls_file = await _write_urls(tmp_path, "/docs/a.md", "/docs/b.md")
+    client = _probe_client()
+    with patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=client):
+        first = await webdav_app.load_inventory_from_urls(urls_file, "src", delete_stale=True)
+    assert sorted(first["ingested"]) == ["/docs/a.md", "/docs/b.md"]
+    store = agent_store.get_document_store("src")
+    stored = {key for key in await store.list() if not key.endswith(".meta.json")}
+    assert len(stored) == 2
+
+    with (
+        patch("soliplex.agents.webdav.app.create_async_webdav_client", return_value=client),
+        patch("soliplex.agents.webdav.app.detect_mime_type", side_effect=_failing_probe_for("b.md")),
+    ):
+        second = await webdav_app.load_inventory_from_urls(urls_file, "src", delete_stale=True)
+
+    assert second["errors"][0]["stage"] == "probe"
+    assert {key for key in await store.list() if not key.endswith(".meta.json")} == stored
+    assert "/docs/b.md" in local_state.load_file_state("src")
