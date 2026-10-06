@@ -37,6 +37,28 @@ class UnexpectedResponseError(Exception):
         super().__init__("Unexpected response status")
 
 
+class SCMListingError(SCMException):
+    """A full listing named files it could not read, so it is incomplete.
+
+    Raised where an incomplete listing would be reconciled against (and so
+    delete the documents it left out) rather than reported row by row.
+    """
+
+
+class CursorNotFound(SCMException):
+    """The incremental sync cursor's commit is not in the branch's history.
+
+    The branch was force-pushed, the cursor is older than the history that
+    was searched, or the local checkout no longer holds it. Either way the
+    commits since the cursor are unknown, so the caller must run a full sync
+    rather than read "no commits" as "up to date".
+    """
+
+    def __init__(self, sha: str) -> None:
+        self.sha = sha
+        super().__init__(f"sync cursor {sha} not found in the branch history")
+
+
 # Git CLI classes - imported lazily to avoid circular imports
 def __getattr__(name: str):
     """Lazy import for git_cli module to avoid circular imports."""
@@ -46,6 +68,8 @@ def __getattr__(name: str):
         "GitCloneError",
         "GitPullError",
         "GitCleanError",
+        "GitLogError",
+        "GitShowError",
         "InputSanitizationError",
         "GitCliWrapper",
         "sanitize_input",

@@ -11,11 +11,15 @@ import pytest
 from pydantic import SecretStr
 
 from soliplex.agents.scm import AuthenticationConfigError
+from soliplex.agents.scm import CursorNotFound
 from soliplex.agents.scm.git_cli import GitCleanError
 from soliplex.agents.scm.git_cli import GitCliDecorator
 from soliplex.agents.scm.git_cli import GitCliError
 from soliplex.agents.scm.git_cli import GitCliWrapper
 from soliplex.agents.scm.git_cli import GitCloneError
+from soliplex.agents.scm.git_cli import GitLogError
+from soliplex.agents.scm.git_cli import GitPullError
+from soliplex.agents.scm.git_cli import GitShowError
 from soliplex.agents.scm.git_cli import InputSanitizationError
 from soliplex.agents.scm.git_cli import mask_credentials
 from soliplex.agents.scm.git_cli import sanitize_input
@@ -57,13 +61,17 @@ class TestLazyImports:
         from soliplex.agents.scm import GitCleanError
         from soliplex.agents.scm import GitCliError
         from soliplex.agents.scm import GitCloneError
+        from soliplex.agents.scm import GitLogError
         from soliplex.agents.scm import GitPullError
+        from soliplex.agents.scm import GitShowError
         from soliplex.agents.scm import InputSanitizationError
 
         assert issubclass(GitCliError, Exception)
         assert issubclass(GitCloneError, GitCliError)
         assert issubclass(GitPullError, GitCliError)
         assert issubclass(GitCleanError, GitCliError)
+        assert issubclass(GitLogError, GitCliError)
+        assert issubclass(GitShowError, GitCliError)
         assert issubclass(InputSanitizationError, GitCliError)
 
     def test_lazy_import_unknown_attribute_raises(self):
@@ -261,14 +269,25 @@ class TestGitCliWrapper:
         assert wrapper.timeout == 60
 
     def test_get_repo_dir(self, wrapper):
-        """Test get_repo_dir returns correct path."""
-        repo_dir = wrapper.get_repo_dir("myowner", "myrepo")
-        assert repo_dir == wrapper.base_dir / "myowner" / "myrepo"
+        """The checkout is keyed by owner, repo and branch."""
+        repo_dir = wrapper.get_repo_dir("myowner", "myrepo", "main")
+        assert repo_dir == wrapper.base_dir / "myowner" / "myrepo@main"
+
+    def test_get_repo_dir_two_branches_two_checkouts(self, wrapper):
+        """Two branches of one repo never share (and overwrite) a checkout."""
+        assert wrapper.get_repo_dir("o", "r", "main") != wrapper.get_repo_dir("o", "r", "develop")
+
+    def test_get_repo_dir_encodes_slash_in_branch(self, wrapper):
+        """A branch with a slash is still one directory."""
+        repo_dir = wrapper.get_repo_dir("o", "r", "feature/x")
+        assert repo_dir == wrapper.base_dir / "o" / "r@feature%2Fx"
 
     def test_get_repo_dir_sanitizes_input(self, wrapper):
         """Test that get_repo_dir sanitizes input."""
         with pytest.raises(InputSanitizationError):
-            wrapper.get_repo_dir("owner;rm -rf /", "repo")
+            wrapper.get_repo_dir("owner;rm -rf /", "repo", "main")
+        with pytest.raises(InputSanitizationError):
+            wrapper.get_repo_dir("owner", "repo", "main;rm")
 
     # build_clone_url tests
 
@@ -443,7 +462,7 @@ class TestGitCliWrapper:
                 branch="main",
             )
 
-            assert repo_dir == temp_dir / "owner" / "repo"
+            assert repo_dir == temp_dir / "owner" / "repo@main"
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
             assert "git" in cmd
@@ -468,7 +487,7 @@ class TestGitCliWrapper:
     async def test_clone_removes_existing_directory(self, wrapper, temp_dir):
         """Test that clone removes existing directory."""
         # Create existing directory
-        existing = temp_dir / "owner" / "repo"
+        existing = temp_dir / "owner" / "repo@main"
         existing.mkdir(parents=True)
         (existing / "old_file.txt").write_text("old content")
 
@@ -528,34 +547,29 @@ class TestGitCliWrapper:
         with patch.object(wrapper, "_run_command") as mock_run:
             mock_run.return_value = (0, "Already up to date.", "")
 
-            result = await wrapper.pull(repo_dir)
+            await wrapper.pull(repo_dir)
 
-            assert result is True
             cmd = mock_run.call_args[0][0]
             assert "pull" in cmd
             assert "--ff-only" in cmd
 
     @pytest.mark.asyncio
-    async def test_pull_failure_returns_false(self, wrapper, temp_dir):
-        """Test that pull failure returns False."""
+    async def test_pull_failure_raises(self, wrapper, temp_dir):
+        """A failed pull raises GitPullError carrying git's stderr."""
         repo_dir = temp_dir / "owner" / "repo"
         repo_dir.mkdir(parents=True)
 
         with patch.object(wrapper, "_run_command") as mock_run:
-            mock_run.return_value = (1, "", "merge conflict")
+            mock_run.return_value = (1, "", "fatal: Not possible to fast-forward\n")
 
-            result = await wrapper.pull(repo_dir)
-
-            assert result is False
+            with pytest.raises(GitPullError, match="Not possible to fast-forward"):
+                await wrapper.pull(repo_dir)
 
     @pytest.mark.asyncio
-    async def test_pull_nonexistent_repo_returns_false(self, wrapper, temp_dir):
-        """Test that pull on nonexistent repo returns False."""
-        repo_dir = temp_dir / "nonexistent"
-
-        result = await wrapper.pull(repo_dir)
-
-        assert result is False
+    async def test_pull_nonexistent_repo_raises(self, wrapper, temp_dir):
+        """Pulling a checkout that is not there raises."""
+        with pytest.raises(GitPullError, match="does not exist"):
+            await wrapper.pull(temp_dir / "nonexistent")
 
     # clean tests
 
@@ -615,8 +629,8 @@ class TestGitCliWrapper:
 
     @pytest.mark.asyncio
     async def test_ensure_repo_pulls_when_exists(self, wrapper, temp_dir):
-        """Test ensure_repo cleans then pulls when repo exists."""
-        repo_dir = temp_dir / "owner" / "repo"
+        """Test ensure_repo cleans, checks the branch, then pulls when repo exists."""
+        repo_dir = temp_dir / "owner" / "repo@main"
         repo_dir.mkdir(parents=True)
         (repo_dir / ".git").mkdir()
 
@@ -625,103 +639,143 @@ class TestGitCliWrapper:
         async def track_clean(d):
             call_order.append("clean")
 
+        async def track_check(d, branch):
+            call_order.append(f"check {branch}")
+
         async def track_pull(d):
             call_order.append("pull")
-            return True
 
-        with patch.object(wrapper, "pull", side_effect=track_pull):
-            with patch.object(wrapper, "clean", side_effect=track_clean):
-                result = await wrapper.ensure_repo(
-                    "https://github.com",
-                    "owner",
-                    "repo",
-                    token="token",
-                )
+        with (
+            patch.object(wrapper, "pull", side_effect=track_pull),
+            patch.object(wrapper, "clean", side_effect=track_clean),
+            patch.object(wrapper, "check_branch", side_effect=track_check),
+        ):
+            result = await wrapper.ensure_repo(
+                "https://github.com",
+                "owner",
+                "repo",
+                token="token",
+            )
 
-                assert call_order == ["clean", "pull"]
-                assert result == repo_dir
+        assert call_order == ["clean", "check main", "pull"]
+        assert result == repo_dir
 
     @pytest.mark.asyncio
-    async def test_ensure_repo_reclones_on_pull_failure(self, wrapper, temp_dir):
-        """Test ensure_repo nuke-and-reclones when pull fails."""
-        repo_dir = temp_dir / "owner" / "repo"
+    async def test_ensure_repo_pull_failure_propagates_and_keeps_checkout(self, wrapper, temp_dir):
+        """A failed pull is an error: no re-clone, the checkout stays for inspection."""
+        repo_dir = temp_dir / "owner" / "repo@main"
+        repo_dir.mkdir(parents=True)
+        (repo_dir / ".git").mkdir()
+        (repo_dir / "doc.md").write_text("kept")
+
+        with (
+            patch.object(wrapper, "clean"),
+            patch.object(wrapper, "check_branch"),
+            patch.object(wrapper, "pull", side_effect=GitPullError("git pull failed: diverged")),
+            patch.object(wrapper, "clone") as mock_clone,
+        ):
+            with pytest.raises(GitPullError) as exc_info:
+                await wrapper.ensure_repo("https://github.com", "owner", "repo", token="token")
+
+        mock_clone.assert_not_called()
+        assert (repo_dir / "doc.md").read_text() == "kept"
+        # The message names the checkout and the recovery command.
+        message = str(exc_info.value)
+        assert "diverged" in message
+        assert str(repo_dir) in message
+        assert "si-agent scm reset-clone owner/repo --branch main" in message
+
+    @pytest.mark.asyncio
+    async def test_ensure_repo_clean_failure_propagates(self, wrapper, temp_dir):
+        """A failed clean propagates the same way, without re-cloning."""
+        repo_dir = temp_dir / "owner" / "repo@main"
         repo_dir.mkdir(parents=True)
         (repo_dir / ".git").mkdir()
 
-        with patch.object(wrapper, "pull", return_value=False):
-            with patch.object(wrapper, "clone", return_value=repo_dir):
-                with patch.object(wrapper, "clean"):
-                    await wrapper.ensure_repo(
-                        "https://github.com",
-                        "owner",
-                        "repo",
-                        token="token",
-                    )
+        with (
+            patch.object(wrapper, "clean", side_effect=GitCleanError("git clean failed: busy")),
+            patch.object(wrapper, "clone") as mock_clone,
+        ):
+            with pytest.raises(GitCleanError, match="reset-clone"):
+                await wrapper.ensure_repo("https://github.com", "owner", "repo", token="token")
+
+        mock_clone.assert_not_called()
+        assert repo_dir.exists()
 
     @pytest.mark.asyncio
-    async def test_ensure_repo_reclones_on_unexpected_error(self, wrapper, temp_dir):
-        """Test ensure_repo nuke-and-reclones on exception."""
-        repo_dir = temp_dir / "owner" / "repo"
+    async def test_ensure_repo_branch_mismatch_raises(self, wrapper, temp_dir):
+        """An existing checkout on another branch is refused, not pulled."""
+        repo_dir = temp_dir / "owner" / "repo@develop"
         repo_dir.mkdir(parents=True)
         (repo_dir / ".git").mkdir()
 
-        with patch.object(wrapper, "clean", side_effect=[RuntimeError("boom"), None]):
-            with patch.object(wrapper, "clone", return_value=repo_dir):
-                result = await wrapper.ensure_repo(
-                    "https://github.com",
-                    "owner",
-                    "repo",
-                    token="token",
-                )
+        with (
+            patch.object(wrapper, "clean"),
+            patch.object(wrapper, "current_branch", AsyncMock(return_value="main")),
+            patch.object(wrapper, "pull") as mock_pull,
+        ):
+            with pytest.raises(GitCliError, match="is on branch 'main', expected 'develop'"):
+                await wrapper.ensure_repo("https://github.com", "owner", "repo", token="token", branch="develop")
 
-                assert result == repo_dir
+        mock_pull.assert_not_called()
+
+    # current_branch / check_branch tests
 
     @pytest.mark.asyncio
-    async def test_nuke_and_reclone(self, wrapper, temp_dir):
-        """Test nuke_and_reclone deletes dir and re-clones."""
-        repo_dir = temp_dir / "owner" / "repo"
-        repo_dir.mkdir(parents=True)
-        (repo_dir / "file.txt").write_text("stale")
+    async def test_current_branch(self, wrapper, temp_dir):
+        with patch.object(wrapper, "_run_command", AsyncMock(return_value=(0, "develop\n", ""))) as mock_run:
+            assert await wrapper.current_branch(temp_dir) == "develop"
+        assert mock_run.call_args[0][0] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]
 
-        with patch.object(wrapper, "clone", return_value=repo_dir) as mock_clone:
-            with patch.object(wrapper, "clean") as mock_clean:
-                await wrapper.nuke_and_reclone(
-                    repo_dir,
-                    "https://github.com",
-                    "owner",
-                    "repo",
-                    token="token",
-                )
+    @pytest.mark.asyncio
+    async def test_current_branch_failure_raises(self, wrapper, temp_dir):
+        with patch.object(wrapper, "_run_command", AsyncMock(return_value=(128, "", "not a git repository"))):
+            with pytest.raises(GitCliError, match="not a git repository"):
+                await wrapper.current_branch(temp_dir)
 
-                mock_clone.assert_called_once_with(
-                    "https://github.com",
-                    "owner",
-                    "repo",
-                    "token",
-                    None,
-                    None,
-                    "main",
-                )
-                mock_clean.assert_called_once_with(repo_dir)
+    @pytest.mark.asyncio
+    async def test_check_branch_matches(self, wrapper, temp_dir):
+        with patch.object(wrapper, "current_branch", AsyncMock(return_value="main")):
+            await wrapper.check_branch(temp_dir, "main")
 
     # delete_repo tests
 
     @pytest.mark.asyncio
     async def test_delete_repo_removes_directory(self, wrapper, temp_dir):
-        """Test that delete_repo removes the directory."""
-        repo_dir = temp_dir / "owner" / "repo"
+        """Test that delete_repo removes the branch's checkout only."""
+        repo_dir = temp_dir / "owner" / "repo@main"
         repo_dir.mkdir(parents=True)
         (repo_dir / "file.txt").write_text("content")
+        other = temp_dir / "owner" / "repo@develop"
+        other.mkdir(parents=True)
 
-        await wrapper.delete_repo("owner", "repo")
+        assert await wrapper.delete_repo("owner", "repo", "main") is True
 
         assert not repo_dir.exists()
+        assert other.exists()
 
     @pytest.mark.asyncio
     async def test_delete_repo_nonexistent_noop(self, wrapper, temp_dir):
         """Test that delete_repo on nonexistent repo is a no-op."""
-        # Should not raise
-        await wrapper.delete_repo("nonexistent", "repo")
+        assert await wrapper.delete_repo("nonexistent", "repo", "main") is False
+
+    # commit_exists tests
+
+    @pytest.mark.asyncio
+    async def test_commit_exists(self, wrapper, temp_dir):
+        with patch.object(wrapper, "_run_command", AsyncMock(return_value=(0, "", ""))) as mock_run:
+            assert await wrapper.commit_exists(temp_dir, "abc123") is True
+        assert mock_run.call_args[0][0] == ["git", "cat-file", "-e", "abc123^{commit}"]
+
+    @pytest.mark.asyncio
+    async def test_commit_exists_false(self, wrapper, temp_dir):
+        with patch.object(wrapper, "_run_command", AsyncMock(return_value=(1, "", "fatal: Not a valid object name"))):
+            assert await wrapper.commit_exists(temp_dir, "abc123") is False
+
+    @pytest.mark.asyncio
+    async def test_commit_exists_sanitizes_sha(self, wrapper, temp_dir):
+        with pytest.raises(InputSanitizationError):
+            await wrapper.commit_exists(temp_dir, "abc;rm")
 
     # get_commits_since tests
 
@@ -755,17 +809,16 @@ class TestGitCliWrapper:
             assert "def456..HEAD" in cmd
 
     @pytest.mark.asyncio
-    async def test_get_commits_since_failure_returns_empty(self, wrapper, temp_dir):
-        """Test that git log failure returns empty list."""
+    async def test_get_commits_since_failure_raises(self, wrapper, temp_dir):
+        """A failed git log raises, so it is never read as "no new commits"."""
         repo_dir = temp_dir / "owner" / "repo"
         repo_dir.mkdir(parents=True)
 
         with patch.object(wrapper, "_run_command") as mock_run:
-            mock_run.return_value = (1, "", "error")
+            mock_run.return_value = (128, "", "fatal: bad revision")
 
-            commits = await wrapper.get_commits_since(repo_dir)
-
-            assert commits == []
+            with pytest.raises(GitLogError, match="bad revision"):
+                await wrapper.get_commits_since(repo_dir, since_sha="abc123")
 
     @pytest.mark.asyncio
     async def test_get_commits_since_empty_output(self, wrapper, temp_dir):
@@ -825,17 +878,16 @@ class TestGitCliWrapper:
             assert result["files"][0]["status"] == "removed"
 
     @pytest.mark.asyncio
-    async def test_get_commit_files_failure_returns_empty(self, wrapper, temp_dir):
-        """Test that git show failure returns empty files list."""
+    async def test_get_commit_files_failure_raises(self, wrapper, temp_dir):
+        """A failed git show raises, so the commit's changes are never dropped."""
         repo_dir = temp_dir / "owner" / "repo"
         repo_dir.mkdir(parents=True)
 
         with patch.object(wrapper, "_run_command") as mock_run:
-            mock_run.return_value = (1, "", "error")
+            mock_run.return_value = (128, "", "fatal: bad object")
 
-            result = await wrapper.get_commit_files(repo_dir, "abc123")
-
-            assert result["files"] == []
+            with pytest.raises(GitShowError, match="bad object"):
+                await wrapper.get_commit_files(repo_dir, "abc123")
 
     @pytest.mark.asyncio
     async def test_get_commit_files_with_empty_lines(self, wrapper, temp_dir):
@@ -1039,6 +1091,18 @@ class TestGitCliDecorator:
         mock_inner_provider.validate_response.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_delegates_repo_and_issue_lookups(self, decorator, mock_inner_provider):
+        """Repository, default-branch and issue lookups go to the API provider."""
+        mock_inner_provider.get_repo = AsyncMock(return_value={"default_branch": "trunk"})
+        mock_inner_provider.get_default_branch = AsyncMock(return_value="trunk")
+        mock_inner_provider.get_issue_state = AsyncMock(return_value="closed")
+
+        assert await decorator.get_repo("repo", "owner") == {"default_branch": "trunk"}
+        assert await decorator.get_default_branch("repo", "owner") == "trunk"
+        assert await decorator.get_issue_state("repo", "owner", 7) == "closed"
+        mock_inner_provider.get_issue_state.assert_called_once_with("repo", "owner", 7)
+
+    @pytest.mark.asyncio
     async def test_delegates_get_data_from_url(self, decorator, mock_inner_provider):
         """Test that get_data_from_url is delegated."""
         await decorator.get_data_from_url("http://example.com")
@@ -1240,47 +1304,80 @@ class TestGitCliDecorator:
         repo_dir.mkdir(parents=True)
         (repo_dir / ".git").mkdir()
 
-        with patch.object(decorator, "_ensure_repo_cloned") as mock_ensure:
-            mock_ensure.return_value = repo_dir
+        with (
+            patch.object(decorator, "_ensure_repo_cloned", AsyncMock(return_value=repo_dir)),
+            patch.object(decorator._git, "commit_exists", AsyncMock(return_value=True)),
+            patch.object(decorator._git, "get_commits_since") as mock_commits,
+        ):
+            mock_commits.return_value = [{"sha": "abc", "message": "test"}]
 
-            with patch.object(decorator._git, "get_commits_since") as mock_commits:
-                mock_commits.return_value = [{"sha": "abc", "message": "test"}]
+            commits = await decorator.list_commits_since("repo", "owner", "def456")
 
-                commits = await decorator.list_commits_since("repo", "owner", "def456")
+            assert len(commits) == 1
 
-                assert len(commits) == 1
+    @pytest.mark.asyncio
+    async def test_list_commits_since_unknown_cursor_raises(self, decorator, temp_dir):
+        """A cursor missing from local history is CursorNotFound, not "no commits"."""
+        repo_dir = temp_dir / "owner" / "repo"
+        repo_dir.mkdir(parents=True)
+
+        with (
+            patch.object(decorator, "_ensure_repo_cloned", AsyncMock(return_value=repo_dir)),
+            patch.object(decorator._git, "commit_exists", AsyncMock(return_value=False)),
+            patch.object(decorator._git, "get_commits_since") as mock_commits,
+        ):
+            with pytest.raises(CursorNotFound) as exc_info:
+                await decorator.list_commits_since("repo", "owner", "def456")
+
+        assert exc_info.value.sha == "def456"
+        mock_commits.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_list_commits_since_without_cursor_skips_check(self, decorator, temp_dir):
+        with (
+            patch.object(decorator, "_ensure_repo_cloned", AsyncMock(return_value=temp_dir)),
+            patch.object(decorator._git, "commit_exists") as mock_exists,
+            patch.object(decorator._git, "get_commits_since", AsyncMock(return_value=[])),
+        ):
+            assert await decorator.list_commits_since("repo", "owner") == []
+        mock_exists.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_commit_details(self, decorator, temp_dir):
-        """Test getting commit details."""
-        repo_dir = temp_dir / "owner" / "repo"
+        """Commit details come from the checkout of the requested branch."""
+        repo_dir = temp_dir / "owner" / "repo@develop"
         repo_dir.mkdir(parents=True)
         (repo_dir / ".git").mkdir()
 
         # Set up the git wrapper's base_dir
         decorator._git.base_dir = temp_dir
 
-        with patch.object(decorator._git, "get_commit_files") as mock_files:
+        with (
+            patch.object(decorator, "_ensure_repo_cloned") as mock_ensure,
+            patch.object(decorator._git, "get_commit_files") as mock_files,
+        ):
             mock_files.return_value = {"sha": "abc", "files": []}
 
-            result = await decorator.get_commit_details("repo", "owner", "abc123")
+            result = await decorator.get_commit_details("repo", "owner", "abc123", branch="develop")
 
             assert result["sha"] == "abc"
+            mock_files.assert_called_once_with(repo_dir, "abc123")
+            mock_ensure.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_commit_details_clones_if_needed(self, decorator, temp_dir):
-        """Test that get_commit_details clones repo if not present."""
+        """A missing checkout is cloned on the requested branch, not the default."""
         decorator._git.base_dir = temp_dir
 
         with patch.object(decorator, "_ensure_repo_cloned") as mock_ensure:
-            mock_ensure.return_value = temp_dir / "owner" / "repo"
+            mock_ensure.return_value = temp_dir / "owner" / "repo@develop"
 
             with patch.object(decorator._git, "get_commit_files") as mock_files:
                 mock_files.return_value = {"sha": "abc", "files": []}
 
-                await decorator.get_commit_details("repo", "owner", "abc123")
+                await decorator.get_commit_details("repo", "owner", "abc123", branch="develop")
 
-                mock_ensure.assert_called_once()
+                mock_ensure.assert_called_once_with("repo", "owner", "develop")
 
     @pytest.mark.asyncio
     async def test_iter_repo_files(self, decorator, temp_dir):
@@ -1345,8 +1442,8 @@ class TestGitCliDecorator:
 
                     files = await decorator.list_repo_files("repo", "owner")
 
-                    # Should return empty list due to error
-                    assert files == []
+                    # Listed but unreadable: an error row, never a silent gap
+                    assert files == [{"uri": "/doc.md", "error": "Read error"}]
 
     @pytest.mark.asyncio
     async def test_iter_repo_files_handles_read_errors(self, decorator, temp_dir):
@@ -1366,8 +1463,8 @@ class TestGitCliDecorator:
                 async for f in decorator.iter_repo_files("repo", "owner"):
                     files.append(f)
 
-                # Should yield nothing due to error
-                assert files == []
+                # Listed but unreadable: an error row, never a silent gap
+                assert files == [{"uri": "/doc.md", "error": "Read error"}]
 
 
 # ====================

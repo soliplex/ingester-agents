@@ -433,7 +433,8 @@ class SCMComponent(_ManifestModel):
     owner: str
     repo: str
     incremental: bool = False
-    branch: str = "main"
+    # None: the repository's default branch, looked up through the API.
+    branch: str | None = "main"
     content_filter: ContentFilter = ContentFilter.ALL
     base_url: str | None = None
     auth_token: str | None = None

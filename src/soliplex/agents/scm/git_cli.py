@@ -13,6 +13,7 @@ import aiofiles
 from soliplex.agents.common import mime
 from soliplex.agents.config import settings
 from soliplex.agents.scm import AuthenticationConfigError
+from soliplex.agents.scm import CursorNotFound
 from soliplex.agents.scm import SCMException
 from soliplex.agents.scm.base import BaseSCMProvider
 from soliplex.agents.scm.base import passes_extension_prefilter
@@ -42,6 +43,18 @@ class GitPullError(GitCliError):
 
 class GitCleanError(GitCliError):
     """Raised when git clean fails."""
+
+    pass
+
+
+class GitLogError(GitCliError):
+    """Raised when git log fails."""
+
+    pass
+
+
+class GitShowError(GitCliError):
+    """Raised when git show fails."""
 
     pass
 
@@ -96,6 +109,19 @@ def mask_credentials(url: str) -> str:
     return re.sub(r"(https?://)([^@]+)@", r"\1***@", url)
 
 
+def reset_clone_hint(owner: str, repo: str, branch: str, repo_dir: Path) -> str:
+    """How to recover a checkout that can no longer be updated in place.
+
+    The checkout is left as it was for inspection; nothing re-clones it
+    automatically, because a silent re-clone hides the failure and discards
+    the history the incremental cursor points into.
+    """
+    return (
+        f"inspect the checkout at {repo_dir}, then run "
+        f"'si-agent scm reset-clone {owner}/{repo} --branch {branch} --source <source>' to delete it"
+    )
+
+
 class GitCliWrapper:
     """Wrapper for git CLI operations with security sanitization."""
 
@@ -111,11 +137,19 @@ class GitCliWrapper:
         self.timeout = timeout or settings.scm_git_cli_timeout
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_repo_dir(self, owner: str, repo: str) -> Path:
-        """Get path to local repository directory."""
+    def get_repo_dir(self, owner: str, repo: str, branch: str) -> Path:
+        """Get path to the local checkout of *branch*.
+
+        Checkouts are keyed by branch (``<owner>/<repo>@<branch>``): a clone is
+        single-branch, so two components on one repo with different branches
+        need a checkout each, and a component whose branch changes must not
+        keep pulling the old one. A ``/`` in the branch is encoded so the
+        checkout stays one directory.
+        """
         owner = sanitize_input(owner, "owner")
         repo = sanitize_input(repo, "repo")
-        return self.base_dir / owner / repo
+        branch = sanitize_input(branch, "branch")
+        return self.base_dir / owner / f"{repo}@{branch.replace('/', '%2F')}"
 
     def build_clone_url(
         self,
@@ -253,7 +287,7 @@ class GitCliWrapper:
         """
         branch = sanitize_input(branch, "branch")
         clone_url = self.build_clone_url(base_url, owner, repo, token, username, password)
-        repo_dir = self.get_repo_dir(owner, repo)
+        repo_dir = self.get_repo_dir(owner, repo, branch)
 
         # Ensure parent directory exists
         repo_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -275,19 +309,18 @@ class GitCliWrapper:
         logger.info(f"Successfully cloned {owner}/{repo}")
         return repo_dir
 
-    async def pull(self, repo_dir: Path) -> bool:
+    async def pull(self, repo_dir: Path) -> None:
         """
         Pull latest changes in repository.
 
         Args:
             repo_dir: Path to repository
 
-        Returns:
-            True if pull succeeded, False otherwise
+        Raises:
+            GitPullError: If the checkout is missing or ``git pull`` fails
         """
         if not repo_dir.exists():
-            logger.warning("Repository directory does not exist: %s", repo_dir)
-            return False
+            raise GitPullError(f"Repository directory does not exist: {repo_dir}")
 
         cmd = ["git", "pull", "--ff-only"]
 
@@ -296,11 +329,9 @@ class GitCliWrapper:
         returncode, stdout, stderr = await self._run_command(cmd, cwd=repo_dir)
 
         if returncode != 0:
-            logger.warning("Pull failed: %s", stderr)
-            return False
+            raise GitPullError(f"git pull failed in {repo_dir} with exit code {returncode}: {stderr.strip()}")
 
         logger.info("Successfully pulled updates")
-        return True
 
     async def clean(self, repo_dir: Path) -> None:
         """
@@ -324,6 +355,27 @@ class GitCliWrapper:
         if returncode != 0:
             raise GitCleanError(f"git clean failed: {stderr}")
 
+    async def current_branch(self, repo_dir: Path) -> str:
+        """Return the branch checked out in *repo_dir*.
+
+        Raises:
+            GitCliError: If ``git rev-parse`` fails
+        """
+        returncode, stdout, stderr = await self._run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir)
+        if returncode != 0:
+            raise GitCliError(f"git rev-parse failed in {repo_dir}: {stderr.strip()}")
+        return stdout.strip()
+
+    async def check_branch(self, repo_dir: Path, branch: str) -> None:
+        """Raise unless *repo_dir* has *branch* checked out.
+
+        Raises:
+            GitCliError: On a mismatch, or if the branch cannot be read
+        """
+        checked_out = await self.current_branch(repo_dir)
+        if checked_out != branch:
+            raise GitCliError(f"checkout {repo_dir} is on branch '{checked_out}', expected '{branch}'")
+
     async def ensure_repo(
         self,
         base_url: str,
@@ -338,8 +390,10 @@ class GitCliWrapper:
         Ensure repository is cloned and up to date.
 
         If repo doesn't exist, clone it.
-        If repo exists, clean untracked files and pull updates.
-        On any failure, delete and re-clone.
+        If repo exists, clean untracked files, check it is on *branch* and
+        pull updates. A failure there propagates, with the checkout left as
+        it was for inspection: nothing re-clones it behind the caller's back
+        (see :func:`reset_clone_hint` for the explicit recovery).
 
         Args:
             base_url: Git server base URL
@@ -352,85 +406,47 @@ class GitCliWrapper:
 
         Returns:
             Path to repository directory
+
+        Raises:
+            GitCleanError / GitPullError / GitCliError: If the existing
+                checkout cannot be updated; the message names the checkout
+                and the ``reset-clone`` command
+            GitCloneError: If a fresh clone fails
         """
-        repo_dir = self.get_repo_dir(owner, repo)
-        clone_args = (
-            base_url,
-            owner,
-            repo,
-            token,
-            username,
-            password,
-            branch,
-        )
+        repo_dir = self.get_repo_dir(owner, repo, branch)
 
         if repo_dir.exists() and (repo_dir / ".git").exists():
             try:
                 await self.clean(repo_dir)
-                if await self.pull(repo_dir):
-                    return repo_dir
-            except Exception:
-                logger.warning(
-                    "Unexpected error updating %s/%s, will re-clone",
-                    owner,
-                    repo,
-                    exc_info=True,
-                )
-            # Pull failed or unexpected error — nuke and re-clone
-            await self.nuke_and_reclone(
-                repo_dir,
-                *clone_args,
-            )
+                await self.check_branch(repo_dir, branch)
+                await self.pull(repo_dir)
+            except GitCliError as e:
+                raise type(e)(f"{e}; {reset_clone_hint(owner, repo, branch, repo_dir)}") from e
             return repo_dir
 
         # No local checkout — clone fresh
-        await self.clone(*clone_args)
+        await self.clone(base_url, owner, repo, token, username, password, branch)
         await self.clean(repo_dir)
         return repo_dir
 
-    async def nuke_and_reclone(
-        self,
-        repo_dir: Path,
-        base_url: str,
-        owner: str,
-        repo: str,
-        token: str | None = None,
-        username: str | None = None,
-        password: str | None = None,
-        branch: str = "main",
-    ) -> None:
-        """
-        Delete local checkout and re-clone from remote.
+    async def delete_repo(self, owner: str, repo: str, branch: str) -> bool:
+        """Delete the local checkout of *branch*.
 
-        Args:
-            repo_dir: Path to existing repository directory
-            base_url: Git server base URL
-            owner: Repository owner
-            repo: Repository name
-            token: Authentication token
-            username: Username for basic auth
-            password: Password for basic auth
-            branch: Branch name
+        Returns:
+            True if a checkout existed and was removed.
         """
-        logger.info("Deleting and re-cloning %s/%s", owner, repo)
-        shutil.rmtree(repo_dir, ignore_errors=True)
-        await self.clone(
-            base_url,
-            owner,
-            repo,
-            token,
-            username,
-            password,
-            branch,
-        )
-        await self.clean(repo_dir)
+        repo_dir = self.get_repo_dir(owner, repo, branch)
+        if not repo_dir.exists():
+            return False
+        shutil.rmtree(repo_dir)
+        logger.info(f"Deleted local clone: {repo_dir}")
+        return True
 
-    async def delete_repo(self, owner: str, repo: str) -> None:
-        """Delete local repository clone."""
-        repo_dir = self.get_repo_dir(owner, repo)
-        if repo_dir.exists():
-            shutil.rmtree(repo_dir)
-            logger.info(f"Deleted local clone: {repo_dir}")
+    async def commit_exists(self, repo_dir: Path, sha: str) -> bool:
+        """Whether *sha* names a commit in the checkout's local history."""
+        sha = sanitize_input(sha, "sha")
+        returncode, _stdout, _stderr = await self._run_command(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=repo_dir)
+        return returncode == 0
 
     async def get_commits_since(
         self,
@@ -448,6 +464,11 @@ class GitCliWrapper:
 
         Returns:
             List of commit dictionaries with 'sha' and 'message'
+
+        Raises:
+            GitLogError: If ``git log`` fails. An empty list therefore always
+                means "no commits"; check the cursor with
+                :meth:`commit_exists` first.
         """
         cmd = ["git", "log", f"--max-count={limit}", "--format=%H|%s"]
 
@@ -458,8 +479,7 @@ class GitCliWrapper:
         returncode, stdout, stderr = await self._run_command(cmd, cwd=repo_dir)
 
         if returncode != 0:
-            logger.error("git log failed: %s", stderr)
-            return []
+            raise GitLogError(f"git log failed in {repo_dir}: {stderr.strip()}")
 
         commits = []
         for line in stdout.strip().split("\n"):
@@ -479,6 +499,10 @@ class GitCliWrapper:
 
         Returns:
             Dict with 'sha' and 'files' list
+
+        Raises:
+            GitShowError: If ``git show`` fails, so the commit's changes are
+                never mistaken for "no files changed"
         """
         commit_sha = sanitize_input(commit_sha, "commit_sha")
         cmd = ["git", "show", "--name-status", "--format=", commit_sha]
@@ -486,8 +510,7 @@ class GitCliWrapper:
         returncode, stdout, stderr = await self._run_command(cmd, cwd=repo_dir)
 
         if returncode != 0:
-            logger.error("git show failed: %s", stderr)
-            return {"sha": commit_sha, "files": []}
+            raise GitShowError(f"git show {commit_sha} failed in {repo_dir}: {stderr.strip()}")
 
         files = []
         for line in stdout.strip().split("\n"):
@@ -577,6 +600,15 @@ class GitCliDecorator(BaseSCMProvider):
 
     async def list_repo_comments(self, owner: str | None, repo: str):
         return await self._inner.list_repo_comments(owner, repo)
+
+    async def get_repo(self, repo: str, owner: str | None = None):
+        return await self._inner.get_repo(repo, owner)
+
+    async def get_default_branch(self, repo: str, owner: str | None = None):
+        return await self._inner.get_default_branch(repo, owner)
+
+    async def get_issue_state(self, repo: str, owner: str | None, number: int):
+        return await self._inner.get_issue_state(repo, owner, number)
 
     async def list_issue_comments(self, owner: str | None, repo: str, issue_number: int):
         return await self._inner.list_issue_comments(owner, repo, issue_number)
@@ -697,7 +729,10 @@ class GitCliDecorator(BaseSCMProvider):
                 file_data = await self._read_local_file(repo_dir, rel_path)
                 files.append(file_data)
             except Exception as e:
+                # Listed but unreadable: report it rather than leave it out,
+                # or the caller would take the file for deleted.
                 logger.warning("Failed to read %s: %s", rel_path, e)
+                files.append({"uri": "/" + rel_path, "error": str(e)})
 
         logger.info(f"Found {len(files)} files in local clone of {owner}/{repo}")
         return files
@@ -719,6 +754,7 @@ class GitCliDecorator(BaseSCMProvider):
                     yield await self._read_local_file(repo_dir, rel_path)
                 except Exception as e:
                     logger.warning("Failed to read %s: %s", rel_path, e)
+                    yield {"uri": "/" + rel_path, "error": str(e)}
 
     async def get_single_file(
         self,
@@ -752,9 +788,17 @@ class GitCliDecorator(BaseSCMProvider):
         branch: str = "main",
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """List commits since a SHA using git log."""
+        """List commits since a SHA using git log.
+
+        Raises:
+            CursorNotFound: If *since_commit_sha* is not in the checkout's
+                history (a force-push, or a fresh shallow clone), so
+                ``git log <sha>..HEAD`` cannot say what changed.
+        """
         owner = owner or self.owner
         repo_dir = await self._ensure_repo_cloned(repo, owner, branch)
+        if since_commit_sha and not await self._git.commit_exists(repo_dir, since_commit_sha):
+            raise CursorNotFound(since_commit_sha)
         return await self._git.get_commits_since(repo_dir, since_commit_sha, limit)
 
     async def get_commit_details(
@@ -762,13 +806,14 @@ class GitCliDecorator(BaseSCMProvider):
         repo: str,
         owner: str | None = None,
         commit_sha: str = None,
+        branch: str = "main",
     ) -> dict[str, Any]:
-        """Get commit details using git show."""
+        """Get commit details using git show, from the checkout of *branch*."""
         owner = owner or self.owner
-        repo_dir = self._git.get_repo_dir(owner, repo)
+        repo_dir = self._git.get_repo_dir(owner, repo, branch)
 
         if not repo_dir.exists():
             # Need to clone first
-            repo_dir = await self._ensure_repo_cloned(repo, owner)
+            repo_dir = await self._ensure_repo_cloned(repo, owner, branch)
 
         return await self._git.get_commit_files(repo_dir, commit_sha)

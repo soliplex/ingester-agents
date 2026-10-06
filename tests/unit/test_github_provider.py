@@ -357,3 +357,104 @@ def test_get_auth_headers_raises_when_only_password(github_provider):
 
         with pytest.raises(AuthenticationConfigError):
             github_provider.get_auth_headers()
+
+
+# Contents 404, commit paging, issue lookups
+
+
+@pytest.fixture
+def fast_settings():
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_max_concurrent_requests = 5
+        mock_settings.scm_retry_attempts = 1
+        mock_settings.scm_retry_backoff_max = 0.1
+        mock_settings.extensions = ["md"]
+        yield mock_settings
+
+
+def _session(*responses):
+    session = MagicMock()
+    session.get = AsyncMock(side_effect=list(responses))
+    return create_async_context_manager(session), session
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_missing_branch_raises(github_provider, mock_response, fast_settings):
+    """A missing branch says so, rather than GitHub's 'No commit found for the ref'."""
+    ctx, session = _session(
+        mock_response(404, {"message": "No commit found for the ref dev"}),
+        mock_response(404, {"message": "Branch not found"}),
+    )
+    with patch.object(github_provider, "get_session", return_value=ctx):
+        with pytest.raises(SCMException, match="branch 'dev' not found in owner/repo"):
+            await github_provider.list_repo_files("repo", owner="owner", branch="dev")
+    assert session.get.call_args_list[1][0][0] == "https://api.github.com/repos/owner/repo/branches/dev"
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_404_on_existing_branch_raises(github_provider, mock_response, fast_settings):
+    """GitHub never lists a 404 as empty (an existing empty branch is a 200 with [])."""
+    ctx, _session_mock = _session(
+        mock_response(404, {"message": "This repository is empty."}),
+        mock_response(200, {"name": "main"}),
+    )
+    with patch.object(github_provider, "get_session", return_value=ctx):
+        with pytest.raises(SCMException, match="This repository is empty"):
+            await github_provider.list_repo_files("repo", owner="owner", branch="main")
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_empty_branch_returns_empty(github_provider, mock_response, fast_settings):
+    ctx, _session_mock = _session(mock_response(200, []))
+    with patch.object(github_provider, "get_session", return_value=ctx):
+        assert await github_provider.list_repo_files("repo", owner="owner", branch="main") == []
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_5xx_root_raises(github_provider, mock_response, fast_settings):
+    from soliplex.agents.retry import RetryableHTTPError
+
+    ctx, _session_mock = _session(mock_response(503, {}, text_data="unavailable"))
+    with patch.object(github_provider, "get_session", return_value=ctx):
+        with pytest.raises(RetryableHTTPError):
+            await github_provider.list_repo_files("repo", owner="owner", branch="main")
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_uses_per_page(github_provider, mock_response, fast_settings):
+    """GitHub ignores 'limit' (and pages by 30), so it is asked for per_page."""
+    ctx, session = _session(mock_response(200, []))
+    with patch.object(github_provider, "get_session", return_value=ctx):
+        await github_provider.list_commits_since("repo", "owner", branch="main", limit=100)
+    url = session.get.call_args[0][0]
+    assert "&per_page=100" in url
+    assert "limit=" not in url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 410])
+async def test_get_issue_state_deleted(github_provider, mock_response, fast_settings, status):
+    resp = mock_response(status, {"message": "gone"})
+    resp.history = ()
+    ctx, _session_mock = _session(resp)
+    with patch.object(github_provider, "get_session", return_value=ctx):
+        assert await github_provider.get_issue_state("repo", "owner", 3) == "gone"
+
+
+@pytest.mark.asyncio
+async def test_get_issue_state_transferred(github_provider, mock_response, fast_settings):
+    """A transferred issue redirects to its new repository: gone from this one."""
+    resp = mock_response(200, {"number": 1, "state": "open"})
+    resp.history = (MagicMock(status=301),)
+    ctx, _session_mock = _session(resp)
+    with patch.object(github_provider, "get_session", return_value=ctx):
+        assert await github_provider.get_issue_state("repo", "owner", 3) == "gone"
+
+
+@pytest.mark.asyncio
+async def test_get_issue_state_open(github_provider, mock_response, fast_settings):
+    resp = mock_response(200, {"number": 3, "state": "open"})
+    resp.history = ()
+    ctx, _session_mock = _session(resp)
+    with patch.object(github_provider, "get_session", return_value=ctx):
+        assert await github_provider.get_issue_state("repo", "owner", 3) == "open"

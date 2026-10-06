@@ -49,6 +49,34 @@ class GitHubProvider(BaseSCMProvider):
         if isinstance(resp, dict) and "errors" in resp:
             raise SCMException(str(resp))
 
+    async def is_empty_branch(self, session: aiohttp.ClientSession, owner: str, repo: str, branch: str, resp: Any) -> bool:
+        """
+        Name a missing branch behind a contents 404; never list one as empty.
+
+        A GitHub branch always has a commit, so an existing branch with no
+        files lists as a 200 with ``[]`` and never reaches here. A 404 is an
+        error either way (an empty repository included); this only makes the
+        missing-branch case say so.
+
+        Raises:
+            SCMException: If *branch* does not exist
+        """
+        if not await self._branch_exists(session, owner, repo, branch):
+            raise SCMException(f"branch '{branch}' not found in {owner}/{repo}")
+        return False
+
+    def _commits_url(self, owner: str, repo: str, branch: str, limit: int) -> str:
+        """GitHub pages commits with ``per_page`` (it ignores ``limit``, and defaults to 30)."""
+        return self.build_url(f"/repos/{owner}/{repo}/commits?sha={branch}&per_page={limit}")
+
+    def _issue_is_gone(self, response: aiohttp.ClientResponse) -> bool:
+        """
+        404 or 410 (a deleted issue), or a redirect: an issue transferred to
+        another repository answers with a 301 to its new home, which is no
+        longer this repository's issue.
+        """
+        return response.status in (404, 410) or bool(response.history)
+
     async def get_file_content(
         self, rec: dict[str, Any], session: aiohttp.ClientSession, owner: str, repo: str
     ) -> dict[str, Any]:

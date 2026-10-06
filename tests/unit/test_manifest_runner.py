@@ -579,6 +579,41 @@ class TestRunSCMComponent:
             mock.return_value = {"ingested": [], "errors": []}
             await runner._run_scm_component(component, manifest, {})
             mock.assert_called_once()
+            assert mock.call_args.kwargs["branch"] == "main"
+            # No delete_stale: nothing will be removed, so no removal is confirmed.
+            assert mock.call_args.kwargs["check_issue_removals"] is False
+
+    @pytest.mark.asyncio
+    async def test_full_sync_passes_branch(self):
+        """A non-incremental component ingests its configured branch, not main."""
+        manifest = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            components=[
+                {"type": "scm", "name": "r", "platform": "github", "owner": "o", "repo": "r", "branch": "develop"},
+            ],
+        )
+        with patch("soliplex.agents.scm.app.load_inventory", new_callable=AsyncMock) as mock:
+            mock.return_value = {"ingested": [], "errors": []}
+            await runner._run_scm_component(manifest.components[0], manifest, {})
+        assert mock.call_args.kwargs["branch"] == "develop"
+
+    @pytest.mark.asyncio
+    async def test_full_sync_passes_default_branch_none(self):
+        """``branch: null`` reaches the agent as None (the remote's default branch)."""
+        manifest = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            components=[
+                {"type": "scm", "name": "r", "platform": "github", "owner": "o", "repo": "r", "branch": None},
+            ],
+        )
+        with patch("soliplex.agents.scm.app.load_inventory", new_callable=AsyncMock) as mock:
+            mock.return_value = {"ingested": [], "errors": []}
+            await runner._run_scm_component(manifest.components[0], manifest, {})
+        assert mock.call_args.kwargs["branch"] is None
 
     @pytest.mark.asyncio
     async def test_incremental_sync_with_credentials(self):
@@ -607,6 +642,23 @@ class TestRunSCMComponent:
             mock.return_value = {"ingested": [], "errors": []}
             await runner._run_scm_component(component, manifest, {"k": "v"})
             mock.assert_called_once()
+            assert mock.call_args.kwargs["check_issue_removals"] is False
+
+    @pytest.mark.asyncio
+    async def test_delete_stale_turns_on_issue_removal_checks(self):
+        manifest = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            config={"delete_stale": True},
+            components=[
+                {"type": "scm", "name": "r", "platform": "github", "owner": "o", "repo": "r", "incremental": True},
+            ],
+        )
+        with patch("soliplex.agents.scm.app.incremental_sync", new_callable=AsyncMock) as mock:
+            mock.return_value = {"ingested": [], "errors": []}
+            await runner._run_scm_component(manifest.components[0], manifest, {})
+        assert mock.call_args.kwargs["check_issue_removals"] is True
 
     @pytest.mark.asyncio
     async def test_extensions_override(self):
@@ -1358,6 +1410,73 @@ class TestIncrementalSCMDeleteStale:
         assert mock_check.call_args[0][1] == {"file1.md", "file2.md"}
 
     @pytest.mark.asyncio
+    async def test_incremental_scm_full_inventory_replaces_the_listing(self):
+        """A sync that listed everything (issues-only, or a full sync) is reconciled as is."""
+        m = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            config={"delete_stale": True},
+            components=[
+                {
+                    "type": "scm",
+                    "name": "r",
+                    "platform": "gitea",
+                    "owner": "o",
+                    "repo": "r",
+                    "incremental": True,
+                    "content_filter": "issues",
+                    "base_url": "https://gitea.example/api/v1",
+                },
+            ],
+        )
+        inc_result = {
+            "status": "up-to-date",
+            "ingested": [],
+            "errors": [],
+            "full_inventory": [{"uri": "/o/r/issues/1", "sha256": ""}],
+        }
+        with (
+            patch.dict(runner._DISPATCH, {SCMComponent: AsyncMock(return_value=inc_result)}),
+            patch("soliplex.agents.manifest.runner._list_scm_all_uris", new_callable=AsyncMock) as mock_list,
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents", return_value=[]) as mock_check,
+        ):
+            await runner.run_manifest(m)
+
+        mock_list.assert_not_called()
+        assert mock_check.call_args[0][1] == {"/o/r/issues/1"}
+
+    @pytest.mark.asyncio
+    async def test_incremental_scm_empty_full_inventory_with_error_on_empty(self):
+        """error_on_empty applies to a handed-over full inventory as to a fetched one."""
+        m = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            config={"delete_stale": True},
+            components=[
+                {
+                    "type": "scm",
+                    "name": "r",
+                    "platform": "github",
+                    "owner": "o",
+                    "repo": "r",
+                    "incremental": True,
+                    "error_on_empty": True,
+                },
+            ],
+        )
+        inc_result = {"ingested": [], "errors": [], "full_inventory": []}
+        with (
+            patch.dict(runner._DISPATCH, {SCMComponent: AsyncMock(return_value=inc_result)}),
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
+        ):
+            result = await runner.run_manifest(m)
+
+        mock_check.assert_not_called()
+        assert result["summary"]["component_errors"] == 1
+
+    @pytest.mark.asyncio
     async def test_incremental_scm_no_delete_stale_skips_list(self):
         """Without delete_stale, list_all_uris is NOT called."""
         m = Manifest(
@@ -1468,6 +1587,37 @@ class TestIncrementalSCMDeleteStale:
         assert mock_check.call_args[0][1] == {"local.md", "all1.md", "all2.md"}
 
 
+# --- SCM fetch errors ---
+
+
+class TestSCMFetchErrors:
+    @pytest.mark.asyncio
+    async def test_unreadable_files_block_reconcile_and_load(self):
+        """An SCM result carrying stage-fetch errors is a failed run: no clean-up, no load."""
+        m = Manifest(
+            id="t",
+            name="t",
+            source="s",
+            config={"delete_stale": True},
+            components=[{"type": "scm", "name": "r", "platform": "github", "owner": "o", "repo": "r"}],
+        )
+        scm_result = {
+            "inventory": [{"uri": "/ok.md", "sha256": "a"}],
+            "ingested": ["/ok.md"],
+            "errors": [{"uri": "/broken.md", "error": "permission denied", "stage": "fetch"}],
+        }
+        with (
+            patch.dict(runner._DISPATCH, {SCMComponent: AsyncMock(return_value=scm_result)}),
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as mock_check,
+        ):
+            result = await runner.run_manifest(m)
+
+        mock_check.assert_not_called()
+        assert result["summary"]["file_errors"] == 1
+        assert result["summary"]["delete_stale_skipped"] is True
+        assert runner.load_blockers(result) == {"file_errors": 1}
+
+
 # --- _list_scm_all_uris ---
 
 
@@ -1492,6 +1642,7 @@ class TestListSCMAllUris:
                 owner=component.owner,
                 branch=component.branch,
                 content_filter=component.content_filter,
+                source="s",
             )
         assert result == [{"uri": "f.md", "sha256": "h"}]
 

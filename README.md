@@ -434,10 +434,21 @@ scm_git_cli_timeout=600
 
 **How it works:**
 
-1. **First sync**: Clones the repository to a local temp directory (shallow clone, single branch)
-2. **Subsequent syncs**: Pulls latest changes using `git pull --ff-only`
-3. **Pull failure**: If pull fails, deletes the local clone and re-clones
-4. **After sync**: Runs `git clean -fd` to remove untracked files
+1. **First sync**: Clones the component's branch to `<scm_git_repo_base_dir>/<owner>/<repo>@<branch>` (shallow clone, single branch; a `/` in the branch is stored as `%2F`)
+2. **Subsequent syncs**: Runs `git clean -fd` to remove untracked files, checks the checkout is still on the expected branch, then pulls with `git pull --ff-only`
+3. **Failures are errors**: a failed `clean`, branch check, `pull`, `git log` or `git show` is a component error. The run's clean-up and haiku load are skipped, and **the checkout is left as it was** for inspection — nothing re-clones it automatically, since a silent re-clone hid the failure and discarded the history the incremental cursor points into
+
+Checkouts are keyed by branch, so two components on one repository with different branches each get their own, and changing a component's `branch` clones the new branch rather than pulling the old one. Checkouts made by earlier versions under `<owner>/<repo>` are no longer used: each repository re-clones once after upgrading, and the old directories can be deleted.
+
+**Recovering a broken checkout.** When a pull fails (a force-pushed branch, a corrupted directory), the error names the checkout and the command to run. Inspect the checkout, then delete it:
+
+```bash
+si-agent scm reset-clone admin/my-repo --branch main --source my-repo
+```
+
+The next run clones it afresh. `--source` (the manifest's `source`) also clears that source's sync cursor, so the next run is a full sync; without it, the cursor is found missing from the fresh clone's history and the run falls back to a full sync anyway (see [Incremental Sync](#incremental-sync-scm-agent)).
+
+A file the checkout lists but cannot read is reported as an error (`stage: "fetch"`) instead of being left out of the inventory, so it is never taken for a deleted file.
 
 **Notes:**
 
@@ -557,7 +568,7 @@ components:
     owner: myorg
     repo: my-repo
     incremental: true       # commit-based sync after the first full run
-    # branch: main
+    # branch: main          # null: the repository's default branch
     # content_filter: all   # all | files | issues
 ```
 
@@ -572,6 +583,54 @@ With `incremental: true`, the first run performs a full sync and records the
 latest commit; later runs process only files changed since then, which cuts
 API calls and bandwidth substantially (see
 [Incremental Sync](#incremental-sync-scm-agent)).
+
+**Branches.** Files are always read from the component's `branch` (default
+`main`), for full and incremental runs alike; `branch: null` means the
+repository's default branch, looked up through the API on each run. A branch
+that does not exist is an error (`branch '<b>' not found in <owner>/<repo>`),
+never an empty repository. On Gitea, an existing branch with no files, or a
+repository with no commits at all, lists as empty; on GitHub an empty
+repository is an error.
+
+> **Upgrading:** before this was fixed, a non-incremental component ingested
+> `main` whatever its `branch` said. The first run after upgrading ingests the
+> configured branch instead: files only on `main` are removed and files only
+> on that branch are added. Check which manifests set `branch:`.
+
+**Unreadable files.** A file the provider lists but cannot fetch (a failed
+subdirectory or file request, after retries) is reported in the component's
+`errors` with `stage: "fetch"`. Every readable file is still written, but the
+run counts as failed, so stale-document removal and the haiku load are
+skipped and nothing is deleted on its account. A non-200 answer listing the
+repository root (other than the empty-repository case above) is a component
+error.
+
+#### Issues
+
+Only **open** issues are listed (`state=open`): an issue that is closed or
+deleted drops out of the source, so closed issues stop being searchable.
+Removing one is held to the same gates as every other stale document:
+
+- Issue documents are removed only by the runner's stale-document removal,
+  so only with `config.delete_stale: true`, and only after a run with no
+  errors.
+- Each removal is **confirmed** first: every stored issue missing from the
+  list is fetched on its own (`GET /repos/{owner}/{repo}/issues/{n}`). A 404
+  (on GitHub also a 410, or a redirect to a repository it was transferred
+  to) or a closed issue confirms it. An issue that is still open means the
+  list was wrong, so the run records an error (`stage: "issues"`) and nothing
+  is removed. The repository is checked first (`GET /repos/{owner}/{repo}`),
+  because a provider answers 404 for a private repository it will not show,
+  which would otherwise "confirm" every removal. This costs one request per
+  removed issue, and none when nothing dropped out; manifests without
+  `delete_stale` remove nothing, so they skip it.
+
+Zero issues can be a valid answer, so `error_on_empty` does not suit an
+issues-only component. When every issue of an issues-only source is closed,
+its folder empties and the haiku load's empty-location guard then skips the
+load, so the database keeps the old issues. On an issues-only manifest where
+zero issues is an expected state, set `config.allow_empty_load: true` (each
+removal was already confirmed above).
 
 #### Inspecting a repository
 
@@ -595,6 +654,9 @@ si-agent scm get-sync-state gitea admin/my-repo
 
 # Reset sync state (forces a full sync on the next manifest run)
 si-agent scm reset-sync gitea admin/my-repo
+
+# Git CLI mode: delete a branch's checkout (and clear a source's sync cursor)
+si-agent scm reset-clone admin/my-repo --branch main --source my-repo
 ```
 
 ### WebDAV Agent
@@ -862,8 +924,8 @@ Top-level fields:
 - **owner** (required): Repository owner or organization.
 - **repo** (required): Repository name.
 - **incremental**: Use commit-based incremental sync (default: false).
-- **branch**: Branch to sync (default: `main`).
-- **content_filter**: What to ingest: `all`, `files`, or `issues` (default: `all`).
+- **branch**: Branch to sync (default: `main`); `null` for the repository's default branch. Used by full and incremental runs alike.
+- **content_filter**: What to ingest: `all`, `files`, or `issues` (default: `all`). Issues are open issues only; see [Issues](#issues).
 - **base_url**: Override SCM base URL (uses `scm_base_url` env var if not set).
 - **auth_token**: Override auth token name (resolved via Docker secrets or env vars).
 - **extensions**: Override extensions for this component.
@@ -986,7 +1048,7 @@ components:
 
 If a file is removed from `/data/docs` or from the WebDAV server (dropped from the listing, or returning 404 on fetch), the next manifest run detects that its URI is no longer present and deletes it — and its sidecar — from the download directory.
 
-**Note:** SCM components using `incremental: true` only return files changed since the last sync, not the full file listing. When `delete_stale` is enabled, the runner therefore fetches each incremental component's full file listing after the sync and reconciles against that, not against the partial inventory. That listing is one extra walk of the repository per run; if it fails, it is recorded as a component error and `delete_stale` is skipped. With `error_on_empty: true`, an empty full listing is an error too.
+**Note:** SCM components using `incremental: true` only return files changed since the last sync, not the full file listing. When `delete_stale` is enabled, the runner therefore fetches each incremental component's full file listing after the sync and reconciles against that, not against the partial inventory. That listing is one extra walk of the repository per run; if it fails -- including when any listed file cannot be read, or an issue removal cannot be confirmed -- it is recorded as a component error and `delete_stale` is skipped. A sync that already listed everything (a full sync, or an issues-only component, which lists every issue on each run) hands that listing over instead, and no extra walk is made. With `error_on_empty: true`, an empty full listing is an error too.
 
 #### Scheduling
 
@@ -1733,6 +1795,15 @@ An `scm` manifest component with `incremental: true` uses commit-based tracking 
 6. **State Update**: Stores the latest commit SHA locally for subsequent syncs
 
 This approach reduces API calls and bandwidth by 80-95% compared to full repository scans. On first run (or after `si-agent scm reset-sync`), a full sync is performed to establish the baseline.
+
+A full sync is also run, with a WARNING, whenever the stored cursor cannot be continued from:
+
+- **the branch changed**: the cursor was recorded on another branch than the component's;
+- **the cursor is not in the branch's history**: the branch was force-pushed, a git CLI checkout was re-cloned (shallow), or (API) the cursor was not found within the 10 pages of commits searched.
+
+The cursor is cleared first, and the full sync lists the whole branch, which the runner's normal (gated) stale-document removal reconciles. A cursor that cannot be found is therefore never read as "no new commits": before, such a source reported "up to date" on every run and never picked up a change.
+
+A commit whose changed files cannot be read (`git show` or the API failing) is an error (`stage: "commit"`) that holds the cursor, so the commit is retried on the next run.
 
 ### File Typing and Filtering
 

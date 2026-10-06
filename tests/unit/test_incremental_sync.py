@@ -13,6 +13,8 @@ from soliplex.agents import local_store
 from soliplex.agents import store as agent_store
 from soliplex.agents.config import SCM
 from soliplex.agents.config import ContentFilter
+from soliplex.agents.scm import CursorNotFound
+from soliplex.agents.scm import SCMListingError
 from soliplex.agents.scm import app as scm_app
 
 
@@ -141,25 +143,308 @@ async def test_incremental_sync_with_removed_files(local_env):
         assert "old_file.md" not in local_state.load_file_state(source)
 
 
+async def _seed_issue(source, number):
+    uri = f"/admin/test/issues/{number}"
+    await local_store.write_document(source, uri, b"# old", "text/markdown", {})
+    local_state.upsert_file(source, uri, f"s{number}", mime_type="text/markdown")
+
+
+def _issues_provider(listed=(), states=None, repo=None):
+    """A provider listing *listed* open issues; get_issue_state answers from *states*."""
+    provider = MagicMock()
+    provider.list_issues = AsyncMock(
+        return_value=[
+            {
+                "number": n,
+                "title": f"Issue {n}",
+                "body": "",
+                "state": "open",
+                "created_at": "2026-01-01",
+                "assignee": None,
+                "comment_count": 0,
+            }
+            for n in listed
+        ]
+    )
+    provider.get_repo = repo or AsyncMock(return_value={"name": "test"})
+    provider.get_issue_state = AsyncMock(side_effect=lambda repo, owner, number: (states or {})[number])
+    return provider
+
+
 @pytest.mark.asyncio
-async def test_incremental_sync_issues_reconciliation(local_env):
-    """ISSUES-only sync should prune issues no longer present in the source."""
+async def test_incremental_sync_issues_reconciliation_moves_to_the_runner(local_env):
+    """ISSUES-only sync hands the full issue list to the runner and prunes nothing itself."""
     source = "gitea:admin:test:issues"
-    # Seed a stale issue locally.
-    await local_store.write_document(source, "/admin/test/issues/9", b"# old", "text/markdown", {})
-    local_state.upsert_file(source, "/admin/test/issues/9", "s9", mime_type="text/markdown")
+    await _seed_issue(source, 9)
     local_state.set_sync_meta(source, "abc123", last_sync_date=datetime.datetime(2026, 1, 1))
+    provider = _issues_provider(listed=[1], states={9: "gone"})
 
-    with patch("soliplex.agents.scm.app.get_scm") as mock_get_scm:
-        mock_provider = MagicMock()
-        mock_provider.list_issues = AsyncMock(return_value=[])
-        mock_get_scm.return_value = mock_provider
+    with (
+        patch("soliplex.agents.scm.app.get_scm", return_value=provider),
+        patch("soliplex.agents.scm.app.templates.render_issue", AsyncMock(return_value="# issue")),
+    ):
+        result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin", content_filter=ContentFilter.ISSUES)
 
-        await scm_app.incremental_sync(SCM.GITEA, "test", "admin", content_filter=ContentFilter.ISSUES)
+    assert result["errors"] == []
+    assert result["full_inventory"] == [{"uri": "/admin/test/issues/1", "sha256": ""}]
+    # The stale issue is the runner's to remove (behind its gates), not this sync's.
+    assert "/admin/test/issues/9" in local_state.load_file_state(source)
+    assert (local_store.source_dir(source) / "admin" / "test" / "issues" / "9.md").exists()
+    provider.get_issue_state.assert_awaited_once_with("test", "admin", 9)
 
-        # stale issue reconciled away
-        assert not (local_store.source_dir(source) / "admin" / "test" / "issues" / "9.md").exists()
-        assert "/admin/test/issues/9" not in local_state.load_file_state(source)
+
+@pytest.mark.asyncio
+async def test_incremental_sync_issues_closed_issue_confirms_removal(local_env):
+    """A closed issue is a confirmed reason to remove (only open issues are listed)."""
+    source = "gitea:admin:test:issues"
+    await _seed_issue(source, 9)
+    local_state.set_sync_meta(source, "abc123", last_sync_date=datetime.datetime(2026, 1, 1))
+    provider = _issues_provider(states={9: "closed"})
+
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin", content_filter=ContentFilter.ISSUES)
+
+    assert result["status"] == "up-to-date"
+    assert result["errors"] == []
+    assert result["full_inventory"] == []
+
+
+@pytest.mark.asyncio
+async def test_incremental_sync_issues_open_issue_missing_from_list_is_an_error(local_env):
+    """An issue still open but missing from the list means the list is wrong."""
+    source = "gitea:admin:test:issues"
+    await _seed_issue(source, 8)
+    await _seed_issue(source, 9)
+    local_state.set_sync_meta(source, "abc123", last_sync_date=datetime.datetime(2026, 1, 1))
+    provider = _issues_provider(states={8: "gone", 9: "open"})
+
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        result = await scm_app.incremental_sync(
+            SCM.GITEA, "test", "admin", content_filter=ContentFilter.ISSUES, delete_stale=True
+        )
+
+    assert result["errors"] == [
+        {"uri": "/admin/test/issues/9", "error": "issue is open but missing from the issue list", "stage": "issues"}
+    ]
+    # Nothing pruned, not even the confirmed deletion: the list is not trusted.
+    assert {"/admin/test/issues/8", "/admin/test/issues/9"} <= set(local_state.load_file_state(source))
+
+
+@pytest.mark.asyncio
+async def test_incremental_sync_issues_repo_check_failure_confirms_nothing(local_env):
+    """A failed repository check (a private repo answering 404) refuses every removal."""
+    source = "gitea:admin:test:issues"
+    await _seed_issue(source, 9)
+    local_state.set_sync_meta(source, "abc123", last_sync_date=datetime.datetime(2026, 1, 1))
+    provider = _issues_provider(repo=AsyncMock(side_effect=RuntimeError("404 Not Found")))
+
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        result = await scm_app.incremental_sync(SCM.GITEA, "test", "admin", content_filter=ContentFilter.ISSUES)
+
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["uri"] == "/admin/test"
+    assert result["errors"][0]["stage"] == "issues"
+    assert "404 Not Found" in result["errors"][0]["error"]
+    provider.get_issue_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_incremental_sync_issues_without_removal_checks(local_env):
+    """With nothing ever to be removed, missing issues are not looked up."""
+    source = "gitea:admin:test:issues"
+    await _seed_issue(source, 9)
+    local_state.set_sync_meta(source, "abc123", last_sync_date=datetime.datetime(2026, 1, 1))
+    provider = _issues_provider(states={9: "open"})
+
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        result = await scm_app.incremental_sync(
+            SCM.GITEA, "test", "admin", content_filter=ContentFilter.ISSUES, check_issue_removals=False
+        )
+
+    assert result["errors"] == []
+    assert result["full_inventory"] == []
+    provider.get_repo.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_confirms_issue_removals(local_env):
+    """The full-inventory path holds issue removals to the same confirmation."""
+    source = "gitea:admin:test:issues"
+    await _seed_issue(source, 9)
+    provider = _issues_provider(states={9: "open"})
+
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        checked = await scm_app.load_inventory(SCM.GITEA, "test", "admin", ContentFilter.ISSUES, source=source)
+        unchecked = await scm_app.load_inventory(
+            SCM.GITEA, "test", "admin", ContentFilter.ISSUES, source=source, check_issue_removals=False
+        )
+
+    assert [e["uri"] for e in checked["errors"]] == ["/admin/test/issues/9"]
+    assert unchecked["errors"] == []
+
+
+@pytest.mark.asyncio
+async def test_confirm_issue_removals_records_lookup_failures(local_env):
+    """An issue lookup that fails leaves that removal unconfirmed."""
+    source = "s"
+    await _seed_issue(source, 3)
+    # Not an issue URI of this repository: never looked up.
+    local_state.upsert_file(source, "/admin/other/issues/4", "x")
+    local_state.upsert_file(source, "/admin/test/issues/notanumber", "x")
+    provider = _issues_provider()
+    provider.get_issue_state = AsyncMock(side_effect=RuntimeError("timeout"))
+
+    errors = await scm_app.confirm_issue_removals(provider, source, "admin", "test", set())
+
+    assert errors == [{"uri": "/admin/test/issues/3", "error": "removal unconfirmed: timeout", "stage": "issues"}]
+    provider.get_issue_state.assert_awaited_once_with("test", "admin", 3)
+
+
+@pytest.mark.asyncio
+async def test_confirm_issue_removals_nothing_dropped_makes_no_requests(local_env):
+    source = "s"
+    await _seed_issue(source, 3)
+    provider = _issues_provider()
+
+    assert await scm_app.confirm_issue_removals(provider, source, "admin", "test", {"/admin/test/issues/3"}) == []
+    provider.get_repo.assert_not_awaited()
+
+
+# --- unknown cursor / branch change: a full sync, never "up to date" ---
+
+
+def _full_sync_provider(**overrides):
+    provider = MagicMock()
+    provider.list_repo_files = AsyncMock(
+        return_value=[
+            {
+                "uri": "/doc.md",
+                "file_bytes": b"# doc",
+                "sha256": "d1",
+                "content-type": "text/markdown",
+                "last_updated": "2026-01-02T00:00:00Z",
+                "last_commit_sha": "head1",
+            }
+        ]
+    )
+    provider.list_issues = AsyncMock(return_value=[])
+    for name, value in overrides.items():
+        setattr(provider, name, value)
+    return provider
+
+
+@pytest.mark.asyncio
+async def test_incremental_sync_unknown_cursor_runs_full_sync(local_env):
+    """A cursor the history no longer holds gives a full sync on the right branch."""
+    source = "gitea:admin:test:files"
+    local_state.set_sync_meta(source, "lost", branch="develop")
+    provider = _full_sync_provider(list_commits_since=AsyncMock(side_effect=CursorNotFound("lost")))
+
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        result = await scm_app.incremental_sync(
+            SCM.GITEA, "test", "admin", branch="develop", content_filter=ContentFilter.FILES
+        )
+
+    assert result["errors"] == []
+    assert result["full_inventory"] == [{"uri": "/doc.md", "sha256": "d1"}]
+    assert provider.list_repo_files.call_args.kwargs["branch"] == "develop"
+    meta = local_state.get_sync_meta(source)
+    assert meta["last_commit_sha"] == "head1"
+    assert meta["branch"] == "develop"
+
+
+@pytest.mark.asyncio
+async def test_incremental_sync_branch_change_runs_full_sync(local_env):
+    """A cursor recorded on another branch is dropped, not continued from."""
+    source = "gitea:admin:test:files"
+    local_state.set_sync_meta(source, "on-main", branch="main")
+    provider = _full_sync_provider(list_commits_since=AsyncMock(return_value=[]))
+
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        await scm_app.incremental_sync(SCM.GITEA, "test", "admin", branch="develop", content_filter=ContentFilter.FILES)
+
+    provider.list_commits_since.assert_not_awaited()
+    assert provider.list_repo_files.call_args.kwargs["branch"] == "develop"
+    assert local_state.get_sync_meta(source)["branch"] == "develop"
+
+
+@pytest.mark.asyncio
+async def test_incremental_sync_default_branch(local_env):
+    """branch=None means the repository's default branch."""
+    source = "gitea:admin:test:files"
+    provider = _full_sync_provider(get_default_branch=AsyncMock(return_value="trunk"))
+
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        await scm_app.incremental_sync(SCM.GITEA, "test", "admin", branch=None, content_filter=ContentFilter.FILES)
+
+    assert provider.list_repo_files.call_args.kwargs["branch"] == "trunk"
+    assert local_state.get_sync_meta(source)["branch"] == "trunk"
+
+
+# --- per-file failures and branch on the full-inventory path ---
+
+
+@pytest.mark.asyncio
+async def test_load_inventory_passes_branch_and_reports_unreadable_files(local_env):
+    """Unreadable files land in errors (stage fetch); readable ones are still written."""
+    source = "gitea:admin:test:files"
+    provider = _full_sync_provider()
+    provider.list_repo_files.return_value.append({"uri": "/broken.md", "error": "permission denied"})
+
+    with (
+        patch("soliplex.agents.scm.app.get_scm", return_value=provider),
+        patch("soliplex.agents.local_state.prune_documents", AsyncMock(return_value=[])) as mock_prune,
+    ):
+        result = await scm_app.load_inventory(
+            SCM.GITEA, "test", "admin", content_filter=ContentFilter.FILES, source=source, branch="develop", delete_stale=True
+        )
+
+    assert provider.list_repo_files.call_args.kwargs["branch"] == "develop"
+    assert result["errors"] == [{"uri": "/broken.md", "error": "permission denied", "stage": "fetch"}]
+    assert result["ingested"] == ["/doc.md"]
+    assert [r["uri"] for r in result["inventory"]] == ["/doc.md"]
+    mock_prune.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_data_passes_branch(local_env):
+    provider = _full_sync_provider()
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        rows, errors = await scm_app.get_data(SCM.GITEA, "test", "admin", ContentFilter.FILES, branch="release")
+    assert provider.list_repo_files.call_args.kwargs["branch"] == "release"
+    assert [r["uri"] for r in rows] == ["/doc.md"]
+    assert errors == []
+
+
+@pytest.mark.asyncio
+async def test_list_all_uris_raises_on_unreadable_file(local_env):
+    """An incomplete full listing must never reach the reconcile."""
+    provider = _full_sync_provider()
+    provider.list_repo_files.return_value.append({"uri": "/broken.md", "error": "permission denied"})
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        with pytest.raises(SCMListingError, match="/broken.md"):
+            await scm_app.list_all_uris(SCM.GITEA, "test", "admin", branch="develop")
+    assert provider.list_repo_files.call_args.kwargs["branch"] == "develop"
+
+
+@pytest.mark.asyncio
+async def test_list_all_uris_raises_on_unconfirmed_issue_removal(local_env):
+    source = "src"
+    await _seed_issue(source, 9)
+    provider = _issues_provider(states={9: "open"})
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        with pytest.raises(SCMListingError, match="issues/9"):
+            await scm_app.list_all_uris(SCM.GITEA, "test", "admin", content_filter=ContentFilter.ISSUES, source=source)
+
+
+@pytest.mark.asyncio
+async def test_list_all_uris_confirmed_issue_removal(local_env):
+    source = "src"
+    await _seed_issue(source, 9)
+    provider = _issues_provider(listed=[1], states={9: "gone"})
+    with patch("soliplex.agents.scm.app.get_scm", return_value=provider):
+        uris = await scm_app.list_all_uris(SCM.GITEA, "test", "admin", content_filter=ContentFilter.ISSUES, source=source)
+    assert uris == [{"uri": "/admin/test/issues/1", "sha256": ""}]
 
 
 # --- SCM provider commit helpers (unchanged behaviour) ---
@@ -382,9 +667,9 @@ async def test_list_commits_since_empty_first_page(mock_response):
 
     with patch.object(provider, "get_session", return_value=session_ctx):
         with patch.object(provider, "validate_response", AsyncMock()):
-            commits = await provider.list_commits_since("test", "admin", "commit1", "main")
-
-            assert len(commits) == 0
+            # A cursor the branch's history does not hold is not "no commits".
+            with pytest.raises(CursorNotFound):
+                await provider.list_commits_since("test", "admin", "commit1", "main")
 
 
 @pytest.mark.asyncio
@@ -554,7 +839,7 @@ async def test_full_inventory_encrypted_pdf_is_not_refetched(local_env):
         "sha256": "aabbcc",
         "metadata": {},
     }
-    with patch("soliplex.agents.scm.app.get_data", AsyncMock(return_value=[row])):
+    with patch("soliplex.agents.scm.app.get_data", AsyncMock(return_value=([row], []))):
         with pre_process.activate(_pdf_check_run(source)) as run:
             first = await scm_app.load_inventory(SCM.GITEA, "test", "admin", source=source)
             second = await scm_app.load_inventory(SCM.GITEA, "test", "admin", source=source)

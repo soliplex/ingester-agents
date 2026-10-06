@@ -23,6 +23,7 @@ from soliplex.agents.retry import RetryableHTTPError
 from soliplex.agents.retry import parse_retry_after
 from soliplex.agents.retry import retry_policy
 from soliplex.agents.scm import APIFetchError
+from soliplex.agents.scm import CursorNotFound
 from soliplex.agents.scm import SCMException
 from soliplex.agents.scm.lib.utils import compute_file_hash
 from soliplex.agents.scm.lib.utils import decode_base64_if_needed
@@ -206,7 +207,11 @@ class BaseSCMProvider(ABC):
         self, repo: str, owner: str | None = None, add_comments: bool = False, since: datetime.datetime | None = None
     ) -> list[dict[str, Any]]:
         """
-        List all issues for a repository.
+        List the open issues of a repository.
+
+        Only open issues are listed (``state=open``, which is also both
+        GitHub's and Gitea's default): a closed issue drops out of the list,
+        and so out of the source once its removal is confirmed.
 
         Args:
             repo: Repository name
@@ -217,7 +222,7 @@ class BaseSCMProvider(ABC):
             List of issue dictionaries
         """
         owner = owner or self.owner
-        url_template = self.build_url("/repos/{owner}/{repo}/issues?page={page}&status=all")
+        url_template = self.build_url("/repos/{owner}/{repo}/issues?page={page}&state=open")
         if since:
             # Gitea expects an RFC3339 timestamp. isoformat() on a tz-aware
             # datetime emits a "+00:00" offset which, combined with a trailing
@@ -271,6 +276,68 @@ class BaseSCMProvider(ABC):
         url = self.build_url(f"/repos/{owner}/{repo}/issues/{issue_number}/comments")
         return await self._fetch_json(url)
 
+    async def get_repo(self, repo: str, owner: str | None = None) -> dict[str, Any]:
+        """
+        Fetch a repository's record.
+
+        Raises on anything but success -- including the 404 a provider gives
+        for a private repository the credentials cannot see, which is why it
+        is checked before any issue 404 is believed.
+
+        Args:
+            repo: Repository name
+            owner: Repository owner (defaults to instance owner)
+
+        Returns:
+            The repository record
+        """
+        owner = owner or self.owner
+        return await self._fetch_json(self.build_url(f"/repos/{owner}/{repo}"))
+
+    async def get_default_branch(self, repo: str, owner: str | None = None) -> str:
+        """Return the repository's default branch."""
+        rec = await self.get_repo(repo, owner)
+        branch = rec.get("default_branch") if isinstance(rec, dict) else None
+        if not branch:
+            raise SCMException(f"repository {owner or self.owner}/{repo} reports no default branch")
+        return branch
+
+    async def get_issue_state(self, repo: str, owner: str | None, number: int) -> str:
+        """
+        Ask the API whether one issue is still there.
+
+        Used to confirm that an issue missing from the issue list really is
+        gone before its document is removed.
+
+        Args:
+            repo: Repository name
+            owner: Repository owner (defaults to instance owner)
+            number: Issue number
+
+        Returns:
+            ``"gone"`` (404), or the issue's ``state`` (``"open"`` / ``"closed"``)
+
+        Raises:
+            SCMException / aiohttp.ClientResponseError: On any other answer
+        """
+        owner = owner or self.owner
+        url = self.build_url(f"/repos/{owner}/{repo}/issues/{number}")
+        async with self.get_session() as session:
+            response = await self._request_with_retry(session, url)
+            async with response:
+                if self._issue_is_gone(response):
+                    return "gone"
+                response.raise_for_status()
+                issue = await response.json()
+        state = issue.get("state") if isinstance(issue, dict) else None
+        if state not in ("open", "closed"):
+            raise SCMException(f"issue {owner}/{repo}#{number} has unexpected state {state!r}")
+        return state
+
+    def _issue_is_gone(self, response: aiohttp.ClientResponse) -> bool:
+        """Whether a single-issue GET says the issue no longer exists here."""
+        return response.status == 404
+
     def parse_file_rec(self, rec: dict[str, Any]) -> dict[str, Any]:
         """
         Parse a file record from the API response.
@@ -298,7 +365,8 @@ class BaseSCMProvider(ABC):
             "sha256": file_hash,
             "content-type": mime.detect_mime_type(rec["name"], data=file_bytes, text_fallback=True),
             "last_updated": self.get_last_updated(rec),
-            "last_commit_sha": rec["last_commit_sha"],
+            # Gitea's contents API carries it; GitHub's does not.
+            "last_commit_sha": rec.get("last_commit_sha"),
         }
 
     @abstractmethod
@@ -380,7 +448,9 @@ class BaseSCMProvider(ABC):
             semaphore: Optional semaphore for concurrency limiting
 
         Returns:
-            Parsed file record or list of records
+            Parsed file record or list of records. A file or directory that
+            cannot be fetched becomes an error row, ``{"uri": url, "url": url,
+            "error": ...}``, never a silent gap: a gap reads as a deletion.
         """
         logger.debug(f"get_data_from_url = {url}")
 
@@ -411,7 +481,7 @@ class BaseSCMProvider(ABC):
 
         except Exception as e:
             logger.exception("Error fetching from %s", url)
-            return {"error": str(e)}
+            return {"uri": url, "url": url, "error": str(e)}
 
     async def list_repo_files(
         self,
@@ -434,49 +504,79 @@ class BaseSCMProvider(ABC):
         """
         owner = owner or self.owner
         allowed_extensions = allowed_extensions or settings.extensions
-        url = self.build_url(f"/repos/{owner}/{repo}/contents?ref={branch}")
-
-        logger.debug(f"url = {url}")
 
         # Create semaphore to limit concurrent requests
         semaphore = asyncio.Semaphore(settings.scm_max_concurrent_requests)
 
         async with self.get_session() as session:
-            async with session.get(url) as response:
-                if response.content_type != "application/json":  # pragma: no cover
-                    logger.error("Unexpected response type: %s - response: %s", response.content_type, response.text)
+            resp = await self._list_root(session, owner, repo, branch)
+
+            files = [x for x in resp if x["type"] == "file"]
+            dirs = [x for x in resp if x["type"] == "dir"]
+            logger.debug(f"dirs={[(x['name'], x['type']) for x in resp]}")
+
+            tasks = [
+                self.get_data_from_url(file["url"], session, owner, repo, None, semaphore)
+                for file in files
+                if passes_extension_prefilter(file["name"], allowed_extensions)
+            ]
+            for dir in dirs:
+                tasks.append(self.get_data_from_url(dir["url"], session, owner, repo, allowed_extensions, semaphore))
+
+            ret = await asyncio.gather(*tasks)
+            ret = flatten_list(ret)
+            logger.info(f"found {len(ret)} files in {repo}")
+            return ret
+
+    async def _list_root(self, session: aiohttp.ClientSession, owner: str, repo: str, branch: str) -> list[dict[str, Any]]:
+        """
+        List the top level of *branch*, strictly.
+
+        Anything but a 200 with a JSON list raises, after the usual retries,
+        except a 404 the provider recognises as an existing but empty branch
+        (:meth:`is_empty_branch`), which lists as ``[]``.
+
+        Raises:
+            SCMException / RetryableHTTPError: On any other answer
+        """
+        url = self.build_url(f"/repos/{owner}/{repo}/contents?ref={branch}")
+        logger.debug(f"url = {url}")
+
+        response = await self._request_with_retry(session, url)
+        async with response:
+            status = response.status
+            try:
                 resp = await response.json()
+            except (aiohttp.ContentTypeError, ValueError) as e:
+                raise SCMException(f"listing {owner}/{repo} at '{branch}': HTTP {status}, response is not JSON") from e
 
-                # Handle empty repositories (no commits on branch yet)
-                # Gitea returns 404 with "object does not exist" for repos with no commits
-                if response.status == 404:
-                    if isinstance(resp, dict) and "errors" in resp:
-                        errors = resp.get("errors", [])
-                        if any("object does not exist" in str(e) for e in errors):
-                            logger.info(
-                                f"Repository {owner}/{repo} has no commits on branch {branch}, returning empty file list"
-                            )
-                            return []
-                    # If it's a different 404 error, let validate_response handle it
+        if status == 404 and await self.is_empty_branch(session, owner, repo, branch, resp):
+            logger.info(f"Repository {owner}/{repo} has no files on branch {branch}, returning empty file list")
+            return []
+        await self.validate_response(response, resp)
+        if status != 200 or not isinstance(resp, list):
+            raise SCMException(f"listing {owner}/{repo} at '{branch}': unexpected response (HTTP {status})")
+        return resp
 
-                await self.validate_response(response, resp)
+    async def is_empty_branch(self, session: aiohttp.ClientSession, owner: str, repo: str, branch: str, resp: Any) -> bool:
+        """
+        Whether a 404 listing *branch* means it exists and has no files.
 
-                files = [x for x in resp if x["type"] == "file"]
-                dirs = [x for x in resp if x["type"] == "dir"]
-                logger.debug(f"dirs={[(x['name'], x['type']) for x in resp]}")
+        The default is no: a 404 is an error. A provider that answers 404 for
+        an empty tree overrides this, and should raise when the real cause is
+        a missing branch, so that never lists as an empty repository.
+        """
+        return False
 
-                tasks = [
-                    self.get_data_from_url(file["url"], session, owner, repo, None, semaphore)
-                    for file in files
-                    if passes_extension_prefilter(file["name"], allowed_extensions)
-                ]
-                for dir in dirs:
-                    tasks.append(self.get_data_from_url(dir["url"], session, owner, repo, allowed_extensions, semaphore))
-
-                ret = await asyncio.gather(*tasks)
-                ret = flatten_list(ret)
-                logger.info(f"found {len(ret)} files in {repo}")
-                return ret
+    async def _branch_exists(self, session: aiohttp.ClientSession, owner: str, repo: str, branch: str) -> bool:
+        """``GET /repos/{owner}/{repo}/branches/{branch}``: 200 is yes, 404 no, anything else raises."""
+        url = self.build_url(f"/repos/{owner}/{repo}/branches/{branch}")
+        response = await self._request_with_retry(session, url)
+        async with response:
+            if response.status == 404:
+                return False
+            response.raise_for_status()
+            return True
 
     async def iter_repo_files(
         self, repo: str, owner: str | None = None, branch: str = "main"
@@ -493,46 +593,31 @@ class BaseSCMProvider(ABC):
             File dictionaries
         """
         owner = owner or self.owner
-        url = self.build_url(f"/repos/{owner}/{repo}/contents?ref={branch}")
-
-        logger.debug(f"url = {url}")
 
         # Create semaphore to limit concurrent requests
         semaphore = asyncio.Semaphore(settings.scm_max_concurrent_requests)
 
         async with self.get_session() as session:
-            async with session.get(url) as response:
-                resp = await response.json()
+            resp = await self._list_root(session, owner, repo, branch)
 
-                # Handle empty repositories (no commits on branch yet)
-                # Gitea returns 404 with "object does not exist" for repos with no commits
-                if response.status == 404:
-                    if isinstance(resp, dict) and "errors" in resp:
-                        errors = resp.get("errors", [])
-                        if any("object does not exist" in str(e) for e in errors):
-                            logger.info(f"Repository {owner}/{repo} has no commits on branch {branch}, returning empty")
-                            return
+            files = [x for x in resp if x["type"] == "file"]
+            dirs = [x for x in resp if x["type"] == "dir"]
+            logger.debug(f"dirs={[(x['name'], x['type']) for x in resp]}")
 
-                await self.validate_response(response, resp)
+            tasks = [self.get_data_from_url(file["url"], session, owner, repo, None, semaphore) for file in files]
+            for dir in dirs:
+                tasks.append(self.get_data_from_url(dir["url"], session, owner, repo, None, semaphore))
 
-                files = [x for x in resp if x["type"] == "file"]
-                dirs = [x for x in resp if x["type"] == "dir"]
-                logger.debug(f"dirs={[(x['name'], x['type']) for x in resp]}")
+            ct = 0
+            for task in tasks:
+                ret = await task
+                # Handle both single files and lists
+                items = ret if isinstance(ret, list) else [ret]
+                for item in flatten_list(items):
+                    ct += 1
+                    yield item
 
-                tasks = [self.get_data_from_url(file["url"], session, owner, repo, None, semaphore) for file in files]
-                for dir in dirs:
-                    tasks.append(self.get_data_from_url(dir["url"], session, owner, repo, None, semaphore))
-
-                ct = 0
-                for task in tasks:
-                    ret = await task
-                    # Handle both single files and lists
-                    items = ret if isinstance(ret, list) else [ret]
-                    for item in flatten_list(items):
-                        ct += 1
-                        yield item
-
-                logger.info(f"found {ct} files in {repo}")
+            logger.info(f"found {ct} files in {repo}")
 
     async def validate_response(self, response: aiohttp.ClientResponse, resp: dict | list) -> None:
         """
@@ -570,9 +655,15 @@ class BaseSCMProvider(ABC):
 
         Returns:
             List of commit objects, newest first
+
+        Raises:
+            CursorNotFound: If *since_commit_sha* is given but never found --
+                the history ran out (a force-push) or ``max_pages`` was
+                reached -- so the commits listed are not known to be all the
+                new ones.
         """
         owner = owner or self.owner
-        url = self.build_url(f"/repos/{owner}/{repo}/commits?sha={branch}&limit={limit}")
+        url = self._commits_url(owner, repo, branch, limit)
 
         logger.debug(f"Fetching commits from {url}")
 
@@ -607,10 +698,19 @@ class BaseSCMProvider(ABC):
 
                 page += 1
 
+        if since_commit_sha and not found_marker:
+            raise CursorNotFound(since_commit_sha)
+
         logger.info(f"Found {len(commits)} new commits since {since_commit_sha or 'beginning'}")
         return commits
 
-    async def get_commit_details(self, repo: str, owner: str | None = None, commit_sha: str = None) -> dict[str, Any]:
+    def _commits_url(self, owner: str, repo: str, branch: str, limit: int) -> str:
+        """The commit-list URL for *branch*, *limit* per page (Gitea's ``limit``)."""
+        return self.build_url(f"/repos/{owner}/{repo}/commits?sha={branch}&limit={limit}")
+
+    async def get_commit_details(
+        self, repo: str, owner: str | None = None, commit_sha: str = None, branch: str = "main"
+    ) -> dict[str, Any]:
         """
         Get detailed commit information including file changes.
 
@@ -618,6 +718,9 @@ class BaseSCMProvider(ABC):
             repo: Repository name
             owner: Repository owner
             commit_sha: Commit SHA
+            branch: Branch the commit was listed from (unused here: a SHA is
+                global to the API; the git CLI reads it from that branch's
+                checkout)
 
         Returns:
             Commit object with files list

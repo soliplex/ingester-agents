@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -95,6 +96,43 @@ def reset_sync(
         print(f"Sync state reset for {source}")
     else:
         print(f"No sync state found for {source}")
+
+
+@cli.command("reset-clone")
+def reset_clone(
+    repo: Annotated[str, typer.Argument(help="repository in owner/repo format")],
+    branch: Annotated[str, typer.Option(help="branch whose checkout to delete")] = "main",
+    source: Annotated[str | None, typer.Option(help="source (the manifest's `source`) whose sync cursor to clear")] = None,
+):
+    """
+    Delete a git CLI checkout so the next run clones it afresh.
+
+    The recovery for a checkout that can no longer be updated in place (a
+    force-pushed branch, a corrupted directory): a failed pull is reported as
+    a component error and the checkout is left alone for inspection. With
+    --source, that source's sync cursor is cleared as well, so its next run
+    is a full sync.
+
+    Example:
+        si-agent scm reset-clone admin/myrepo --branch main --source my-repo
+    """
+    from .git_cli import GitCliWrapper
+
+    owner, repo_name = parse_repo(repo)
+    git = GitCliWrapper(base_dir=Path(settings.scm_git_repo_base_dir) if settings.scm_git_repo_base_dir else None)
+    repo_dir = git.get_repo_dir(owner, repo_name, branch)
+    if asyncio.run(git.delete_repo(owner, repo_name, branch)):
+        print(f"Deleted checkout {repo_dir}")
+    else:
+        print(f"No checkout at {repo_dir}")
+
+    if source is None:
+        return
+    if not local_state.get_state_path(source).exists():
+        print(f"No sync state found for {source}")
+        return
+    local_state.clear_sync_cursor(source)
+    print(f"Sync cursor cleared for {source}; its next run is a full sync")
 
 
 @cli.command("get-sync-state")
