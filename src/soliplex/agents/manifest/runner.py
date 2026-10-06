@@ -219,6 +219,9 @@ async def _run_scm_component(component: SCMComponent, manifest: Manifest, metada
     if component.base_url:
         overrides["scm_base_url"] = component.base_url
 
+    # Confirming issue removals costs a request per stored issue missing from
+    # the list; only worth paying when the run may remove them.
+    check_issue_removals = bool(manifest.config and manifest.config.delete_stale)
     with override_settings(**overrides):
         if component.incremental:
             return await scm_app.incremental_sync(
@@ -229,6 +232,7 @@ async def _run_scm_component(component: SCMComponent, manifest: Manifest, metada
                 content_filter=component.content_filter,
                 extra_metadata=metadata or None,
                 source=manifest.source,
+                check_issue_removals=check_issue_removals,
             )
         else:
             return await scm_app.load_inventory(
@@ -238,6 +242,8 @@ async def _run_scm_component(component: SCMComponent, manifest: Manifest, metada
                 content_filter=component.content_filter,
                 extra_metadata=metadata or None,
                 source=manifest.source,
+                branch=component.branch,
+                check_issue_removals=check_issue_removals,
             )
 
 
@@ -351,6 +357,7 @@ async def _list_scm_all_uris(
             owner=component.owner,
             branch=component.branch,
             content_filter=component.content_filter,
+            source=manifest.source,
         )
 
 
@@ -620,7 +627,12 @@ async def _run_components(manifest: Manifest, run) -> dict:
                 {telemetry.COMPONENT_NAME: inc_component.name, telemetry.MANIFEST_ID: manifest.id},
             ) as list_span:
                 try:
-                    full_uris = await _list_scm_all_uris(inc_component, manifest)
+                    # A sync that listed everything (a full sync, or an
+                    # issues-only source) hands over its ``full_inventory``;
+                    # otherwise the full listing is fetched here.
+                    full_uris = entry["result"].get("full_inventory")
+                    if full_uris is None:
+                        full_uris = await _list_scm_all_uris(inc_component, manifest)
                     if inc_component.error_on_empty:
                         _check_not_empty(inc_component, manifest.source, full_uris, [])
                 except Exception as e:

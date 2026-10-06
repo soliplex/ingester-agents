@@ -10,6 +10,7 @@ import pytest
 
 from soliplex.agents.retry import RetryableHTTPError
 from soliplex.agents.scm import APIFetchError
+from soliplex.agents.scm import CursorNotFound
 from soliplex.agents.scm import SCMException
 from soliplex.agents.scm.base import BaseSCMProvider
 
@@ -480,6 +481,10 @@ async def test_list_issues_without_comments(provider, mock_response, sample_issu
         assert len(result) == 1
         assert result[0]["title"] == "Test Issue"
         mock_paginate.assert_called_once()
+        # Gitea and GitHub both spell it "state"; open issues only.
+        url_template = mock_paginate.call_args[0][0]
+        assert "&state=open" in url_template
+        assert "status=" not in url_template
 
 
 @pytest.mark.asyncio
@@ -523,6 +528,12 @@ def test_parse_file_rec(provider, sample_file_record):
     assert result["content-type"] == "text/markdown"
     # Kept alongside the API "url" so the sidecar can record a browsable one.
     assert result["html_url"] == "https://example.com/owner/repo/src/branch/main/docs/test.md"
+
+
+def test_parse_file_rec_without_last_commit_sha(provider, sample_file_record):
+    """GitHub's contents API has no last_commit_sha; the record still parses."""
+    rec = {k: v for k, v in sample_file_record.items() if k != "last_commit_sha"}
+    assert provider.parse_file_rec(rec)["last_commit_sha"] is None
 
 
 @pytest.mark.asyncio
@@ -700,7 +711,12 @@ async def test_get_data_from_url_error(provider, mock_response):
             repo="repo",
         )
 
-        assert "error" in result
+        # The error row names what failed, so the caller can report it.
+        assert result == {
+            "uri": "https://api.example.com/file",
+            "url": "https://api.example.com/file",
+            "error": "Network error",
+        }
 
 
 @pytest.mark.asyncio
@@ -937,7 +953,7 @@ async def test_list_repo_files(provider, mock_response, sample_file_record):
     with patch.object(provider, "get_session") as mock_get_session:
         mock_session = MagicMock()
         mock_resp = mock_response(200, api_response)
-        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_session.get = AsyncMock(return_value=mock_resp)
         mock_get_session.return_value = create_async_context_manager(mock_session)
 
         with patch.object(provider, "validate_response"):
@@ -974,7 +990,7 @@ async def test_iter_repo_files(provider, mock_response, sample_file_record):
     with patch.object(provider, "get_session") as mock_get_session:
         mock_session = MagicMock()
         mock_resp = mock_response(200, api_response)
-        mock_session.get.return_value = create_async_context_manager(mock_resp)
+        mock_session.get = AsyncMock(return_value=mock_resp)
         mock_get_session.return_value = create_async_context_manager(mock_session)
 
         with patch.object(provider, "validate_response"):
@@ -2294,155 +2310,222 @@ def test_base_get_auth_headers_raises_no_auth():
             provider.get_auth_headers()
 
 
-# ==================== Tests for empty repository 404 handling ====================
+# ==================== Tests for the strict root listing ====================
 
 
-@pytest.mark.asyncio
-async def test_list_repo_files_empty_repo_404_object_does_not_exist(provider, mock_response):
-    """Test list_repo_files returns empty list for empty repo with 404 'object does not exist' error."""
+def _root_session(provider, *responses):
+    """Patch get_session so session.get answers with *responses* in turn."""
     from tests.unit.conftest import create_async_context_manager
 
-    # Gitea returns 404 with "object does not exist" for repos with no commits
-    error_response = {"errors": ["object does not exist [id: refs/heads/main, rel_path: ]"]}
+    mock_session = MagicMock()
+    mock_session.get = AsyncMock(side_effect=list(responses))
+    return patch.object(provider, "get_session", return_value=create_async_context_manager(mock_session))
 
-    with patch.object(provider, "get_session") as mock_get_session:
-        mock_session = MagicMock()
-        mock_resp = mock_response(404, error_response)
-        mock_session.get.return_value = create_async_context_manager(mock_resp)
-        mock_get_session.return_value = create_async_context_manager(mock_session)
 
-        with patch("soliplex.agents.scm.base.settings") as mock_settings:
-            mock_settings.scm_max_concurrent_requests = 5
-            mock_settings.extensions = ["md", "txt"]
-
-            result = await provider.list_repo_files("test_repo", owner="test_owner", branch="main")
-
-            # Should return empty list for empty repository
-            assert result == []
+@pytest.fixture
+def fast_settings():
+    with patch("soliplex.agents.scm.base.settings") as mock_settings:
+        mock_settings.scm_max_concurrent_requests = 5
+        mock_settings.scm_retry_attempts = 1
+        mock_settings.scm_retry_backoff_max = 0.1
+        mock_settings.extensions = ["md", "txt"]
+        yield mock_settings
 
 
 @pytest.mark.asyncio
-async def test_list_repo_files_404_non_dict_response_passed_to_validate(provider, mock_response):
+async def test_list_repo_files_404_object_does_not_exist_raises_by_default(provider, mock_response, fast_settings):
+    """The base provider reads no 404 as an empty repository (Gitea's quirk lives in GiteaProvider)."""
+    error_response = {"errors": ["object does not exist [id: refs/heads/main, rel_path: ]"]}
+    with _root_session(provider, mock_response(404, error_response)):
+        with pytest.raises(SCMException, match="object does not exist"):
+            await provider.list_repo_files("test_repo", owner="test_owner", branch="main")
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_empty_branch_hook_returns_empty(provider, mock_response, fast_settings):
+    """A 404 the provider recognises as an existing empty branch lists as []."""
+    with _root_session(provider, mock_response(404, {"errors": ["x"]})):
+        with patch.object(provider, "is_empty_branch", AsyncMock(return_value=True)) as mock_hook:
+            assert await provider.list_repo_files("test_repo", owner="test_owner", branch="dev") == []
+    assert mock_hook.call_args[0][1:4] == ("test_owner", "test_repo", "dev")
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_404_non_dict_response_passed_to_validate(provider, mock_response, fast_settings):
     """Test list_repo_files with 404 non-dict response passes to validate_response."""
-    from tests.unit.conftest import create_async_context_manager
-
-    # Non-dict response should skip the errors check and go to validate_response
-    error_response = ["not a dict"]
-
-    with patch.object(provider, "get_session") as mock_get_session:
-        with patch.object(provider, "validate_response") as mock_validate:
-            mock_session = MagicMock()
-            mock_resp = mock_response(404, error_response)
-            mock_session.get.return_value = create_async_context_manager(mock_resp)
-            mock_get_session.return_value = create_async_context_manager(mock_session)
-            mock_validate.side_effect = SCMException("not found")
-
-            with patch("soliplex.agents.scm.base.settings") as mock_settings:
-                mock_settings.scm_max_concurrent_requests = 5
-                mock_settings.extensions = ["md", "txt"]
-
-                with pytest.raises(SCMException, match="not found"):
-                    await provider.list_repo_files(
-                        "nonexistent_repo",
-                        owner="test_owner",
-                        branch="main",
-                    )
+    with _root_session(provider, mock_response(404, ["not a dict"])):
+        with patch.object(provider, "validate_response", side_effect=SCMException("not found")):
+            with pytest.raises(SCMException, match="not found"):
+                await provider.list_repo_files("nonexistent_repo", owner="test_owner", branch="main")
 
 
 @pytest.mark.asyncio
-async def test_iter_repo_files_empty_repo_404_object_does_not_exist(provider, mock_response):
-    """Test iter_repo_files returns empty for empty repo with 404 'object does not exist' error."""
-    from tests.unit.conftest import create_async_context_manager
+async def test_list_repo_files_404_without_errors_raises(provider, mock_response, fast_settings):
+    """A 404 that validate_response lets through still raises: no silent empty listing."""
+    with _root_session(provider, mock_response(404, {"message": "Not Found"})):
+        with pytest.raises(SCMException, match="unexpected response"):
+            await provider.list_repo_files("test_repo", owner="test_owner", branch="main")
 
-    # Gitea returns 404 with "object does not exist" for repos with no commits
+
+@pytest.mark.asyncio
+async def test_list_repo_files_5xx_root_raises(provider, mock_response, fast_settings):
+    """A 5xx on the root listing raises after the retries, instead of iterating a dict."""
+    from soliplex.agents.retry import RetryableHTTPError
+
+    resp = mock_response(502, {"message": "bad gateway"}, text_data="bad gateway")
+    with _root_session(provider, resp):
+        with pytest.raises(RetryableHTTPError):
+            await provider.list_repo_files("test_repo", owner="test_owner", branch="main")
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_200_dict_raises(provider, mock_response, fast_settings):
+    """The root of a branch is a directory: a JSON object there is an error."""
+    with _root_session(provider, mock_response(200, {"name": "README.md", "type": "file"})):
+        with pytest.raises(SCMException, match="unexpected response"):
+            await provider.list_repo_files("test_repo", owner="test_owner", branch="main")
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_non_json_raises(provider, mock_response, fast_settings):
+    """A non-JSON answer (an HTML error page) raises."""
+    resp = mock_response(200)
+    resp.json = AsyncMock(side_effect=ValueError("Expecting value"))
+    with _root_session(provider, resp):
+        with pytest.raises(SCMException, match="not JSON"):
+            await provider.list_repo_files("test_repo", owner="test_owner", branch="main")
+
+
+@pytest.mark.asyncio
+async def test_list_repo_files_requests_the_branch(provider, mock_response, fast_settings):
+    with _root_session(provider, mock_response(200, [])) as mock_get_session:
+        assert await provider.list_repo_files("test_repo", owner="test_owner", branch="release/1") == []
+    session = mock_get_session.return_value.__aenter__.return_value
+    assert session.get.call_args[0][0] == "https://api.example.com/repos/test_owner/test_repo/contents?ref=release/1"
+
+
+@pytest.mark.asyncio
+async def test_iter_repo_files_404_object_does_not_exist_raises(provider, mock_response, fast_settings):
+    """iter_repo_files lists its root the same strict way."""
     error_response = {"errors": ["object does not exist [id: refs/heads/main, rel_path: ]"]}
-
-    with patch.object(provider, "get_session") as mock_get_session:
-        mock_session = MagicMock()
-        mock_resp = mock_response(404, error_response)
-        mock_session.get.return_value = create_async_context_manager(mock_resp)
-        mock_get_session.return_value = create_async_context_manager(mock_session)
-
-        with patch("soliplex.agents.scm.base.settings") as mock_settings:
-            mock_settings.scm_max_concurrent_requests = 5
-
-            files = []
-            async for file in provider.iter_repo_files("test_repo", owner="test_owner", branch="main"):
-                files.append(file)
-
-            # Should return empty for empty repository
-            assert files == []
+    with _root_session(provider, mock_response(404, error_response)):
+        with pytest.raises(SCMException):
+            async for _ in provider.iter_repo_files("test_repo", owner="test_owner", branch="main"):
+                pass
 
 
 @pytest.mark.asyncio
-async def test_iter_repo_files_404_non_dict_response_passed_to_validate(provider, mock_response):
-    """Test iter_repo_files with 404 non-dict response passes to validate_response."""
-    from tests.unit.conftest import create_async_context_manager
-
-    # Non-dict response should skip the errors check and go to validate_response
-    error_response = ["not a dict"]
-
-    with patch.object(provider, "get_session") as mock_get_session:
-        with patch.object(provider, "validate_response") as mock_validate:
-            mock_session = MagicMock()
-            mock_resp = mock_response(404, error_response)
-            mock_session.get.return_value = create_async_context_manager(mock_resp)
-            mock_get_session.return_value = create_async_context_manager(mock_session)
-            mock_validate.side_effect = SCMException("not found")
-
-            with patch("soliplex.agents.scm.base.settings") as mock_settings:
-                mock_settings.scm_max_concurrent_requests = 5
-
-                with pytest.raises(SCMException, match="not found"):
-                    async for _ in provider.iter_repo_files(
-                        "nonexistent_repo",
-                        owner="test_owner",
-                        branch="main",
-                    ):
-                        pass
+async def test_is_empty_branch_default_is_false(provider):
+    assert await provider.is_empty_branch(MagicMock(), "o", "r", "main", {}) is False
 
 
 @pytest.mark.asyncio
-async def test_list_repo_files_404_with_errors_list_but_different_error(provider, mock_response):
-    """Test list_repo_files raises when 404 has errors list but not 'object does not exist'."""
-    from tests.unit.conftest import create_async_context_manager
-
-    # 404 with errors list but different error message
-    error_response = {"errors": ["some other error"]}
-
-    with patch.object(provider, "get_session") as mock_get_session:
-        mock_session = MagicMock()
-        mock_resp = mock_response(404, error_response)
-        mock_session.get.return_value = create_async_context_manager(mock_resp)
-        mock_get_session.return_value = create_async_context_manager(mock_session)
-
-        with patch("soliplex.agents.scm.base.settings") as mock_settings:
-            mock_settings.scm_max_concurrent_requests = 5
-            mock_settings.extensions = ["md", "txt"]
-
-            # Should call validate_response which raises SCMException
-            with pytest.raises(SCMException):
-                await provider.list_repo_files("test_repo", owner="test_owner", branch="main")
+async def test_branch_exists(provider, mock_response, fast_settings):
+    session = MagicMock()
+    session.get = AsyncMock(side_effect=[mock_response(200, {"name": "main"}), mock_response(404, {})])
+    assert await provider._branch_exists(session, "o", "r", "main") is True
+    assert await provider._branch_exists(session, "o", "r", "gone") is False
+    assert session.get.call_args_list[0][0][0] == "https://api.example.com/repos/o/r/branches/main"
 
 
 @pytest.mark.asyncio
-async def test_iter_repo_files_404_with_errors_list_but_different_error(provider, mock_response):
-    """Test iter_repo_files raises when 404 has errors list but not 'object does not exist'."""
-    from tests.unit.conftest import create_async_context_manager
+async def test_branch_exists_other_status_raises(provider, mock_response, fast_settings):
+    resp = mock_response(403, {})
+    resp.raise_for_status = MagicMock(side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=403))
+    session = MagicMock()
+    session.get = AsyncMock(return_value=resp)
+    with pytest.raises(aiohttp.ClientResponseError):
+        await provider._branch_exists(session, "o", "r", "main")
 
-    # 404 with errors list but different error message
-    error_response = {"errors": ["some other error"]}
 
-    with patch.object(provider, "get_session") as mock_get_session:
-        mock_session = MagicMock()
-        mock_resp = mock_response(404, error_response)
-        mock_session.get.return_value = create_async_context_manager(mock_resp)
-        mock_get_session.return_value = create_async_context_manager(mock_session)
+# ==================== Tests for list_commits_since cursor handling ====================
 
-        with patch("soliplex.agents.scm.base.settings") as mock_settings:
-            mock_settings.scm_max_concurrent_requests = 5
 
-            # Should call validate_response which raises SCMException
-            with pytest.raises(SCMException):
-                async for _ in provider.iter_repo_files("test_repo", owner="test_owner", branch="main"):
-                    pass
+@pytest.mark.asyncio
+async def test_list_commits_since_cursor_not_in_history_raises(provider, mock_response, fast_settings):
+    """History ran out without the cursor (a force-push): CursorNotFound, not "all new"."""
+    page = [{"sha": "c3"}, {"sha": "c2"}]
+    with _root_session(provider, mock_response(200, page)):
+        with pytest.raises(CursorNotFound) as exc_info:
+            await provider.list_commits_since("test_repo", "o", since_commit_sha="gone", limit=100)
+    assert exc_info.value.sha == "gone"
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_cursor_beyond_max_pages_raises(provider, mock_response, fast_settings):
+    """max_pages full pages without the cursor: the newest 1000 are not known to be all the new ones."""
+    pages = [mock_response(200, [{"sha": f"c{i}_{j}"} for j in range(100)]) for i in range(10)]
+    with _root_session(provider, *pages):
+        with pytest.raises(CursorNotFound):
+            await provider.list_commits_since("test_repo", "o", since_commit_sha="old", limit=100)
+
+
+@pytest.mark.asyncio
+async def test_list_commits_since_uses_limit_param(provider, mock_response, fast_settings):
+    with _root_session(provider, mock_response(200, [])) as mock_get_session:
+        await provider.list_commits_since("test_repo", "o", branch="dev", limit=50)
+    session = mock_get_session.return_value.__aenter__.return_value
+    assert session.get.call_args[0][0] == "https://api.example.com/repos/o/test_repo/commits?sha=dev&limit=50&page=1"
+
+
+# ==================== Tests for repository / issue lookups ====================
+
+
+@pytest.mark.asyncio
+async def test_get_repo(provider):
+    with patch.object(provider, "_fetch_json", AsyncMock(return_value={"name": "r"})) as mock_fetch:
+        assert await provider.get_repo("r", "o") == {"name": "r"}
+    mock_fetch.assert_called_once_with("https://api.example.com/repos/o/r")
+
+
+@pytest.mark.asyncio
+async def test_get_default_branch(provider):
+    with patch.object(provider, "get_repo", AsyncMock(return_value={"default_branch": "trunk"})):
+        assert await provider.get_default_branch("r", "o") == "trunk"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rec", [{}, {"default_branch": ""}, ["not", "a", "dict"]])
+async def test_get_default_branch_missing_raises(provider, rec):
+    with patch.object(provider, "get_repo", AsyncMock(return_value=rec)):
+        with pytest.raises(SCMException, match="no default branch"):
+            await provider.get_default_branch("r", "o")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["open", "closed"])
+async def test_get_issue_state(provider, mock_response, fast_settings, state):
+    with _root_session(provider, mock_response(200, {"number": 7, "state": state})) as mock_get_session:
+        assert await provider.get_issue_state("r", "o", 7) == state
+    session = mock_get_session.return_value.__aenter__.return_value
+    assert session.get.call_args[0][0] == "https://api.example.com/repos/o/r/issues/7"
+
+
+@pytest.mark.asyncio
+async def test_get_issue_state_404_is_gone(provider, mock_response, fast_settings):
+    with _root_session(provider, mock_response(404, {"message": "Not Found"})):
+        assert await provider.get_issue_state("r", "o", 7) == "gone"
+
+
+@pytest.mark.asyncio
+async def test_get_issue_state_other_error_raises(provider, mock_response, fast_settings):
+    resp = mock_response(403, {})
+    resp.raise_for_status = MagicMock(side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=403))
+    with _root_session(provider, resp):
+        with pytest.raises(aiohttp.ClientResponseError):
+            await provider.get_issue_state("r", "o", 7)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [{"number": 7}, {"state": "weird"}, ["x"]])
+async def test_get_issue_state_unexpected_state_raises(provider, mock_response, fast_settings, body):
+    with _root_session(provider, mock_response(200, body)):
+        with pytest.raises(SCMException, match="unexpected state"):
+            await provider.get_issue_state("r", "o", 7)
+
+
+@pytest.mark.asyncio
+async def test_get_commit_details_accepts_branch(provider):
+    with patch.object(provider, "_fetch_json", AsyncMock(return_value={"sha": "abc"})) as mock_fetch:
+        assert await provider.get_commit_details("r", "o", "abc", branch="dev") == {"sha": "abc"}
+    mock_fetch.assert_called_once_with("https://api.example.com/repos/o/r/git/commits/abc")

@@ -233,7 +233,8 @@ si-agent
 │   ├── list-issues <platform> <owner>/<repo>
 │   ├── get-repo <platform> <owner>/<repo>
 │   ├── get-sync-state <platform> <owner>/<repo>
-│   └── reset-sync <platform> <owner>/<repo>
+│   ├── reset-sync <platform> <owner>/<repo>
+│   └── reset-clone <owner>/<repo> [--branch] [--source]  # delete a git CLI checkout
 ├── webdav                               # Inspection only
 │   ├── validate-config <path>
 │   ├── export-urls <path> <output-file> # Write a urls_file for a manifest
