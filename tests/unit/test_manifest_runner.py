@@ -1051,6 +1051,32 @@ class TestRunManifestDeleteStale:
         assert result["delete_stale_result"] == []
 
     @pytest.mark.asyncio
+    async def test_a_webdav_probe_error_blocks_the_clean_up_and_the_load(self):
+        """A URL that couldn't be probed is missing from the inventory, not removed."""
+        manifest = Manifest(
+            id="probe",
+            name="Probe",
+            source="probe-src",
+            config={"delete_stale": True},
+            components=[{"type": "webdav", "name": "pubs", "url": "https://dav.example", "urls": ["/docs/a.md"]}],
+        )
+        webdav_result = {
+            "inventory": [{"path": "/docs/a.md", "sha256": "h1"}],
+            "ingested": ["/docs/a.md"],
+            "errors": [{"uri": "/docs/bad.md", "error": "cannot type", "stage": "probe"}],
+        }
+        with (
+            patch.dict(runner._DISPATCH, {WebDAVComponent: AsyncMock(return_value=webdav_result)}),
+            patch("soliplex.agents.manifest.runner.local_state.reconcile_documents") as reconcile,
+        ):
+            result = await runner.run_manifest(manifest)
+
+        reconcile.assert_not_called()
+        assert result["summary"]["file_errors"] == 1
+        assert result["summary"]["delete_stale_skipped"] is True
+        assert runner.load_blockers(result) == {"file_errors": 1}
+
+    @pytest.mark.asyncio
     async def test_not_found_excluded_from_reconcile_set(self, delete_stale_manifest, caplog):
         # A 404'd URI is reported in not_found and must be subtracted from the
         # reconcile "should exist" set so its local copy is removed.

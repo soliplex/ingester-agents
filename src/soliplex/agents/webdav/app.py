@@ -925,11 +925,15 @@ async def _load_inventory(
     delete_stale: bool,
     client: AsyncWebDAVClient | None,
     exclude_paths: list[str] | None = None,
+    discovery_errors: list[dict] | None = None,
 ):
     """Body of :func:`load_inventory`, with the run's client already open.
 
     *client* is ``None`` when no WebDAV URL is configured; callees then fall
-    back to creating their own, exactly as before.
+    back to creating their own, exactly as before. *discovery_errors* are
+    error rows (``uri`` / ``error`` / ``stage``) found by a caller that built
+    *config* itself -- URIs it meant to include but could not -- and are
+    reported in ``errors`` like a failed download.
     """
     listing_errors: list[dict] = []
     if config is None:
@@ -961,6 +965,7 @@ async def _load_inventory(
     # runner's) must not treat them as removed. The listed files are still
     # fetched.
     errors = [{"uri": e["path"], "error": e["error"], "stage": "listing"} for e in listing_errors]
+    errors.extend(discovery_errors or [])
     not_found = []
     ret = {
         "inventory": config,
@@ -1154,6 +1159,12 @@ async def load_inventory_from_urls(
         delete_stale: Remove documents not in inventory (default: False)
         base_dir: Optional directory for resolving relative local paths
 
+    A URL whose probe failed (see :func:`build_config_from_urls`) is absent
+    from the inventory, so it is reported in ``errors`` with ``stage:
+    "probe"``: otherwise the stale clean-up -- the runner's or this
+    function's -- would read its absence as a removal and delete its
+    document. The URLs that probed successfully are still fetched.
+
     Returns:
         Dictionary with inventory, to_process, ingested, errors, and
         url_results
@@ -1168,6 +1179,9 @@ async def load_inventory_from_urls(
             source=source,
             client=webdav_client,
         )
+        probe_errors = [
+            {"uri": r["url"], "error": r["error_message"], "stage": "probe"} for r in url_results if r["status"] == "error"
+        ]
 
         result = await _load_inventory(
             path="",
@@ -1182,6 +1196,7 @@ async def load_inventory_from_urls(
             extra_metadata=extra_metadata,
             delete_stale=delete_stale,
             client=webdav_client,
+            discovery_errors=probe_errors,
         )
 
     result["url_results"] = url_results

@@ -943,6 +943,7 @@ When `delete_stale: true` is set in a manifest's `config` block, the runner remo
 
 - If **any** component raises, hits an unknown type, reports a **transient per-file error** (timeout / 5xx), or (with `error_on_empty`) returns nothing, `delete_stale` is **skipped entirely** for that manifest run. This prevents accidental deletions when the URI set may be incomplete. (A 404 is a removal signal, not a transient error, so it does not trigger this skip.)
 - Components that succeed still have their documents ingested normally — only the stale deletion step is skipped.
+- For a WebDAV `urls_file` / `urls` component, a URL that fails to be **probed** (resolving its validator and type before download, beyond the tolerated `info` / `HEAD` failures) is left out of the inventory, so it counts as a per-file error (`stage: "probe"` in the component's `errors`) rather than a removal.
 - The same errors also skip the run's **haiku load**, which would otherwise delete from the database whatever is missing from the folder; so does a download location left empty. See [haiku-rag Loading](#haiku-rag-loading).
 - A component that returns **no items** counts as a success unless it sets `error_on_empty: true` (see below), so an empty listing would otherwise delete every document the source holds.
 
