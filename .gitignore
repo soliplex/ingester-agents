@@ -82,3 +82,4 @@ venv.bak/
 /file-store
 /.claude
 /sync_state
+/worktree
