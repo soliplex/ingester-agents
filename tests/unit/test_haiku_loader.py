@@ -356,6 +356,48 @@ class TestRunLoad:
         assert result["timed_out"] is True
         assert result["post_process"] == [{"method": "pkg:fn", "ok": True, "error": None}]
 
+    @pytest.mark.asyncio
+    async def test_a_failed_post_process_keeps_the_load_outcome(self, haiku_env):
+        from soliplex.agents.manifest.post_process import PostProcessFailed
+
+        steps = [{"method": "pkg:fn", "status": "error", "ok": False, "error": "RuntimeError: nope", "duration_s": 0.1}]
+        with (
+            patch(
+                "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=_fake_proc(returncode=0),
+            ),
+            patch(
+                "soliplex.agents.manifest.post_process.run_post_process",
+                new_callable=AsyncMock,
+                side_effect=PostProcessFailed("post-process pkg:fn failed: RuntimeError: nope", steps),
+            ),
+        ):
+            result = await haiku_loader.run_load(self._pp_manifest())
+        # Reported in the result, not raised, and the load's own outcome survives.
+        assert result["returncode"] == 0
+        assert result["timed_out"] is False
+        assert result["db"]
+        assert result["post_process"] == steps
+        assert result["post_process_error"] == "post-process pkg:fn failed: RuntimeError: nope"
+
+    @pytest.mark.asyncio
+    async def test_other_post_process_errors_still_propagate(self, haiku_env):
+        with (
+            patch(
+                "soliplex.agents.manifest.haiku_process.asyncio.create_subprocess_exec",
+                new_callable=AsyncMock,
+                return_value=_fake_proc(returncode=0),
+            ),
+            patch(
+                "soliplex.agents.manifest.post_process.run_post_process",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("not a step"),
+            ),
+            pytest.raises(RuntimeError, match="not a step"),
+        ):
+            await haiku_loader.run_load(self._pp_manifest())
+
 
 # --- empty download location gate ---
 

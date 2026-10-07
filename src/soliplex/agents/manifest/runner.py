@@ -2,6 +2,7 @@
 
 import datetime
 import logging
+import signal
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Any
 import yaml
 
 from soliplex.agents import EmptyComponentError
+from soliplex.agents import alerts
 from soliplex.agents import local_state
 from soliplex.agents import telemetry
 from soliplex.agents.config import FSComponent
@@ -20,6 +22,7 @@ from soliplex.agents.config import WebComponent
 from soliplex.agents.config import WebDAVComponent
 from soliplex.agents.config import resolve_credential
 from soliplex.agents.config import settings
+from soliplex.agents.manifest.callables import describe_error
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,7 @@ def load_manifest(path: str) -> Manifest:
         raise TypeError(f"Expected a YAML mapping in {path}, got {type(raw).__name__}")
     manifest = Manifest(**raw)
     manifest.manifest_dir = str(file_path.parent.resolve())
+    manifest.manifest_path = str(file_path.resolve())
     return manifest
 
 
@@ -93,14 +97,20 @@ def scan_manifests(dir_path: str) -> ScanResult:
 
 def load_manifests_with_paths(
     dir_path: str,
+    *,
+    alert_invalid: bool = False,
 ) -> list[tuple[Manifest, str]]:
     """Load all YAML manifests from a directory, returning file paths.
 
-    Skips files that fail to parse with a warning log.
+    Skips files that fail to parse with a warning log -- or, with
+    *alert_invalid*, an operator alert (see :mod:`soliplex.agents.alerts`),
+    which also alerts on each file of a duplicate id.
     Validates that all manifest IDs are unique.
 
     Args:
         dir_path: Path to directory containing .yml/.yaml files.
+        alert_invalid: Alert on invalid files and duplicate ids. For a run,
+            which will skip them; not for a listing.
 
     Returns:
         List of (Manifest, file_path) tuples.
@@ -110,20 +120,29 @@ def load_manifests_with_paths(
     """
     scan = scan_manifests(dir_path)
     for path, error in scan.invalid.items():
-        logger.warning("Skipping invalid manifest %s: %s", path, error)
+        if alert_invalid:
+            alerts.manifest_failed(
+                manifest_id=None, path=path, stage=alerts.Stage.MANIFEST_FILE, reasons=[f"invalid manifest: {error}"]
+            )
+        else:
+            logger.warning("Skipping invalid manifest %s: %s", path, error)
     if scan.duplicates:
+        if alert_invalid:
+            alert_duplicates(scan.pairs, scan.duplicates)
         raise ValueError(f"Duplicate manifest IDs found: {scan.duplicates}")
     return scan.pairs
 
 
-def load_manifests_from_dir(dir_path: str) -> list[Manifest]:
+def load_manifests_from_dir(dir_path: str, *, alert_invalid: bool = False) -> list[Manifest]:
     """Load all YAML manifests from a directory.
 
-    Skips files that fail to parse with a warning log.
+    Skips files that fail to parse with a warning log (or an alert; see
+    :func:`load_manifests_with_paths`).
     Validates that all manifest IDs are unique.
 
     Args:
         dir_path: Path to directory containing .yml/.yaml files.
+        alert_invalid: See :func:`load_manifests_with_paths`.
 
     Returns:
         List of validated Manifest instances.
@@ -131,10 +150,10 @@ def load_manifests_from_dir(dir_path: str) -> list[Manifest]:
     Raises:
         ValueError: If duplicate manifest IDs are found.
     """
-    return [m for m, _ in load_manifests_with_paths(dir_path)]
+    return [m for m, _ in load_manifests_with_paths(dir_path, alert_invalid=alert_invalid)]
 
 
-def resolve_manifests(path: str) -> list[Manifest]:
+def resolve_manifests(path: str, *, alert_invalid: bool = False) -> list[Manifest]:
     """Resolve *path* into a list of manifests.
 
     ``path`` is either the sentinel ``"all"`` (every ``.yml``/``.yaml`` in
@@ -144,10 +163,13 @@ def resolve_manifests(path: str) -> list[Manifest]:
 
     Args:
         path: ``"all"``, a manifest file path, or a directory path.
+        alert_invalid: Raise an operator alert for each manifest file that
+            will not run: invalid, or sharing its id with another file.
 
     Returns:
         Validated Manifest instances (invalid files in directory mode are
-        skipped with a warning by :func:`load_manifests_with_paths`).
+        skipped with a warning, or an alert, by
+        :func:`load_manifests_with_paths`).
 
     Raises:
         FileNotFoundError: If *path* does not exist, or ``"all"`` was given
@@ -161,13 +183,23 @@ def resolve_manifests(path: str) -> list[Manifest]:
             )
         if not Path(settings.manifest_dir).is_dir():
             raise FileNotFoundError(f"MANIFEST_DIR is not a directory: {settings.manifest_dir}")
-        return load_manifests_from_dir(settings.manifest_dir)
+        return load_manifests_from_dir(settings.manifest_dir, alert_invalid=alert_invalid)
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"Path not found: {path}")
     if p.is_file():
-        return [load_manifest(path)]
-    return load_manifests_from_dir(path)
+        try:
+            return [load_manifest(path)]
+        except Exception as e:
+            if alert_invalid:
+                alerts.manifest_failed(
+                    manifest_id=None,
+                    path=path,
+                    stage=alerts.Stage.MANIFEST_FILE,
+                    reasons=[f"invalid manifest: {e}"],
+                )
+            raise
+    return load_manifests_from_dir(path, alert_invalid=alert_invalid)
 
 
 @contextmanager
@@ -751,11 +783,16 @@ async def run_manifests(
             defers to each manifest's ``config.allow_empty_load``.
 
     A failure while running or loading one manifest is isolated to that
-    manifest: it is logged and recorded (an ``error`` on the result, or a
-    ``haiku_load_error`` when the load/post-process step is the one that failed)
-    and the remaining manifests still run. A manifest a pre-run step skipped is
+    manifest: it is logged and recorded (an ``error`` on the result, a
+    ``haiku_load_error`` when the load step raised, or a
+    ``post_process_error`` on the ``haiku_load`` result when a post-process
+    step did) and the remaining manifests still run. A manifest a pre-run step skipped is
     returned with ``skipped`` set and is not loaded; one whose run had errors
     is returned with ``haiku_load_skipped`` set and is not loaded either.
+
+    Each manifest ends with one operator alert, failed or completed (see
+    :func:`report_outcome`); a manifest file that cannot run -- invalid, or
+    sharing its id -- raises one too.
 
     Returns:
         List of per-manifest result dicts.
@@ -766,7 +803,7 @@ async def run_manifests(
     """
     if load_on_error is None:
         load_on_error = settings.haiku_load_on_error
-    manifests = resolve_manifests(path)
+    manifests = resolve_manifests(path, alert_invalid=True)
     results = []
     for manifest in manifests:
         # The same span the server's queue opens, so a CLI run traces the same
@@ -779,39 +816,214 @@ async def run_manifests(
                 logger.exception("Manifest '%s' (%s) failed", manifest.id, manifest.name)
                 results.append({"manifest_id": manifest.id, "manifest_name": manifest.name, "error": str(e)})
                 telemetry.fail(span, f"manifest run failed: {type(e).__name__}", e)
+                alerts.manifest_failed(
+                    manifest_id=manifest.id,
+                    path=manifest.manifest_path,
+                    stage=alerts.Stage.RUN,
+                    reasons=[describe_error(e)],
+                    source=manifest.source,
+                )
                 continue
-            telemetry.record_summary(span, result["summary"])
-            if result.get("skipped"):
-                # A pre-run step called the run off: nothing to load.
-                results.append(result)
-                continue
-            if load:
-                from soliplex.agents.manifest import haiku_loader
-
-                blockers = load_blockers(result)
-                if blockers and not load_on_error:
-                    # The download location may be incomplete, and a load
-                    # would delete whatever is missing from it.
-                    logger.error(
-                        "Skipping haiku load for manifest '%s' (source '%s'): run had errors (%s)",
-                        manifest.id,
-                        manifest.source,
-                        describe_blockers(blockers),
-                    )
-                    result["haiku_load_skipped"] = {"reason": "run had errors", "errors": blockers}
-                    telemetry.mark_load_skipped(span, blockers)
-                    results.append(result)
-                    continue
-                try:
-                    result["haiku_load"] = await haiku_loader.run_load(
-                        manifest, run_result=dict(result), allow_empty_load=allow_empty_load
-                    )
-                except Exception as e:
-                    logger.exception("haiku load failed for manifest '%s' (%s)", manifest.id, manifest.name)
-                    result["haiku_load_error"] = str(e)
-                    telemetry.fail(span, f"haiku load failed: {type(e).__name__}", e)
             results.append(result)
+            telemetry.record_summary(span, result["summary"])
+            if not result.get("skipped") and load:
+                # A run a pre-run step called off has nothing to load.
+                await _load(manifest, result, span, load_on_error=load_on_error, allow_empty_load=allow_empty_load)
+            report_outcome(manifest, result)
     return results
+
+
+async def _load(manifest: Manifest, result: dict, span, *, load_on_error: bool, allow_empty_load: bool | None) -> None:
+    """Run *manifest*'s haiku load for :func:`run_manifests`, recording it on *result*."""
+    from soliplex.agents.manifest import haiku_loader
+
+    blockers = load_blockers(result)
+    if blockers and not load_on_error:
+        # The download location may be incomplete, and a load would delete
+        # whatever is missing from it.
+        logger.error(
+            "Skipping haiku load for manifest '%s' (source '%s'): run had errors (%s)",
+            manifest.id,
+            manifest.source,
+            describe_blockers(blockers),
+        )
+        result["haiku_load_skipped"] = {"reason": "run had errors", "errors": blockers}
+        telemetry.mark_load_skipped(span, blockers)
+        return
+    try:
+        result["haiku_load"] = await haiku_loader.run_load(
+            manifest, run_result=dict(result), allow_empty_load=allow_empty_load
+        )
+    except Exception as e:
+        logger.exception("haiku load failed for manifest '%s' (%s)", manifest.id, manifest.name)
+        result["haiku_load_error"] = str(e)
+        telemetry.fail(span, f"haiku load failed: {type(e).__name__}", e)
+        return
+    post_process_error = result["haiku_load"].get("post_process_error")
+    if post_process_error:
+        # The step's traceback is already logged where it raised.
+        logger.error(
+            "Post-process failed for manifest '%s' (%s): %s",
+            manifest.id,
+            manifest.name,
+            post_process_error,
+        )
+        telemetry.fail(span, "post-process failed")
+
+
+# Failing URIs named per component in a failure alert; the rest are counted.
+_MAX_ALERT_URIS = 5
+
+
+def _sample_uris(errors: list[dict]) -> str:
+    """The first few failing URIs of *errors*, then how many more."""
+    uris = [str(e.get("uri") or e.get("path") or "?") for e in errors]
+    shown = ", ".join(uris[:_MAX_ALERT_URIS])
+    more = len(uris) - _MAX_ALERT_URIS
+    return f"{shown} and {more} more" if more > 0 else shown
+
+
+def run_failures(result: dict) -> tuple[alerts.Stage | None, list[str]]:
+    """What failed in a manifest run, before any load.
+
+    Args:
+        result: A :func:`run_manifest` result, or a :func:`run_manifests`
+            entry (which carries ``error`` when the run raised).
+
+    Returns:
+        The stage of the failure (``None`` when nothing failed) and one
+        description per failure: each failed component with its error, and
+        each component with file errors with a sample of their URIs.
+    """
+    if "error" in result:
+        return alerts.Stage.RUN, [f"manifest: {result['error']}"]
+    reasons = []
+    for comp in result.get("results") or []:
+        if "error" in comp:
+            reasons.append(f"component {comp['component']}: {comp['error']}")
+            continue
+        errors = (comp.get("result") or {}).get("errors") or []
+        if errors:
+            reasons.append(f"component {comp['component']}: {len(errors)} file errors ({_sample_uris(errors)})")
+    if not reasons:
+        # Counted in the summary without a component entry to name.
+        reasons = [f"{kind}={count}" for kind, count in load_blockers(result).items()]
+    return (alerts.Stage.COMPONENTS if reasons else None), reasons
+
+
+def describe_returncode(returncode: int) -> str:
+    """``rc=2``, or ``killed by SIGKILL (rc=-9)`` for a signal."""
+    if returncode < 0:
+        try:
+            return f"killed by {signal.Signals(-returncode).name} (rc={returncode})"
+        except ValueError:  # pragma: no cover - signal set is platform-specific
+            pass
+    return f"rc={returncode}"
+
+
+def load_failures(load_result: dict | None, load_error: str | None = None) -> tuple[alerts.Stage | None, list[str]]:
+    """What failed in a haiku load and its post-process steps.
+
+    Args:
+        load_result: A :func:`~soliplex.agents.manifest.haiku_loader.run_load`
+            result; ``None`` when no load ran.
+        load_error: Why ``run_load`` raised, when it did.
+
+    Returns:
+        The stage of the first failure (``None`` when nothing failed) and one
+        description per failure. A load skipped over an empty download
+        location is not a failure.
+    """
+    if load_error:
+        return alerts.Stage.HAIKU_LOAD, [f"haiku load: {load_error}"]
+    load = load_result or {}
+    if not load or load.get("skipped"):
+        return None, []
+    reasons = []
+    if load.get("timed_out"):
+        reasons.append("haiku load: timed out")
+    elif load.get("returncode") != 0:
+        reasons.append(f"haiku load: {describe_returncode(load['returncode'])}")
+    stage = alerts.Stage.HAIKU_LOAD if reasons else None
+    if load.get("post_process_error"):
+        reasons.append(load["post_process_error"])
+        stage = stage or alerts.Stage.POST_PROCESS
+    return stage, reasons
+
+
+def failures(result: dict) -> list[str]:
+    """What went wrong in one :func:`run_manifests` result, in run order.
+
+    Empty when the manifest ran cleanly -- including when a pre-run step
+    skipped it, or its load was skipped over an empty download location
+    (both are deliberate). A load skipped *because* the run had errors adds
+    nothing of its own: those errors are already listed.
+
+    Args:
+        result: One entry of :func:`run_manifests`'s result.
+
+    Returns:
+        One short description per failure.
+    """
+    _, reasons = run_failures(result)
+    _, load_reasons = load_failures(result.get("haiku_load"), result.get("haiku_load_error"))
+    return reasons + load_reasons
+
+
+def _completion(result: dict) -> tuple[alerts.Outcome, str | None]:
+    """How a manifest that did not fail finished, and why it stopped short."""
+    skipped = result.get("skipped")
+    if skipped:
+        note = f"{skipped['method']}: {skipped['message']}" if skipped.get("message") else skipped["method"]
+        return alerts.Outcome.SKIPPED, note
+    load = result.get("haiku_load")
+    if load is None:
+        return alerts.Outcome.NO_LOAD, None
+    if load.get("skipped"):
+        return alerts.Outcome.LOAD_SKIPPED_EMPTY, load["skipped"]["reason"]
+    return alerts.Outcome.OK, None
+
+
+def report_outcome(manifest: Manifest, result: dict) -> None:
+    """Emit the operator alert for a finished manifest: failed or completed.
+
+    *result* is a :func:`run_manifests` entry, or a run result with its
+    load's result set as ``haiku_load`` (see :mod:`soliplex.agents.alerts`).
+    """
+    run_stage, reasons = run_failures(result)
+    load_stage, load_reasons = load_failures(result.get("haiku_load"), result.get("haiku_load_error"))
+    if reasons or load_reasons:
+        alerts.manifest_failed(
+            manifest_id=manifest.id,
+            path=manifest.manifest_path,
+            stage=run_stage or load_stage,
+            reasons=reasons + load_reasons,
+            source=manifest.source,
+        )
+        return
+    outcome, note = _completion(result)
+    alerts.manifest_completed(
+        manifest_id=manifest.id,
+        path=manifest.manifest_path,
+        source=manifest.source,
+        outcome=outcome,
+        counts=alerts.completion_counts(result, result.get("haiku_load")),
+        note=note,
+    )
+
+
+def alert_duplicates(pairs: list[tuple[Manifest, str]], duplicates: list[str]) -> None:
+    """Alert on each manifest file whose id another file also declares."""
+    for manifest_id in duplicates:
+        paths = [path for manifest, path in pairs if manifest.id == manifest_id]
+        for path in paths:
+            others = ", ".join(p for p in paths if p != path)
+            alerts.manifest_failed(
+                manifest_id=manifest_id,
+                path=path,
+                stage=alerts.Stage.MANIFEST_FILE,
+                reasons=[f"duplicate manifest id, also declared in {others}"],
+            )
 
 
 def pre_process_report(

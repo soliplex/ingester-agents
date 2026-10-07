@@ -4,8 +4,10 @@ import textwrap
 from unittest.mock import AsyncMock
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
+from soliplex.agents.manifest.cli import _report_manifest
 from soliplex.agents.manifest.cli import cli
 
 runner = CliRunner()
@@ -56,7 +58,7 @@ class TestRun:
         ]
         with patch("soliplex.agents.manifest.runner.run_manifests", new=AsyncMock(return_value=fake)):
             result = runner.invoke(cli, ["run", path])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "comp1: ERROR - boom" in result.output
 
     def test_run_reports_a_skipped_load(self, tmp_path):
@@ -72,7 +74,7 @@ class TestRun:
         ]
         with patch("soliplex.agents.manifest.runner.run_manifests", new=AsyncMock(return_value=fake)):
             result = runner.invoke(cli, ["run", path])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "haiku load: SKIPPED (component_errors=1)" in result.output
 
     def test_run_passes_load_on_error_through(self, tmp_path):
@@ -110,6 +112,42 @@ class TestRun:
             result = runner.invoke(cli, ["run", path])
         assert result.exit_code == 0
         assert "haiku load: SKIPPED (no documents in download location)" in result.output
+
+    def test_run_exits_1_when_a_post_process_step_failed(self, tmp_path):
+        path = _write_manifest(tmp_path)
+        fake = [
+            {
+                "manifest_id": "test-m",
+                "manifest_name": "Test Manifest",
+                "results": [{"component": "comp1", "result": {"ingested": [1], "errors": []}}],
+                "delete_stale_result": [],
+                "summary": {},
+                "haiku_load": {
+                    "db": "/lance/src.lancedb",
+                    "returncode": 0,
+                    "timed_out": False,
+                    "post_process": [
+                        {"method": "pkg:a", "status": "error", "error": "AttributeError: x"},
+                        {"method": "pkg:b", "status": "not_run", "error": None},
+                    ],
+                    "post_process_error": "post-process pkg:a failed: AttributeError: x",
+                },
+            }
+        ]
+        with patch("soliplex.agents.manifest.runner.run_manifests", new=AsyncMock(return_value=fake)):
+            result = runner.invoke(cli, ["run", path, "--load"])
+        assert result.exit_code == 1
+        assert "  haiku load: ok -> /lance/src.lancedb" in result.output
+        assert "  post-process: pkg:a FAILED - AttributeError: x" in result.output
+        assert "  post-process: pkg:b not run" in result.output
+
+    def test_run_json_exits_1_on_failure(self, tmp_path):
+        path = _write_manifest(tmp_path)
+        fake = [{"manifest_id": "test-m", "manifest_name": "Test Manifest", "error": "boom"}]
+        with patch("soliplex.agents.manifest.runner.run_manifests", new=AsyncMock(return_value=fake)):
+            result = runner.invoke(cli, ["run", path, "--json"])
+        assert result.exit_code == 1
+        assert '"error": "boom"' in result.output
 
     def test_run_json_output(self, tmp_path):
         path = _write_manifest(tmp_path)
@@ -343,3 +381,119 @@ class TestMaintenance:
             result = runner.invoke(cli, ["migrate"])
         assert result.exit_code == 1
         assert "Validation error:" in result.output
+
+
+def _result(**extra):
+    return {"manifest_id": "m", "manifest_name": "M", "results": [], "delete_stale_result": None, **extra}
+
+
+def _load(**extra):
+    return {"db": "/lance/src.lancedb", "returncode": 0, "timed_out": False, "post_process": [], **extra}
+
+
+class TestReportManifest:
+    def test_a_manifest_error_ends_the_report(self):
+        assert _report_manifest({"manifest_id": "m", "manifest_name": "M", "error": "boom"}) == [
+            "Manifest: M (m)",
+            "  ERROR - boom",
+        ]
+
+    def test_every_step_in_run_order(self):
+        result = _result(
+            pre_run=[
+                {"method": "pkg:notify", "status": "continue", "message": None},
+                {"method": "pkg:space", "status": "continue", "message": "12 GiB free"},
+                {"method": "pkg:flaky", "status": "error", "message": "RuntimeError: down"},
+            ],
+            results=[
+                {"component": "c1", "result": {"ingested": [1, 2], "errors": []}},
+                {"component": "c2", "error": "boom"},
+            ],
+            delete_stale_result=["a"],
+            pre_process={
+                "checked": 3,
+                "skipped": [{"uri": "u1", "message": "too big"}, {"uri": "u2", "message": None}],
+                "modified": [],
+                "errors": [{"uri": "u3", "message": "ValueError: bad"}],
+            },
+            haiku_load=_load(
+                post_process=[
+                    {"method": "pkg:a", "status": "ok", "error": None},
+                    {"method": "pkg:b", "status": "error", "error": "AttributeError: x"},
+                    {"method": "pkg:c", "status": "not_run", "error": None},
+                ]
+            ),
+        )
+        assert _report_manifest(result) == [
+            "Manifest: M (m)",
+            "  pre-run: pkg:notify continue",
+            "  pre-run: pkg:space continue (12 GiB free)",
+            "  pre-run: pkg:flaky ERROR - RuntimeError: down",
+            "  c1: 2 ingested, 0 errors",
+            "  c2: ERROR - boom",
+            "  deleted (stale): 1",
+            "  pre-process: 3 checked, 2 skipped, 0 modified, 1 errors",
+            "    skipped u1: too big",
+            "    skipped u2",
+            "    error u3: ValueError: bad",
+            "  haiku load: ok -> /lance/src.lancedb",
+            "  post-process: pkg:a ok",
+            "  post-process: pkg:b FAILED - AttributeError: x",
+            "  post-process: pkg:c not run",
+        ]
+
+    def test_a_pre_run_skip_ends_the_report(self):
+        result = _result(
+            pre_run=[{"method": "pkg:gate", "status": "skip", "message": "busy"}],
+            skipped={"method": "pkg:gate", "message": "busy"},
+        )
+        assert _report_manifest(result)[1:] == ["  pre-run: pkg:gate skip (busy)", "  SKIPPED by pkg:gate: busy"]
+
+    def test_a_pre_run_skip_without_a_message(self):
+        assert _report_manifest(_result(skipped={"method": "pkg:gate"}))[1:] == ["  SKIPPED by pkg:gate"]
+
+    def test_stale_removal_skipped_for_component_errors(self):
+        result = _result(summary={"delete_stale_skipped": True})
+        assert "  deleted (stale): SKIPPED (component errors)" in _report_manifest(result)
+
+    def test_no_stale_line_when_delete_stale_is_off(self):
+        assert _report_manifest(_result(summary={})) == ["Manifest: M (m)", "  haiku load: not run (--no-load)"]
+
+    def test_pre_process_line_only_when_something_was_checked(self):
+        pre = {"checked": 0, "skipped": [], "modified": [], "errors": []}
+        assert not any("pre-process" in line for line in _report_manifest(_result(pre_process=pre)))
+
+    @pytest.mark.parametrize(
+        "extra, expected",
+        [
+            pytest.param({}, ["  haiku load: not run (--no-load)"], id="no-load"),
+            pytest.param(
+                {"haiku_load_skipped": {"errors": {"file_errors": 2}}},
+                ["  haiku load: SKIPPED (file_errors=2)"],
+                id="blocked",
+            ),
+            pytest.param({"haiku_load_error": "boom"}, ["  haiku load: ERROR - boom"], id="raised"),
+            pytest.param(
+                {"haiku_load": {"skipped": {"reason": "no documents"}}},
+                ["  haiku load: SKIPPED (no documents)"],
+                id="empty",
+            ),
+            pytest.param(
+                {"haiku_load": _load(returncode=None, timed_out=True)},
+                ["  haiku load: TIMED OUT -> /lance/src.lancedb"],
+                id="timeout",
+            ),
+            pytest.param(
+                {"haiku_load": _load(returncode=3)},
+                ["  haiku load: FAILED (rc=3) -> /lance/src.lancedb"],
+                id="rc",
+            ),
+            pytest.param(
+                {"haiku_load": _load(post_process=None)},
+                ["  haiku load: ok -> /lance/src.lancedb"],
+                id="ok-no-post-process",
+            ),
+        ],
+    )
+    def test_load_lines(self, extra, expected):
+        assert _report_manifest(_result(**extra))[1:] == expected

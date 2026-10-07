@@ -97,7 +97,9 @@ async def test_runs_in_order_with_inject_and_sync_async(monkeypatch):
     results = await post_process.run_post_process(_manifest(steps=steps, source="s1"))
 
     assert [r["ok"] for r in results] == [True, True, True, True]
+    assert [r["status"] for r in results] == ["ok"] * 4
     assert all(r["error"] is None for r in results)
+    assert all(r["duration_s"] >= 0 for r in results)
     # **kwargs accepts config, ingester_exit_code and context -> all injected
     assert calls[0][:2] == ("async", "s1")
     assert calls[0][2]["config"] == "CFG"
@@ -154,13 +156,36 @@ async def test_failing_step_terminates_and_skips_rest(monkeypatch):
     monkeypatch.setattr(post_process, "_resolve_method", lambda spec: registry[spec])
     monkeypatch.setattr(post_process, "resolve_haiku_cfg", lambda manifest: "CFG")
 
-    steps = [PostProcessStep(method="boom"), PostProcessStep(method="later")]
+    steps = [PostProcessStep(method="later"), PostProcessStep(method="boom"), PostProcessStep(method="later")]
 
-    # The error propagates (terminate on error) rather than being swallowed.
-    with pytest.raises(RuntimeError, match="nope"):
+    # The error propagates (terminate on error) rather than being swallowed,
+    # carrying every step's outcome.
+    with pytest.raises(post_process.PostProcessFailed, match="post-process boom failed: RuntimeError: nope") as info:
         await post_process.run_post_process(_manifest(steps=steps))
 
-    assert ran == []  # the step after the failure did not run
+    assert ran == ["src"]  # only the step before the failure ran
+    assert isinstance(info.value.__cause__, RuntimeError)
+    first, failed, skipped = info.value.steps
+    assert (first["method"], first["status"], first["ok"], first["error"]) == ("later", "ok", True, None)
+    assert (failed["method"], failed["status"], failed["ok"]) == ("boom", "error", False)
+    assert failed["error"] == "RuntimeError: nope"
+    assert failed["duration_s"] >= 0
+    assert skipped == {"method": "later", "status": "not_run", "ok": False, "error": None, "duration_s": None}
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_method_is_a_failed_step(monkeypatch):
+    def unresolvable(spec):
+        raise ImportError(f"no module for {spec}")
+
+    monkeypatch.setattr(post_process, "_resolve_method", unresolvable)
+
+    with pytest.raises(post_process.PostProcessFailed) as info:
+        await post_process.run_post_process(_manifest(steps=[PostProcessStep(method="pkg:gone")]))
+
+    (failed,) = info.value.steps
+    assert failed["status"] == "error"
+    assert failed["error"] == "ImportError: no module for pkg:gone"
 
 
 @pytest.mark.asyncio
@@ -195,7 +220,7 @@ async def test_the_failing_step_span_is_an_error_and_later_steps_have_none(monke
     monkeypatch.setattr(post_process, "resolve_haiku_cfg", lambda manifest: "CFG")
     steps = [PostProcessStep(method="pkg:boom"), PostProcessStep(method="pkg:later")]
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(post_process.PostProcessFailed):
         await post_process.run_post_process(_manifest(steps=steps))
 
     (failed,) = spans.named("post-process")

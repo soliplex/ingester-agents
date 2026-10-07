@@ -30,6 +30,7 @@ from collections.abc import Iterable
 from collections.abc import Mapping
 from typing import Any
 
+from soliplex.agents import alerts
 from soliplex.agents import haiku_backfill
 from soliplex.agents.config import Manifest
 from soliplex.agents.config import settings
@@ -44,6 +45,8 @@ logger = logging.getLogger(__name__)
 # The maintenance verbs exposed as `si-agent manifest <verb>`.
 BACKFILL_VERB = "backfill-metadata"
 MAINTENANCE_VERBS = ("migrate", "vacuum", BACKFILL_VERB)
+# The verbs whose failures raise an operator alert, and the stage each reports.
+ALERT_STAGES = {"migrate": alerts.Stage.MIGRATE, "vacuum": alerts.Stage.VACUUM}
 
 
 def build_maintenance_argv(verb: str, haiku_cfg: str | None, db: str, source: str) -> list[str]:
@@ -285,7 +288,10 @@ async def run_maintenance(
     Operations run **strictly sequentially** -- the same capacity constraint
     that applies to haiku-rag loads means only one ``haiku-rag`` process may
     run at a time. A failure for one manifest is isolated to that manifest:
-    it is logged and recorded, and the remaining manifests still run.
+    it is logged and recorded, and the remaining manifests still run. Once
+    every target has run, ``migrate`` and ``vacuum`` raise an operator alert
+    for each manifest that failed (see :func:`alert_failures`); a dry run
+    raises none.
 
     Args:
         verb: Maintenance verb (``"migrate"`` or ``"vacuum"``).
@@ -334,4 +340,42 @@ async def run_maintenance(
             results.append(base | {"error": str(e)})
             continue
         results.append(base | result)
+    if not dry_run:
+        alert_failures(verb, manifests, results)
     return results
+
+
+def maintenance_failure(verb: str, result: dict) -> str | None:
+    """Why *verb* failed for one :func:`run_maintenance` result; ``None`` if it didn't."""
+    from soliplex.agents.manifest import runner
+
+    if "error" in result:
+        return f"haiku {verb}: {result['error']}"
+    if "skipped" in result:
+        return None
+    if result["timed_out"]:
+        return f"haiku {verb}: timed out after {result['timeout']}s"
+    if result["returncode"] != 0:
+        return f"haiku {verb}: {runner.describe_returncode(result['returncode'])}"
+    return None
+
+
+def alert_failures(verb: str, manifests: list[Manifest], results: list[dict]) -> None:
+    """Raise an operator alert for each manifest *verb* failed on.
+
+    Only for the verbs in :data:`ALERT_STAGES`. *results* holds one entry per
+    manifest, in the same order (see :func:`plan_targets`).
+    """
+    stage = ALERT_STAGES.get(verb)
+    if stage is None:
+        return
+    for manifest, result in zip(manifests, results, strict=True):
+        reason = maintenance_failure(verb, result)
+        if reason is not None:
+            alerts.manifest_failed(
+                manifest_id=manifest.id,
+                path=manifest.manifest_path,
+                stage=stage,
+                reasons=[reason],
+                source=manifest.source,
+            )

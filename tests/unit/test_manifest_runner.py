@@ -1004,6 +1004,36 @@ class TestRunManifests:
         assert "haiku_load" not in results[0]
 
     @pytest.mark.asyncio
+    async def test_a_failed_post_process_is_logged_once_and_fails_the_span(self, tmp_path, caplog, spans):
+        f = tmp_path / "test.yml"
+        f.write_text(
+            textwrap.dedent("""            id: test
+            name: Test
+            source: src
+            components:
+              - type: fs
+                name: c
+                path: /data
+        """)
+        )
+        load = {"returncode": 0, "timed_out": False, "post_process": [], "post_process_error": "post-process x failed"}
+        with (
+            patch("soliplex.agents.manifest.runner.run_manifest", new_callable=AsyncMock) as mock_run,
+            patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock, return_value=load),
+            caplog.at_level(logging.INFO, logger="soliplex.agents.manifest.runner"),
+        ):
+            mock_run.return_value = {"manifest_id": "test", "results": [], "summary": {}}
+            results = await runner.run_manifests(str(f), load=True)
+        assert results[0]["haiku_load"] is load
+        assert "haiku_load_error" not in results[0]
+        (record,) = [r for r in caplog.records if r.levelno == logging.ERROR and r.name == runner.__name__]
+        assert record.getMessage() == "Post-process failed for manifest 'test' (Test): post-process x failed"
+        assert record.exc_info is None  # the traceback was logged where the step raised
+        (run,) = spans.named("manifest run")
+        assert run.status.status_code is StatusCode.ERROR
+        assert run.status.description == "post-process failed"
+
+    @pytest.mark.asyncio
     async def test_nonexistent_path(self):
         with pytest.raises(FileNotFoundError, match="not found"):
             await runner.run_manifests("/nonexistent/path")
@@ -2065,6 +2095,7 @@ class TestRunManifestsLoadGate:
             patch("soliplex.agents.manifest.haiku_loader.run_load", new_callable=AsyncMock) as mock_load,
         ):
             mock_run.return_value = {"manifest_id": "test", "results": [], "summary": {"component_errors": 1}}
+            mock_load.return_value = {}
             await runner.run_manifests(str(f), load=True)
         assert mock_load.await_count == (1 if setting else 0)
 
@@ -2345,3 +2376,39 @@ class TestErrorOnEmptyIncrementalSCM:
         assert any(r.getMessage() == "Error running component r" and r.exc_info for r in caplog.records)
         (list_span,) = spans.named("list scm uris")
         assert list_span.status.description == "component failed: RuntimeError"
+
+
+# --- failures ---
+
+
+@pytest.mark.parametrize(
+    "result, expected",
+    [
+        pytest.param({"error": "boom"}, ["manifest: boom"], id="manifest-error"),
+        pytest.param({"skipped": {"method": "m"}, "summary": {"skipped": True}}, [], id="pre-run-skip"),
+        pytest.param({"summary": {}}, [], id="no-load"),
+        pytest.param(
+            {"summary": {"component_errors": 1, "file_errors": 2}, "haiku_load_skipped": {}},
+            ["component_errors=1", "file_errors=2"],
+            id="blockers",
+        ),
+        pytest.param({"summary": {}, "haiku_load_error": "x"}, ["haiku load: x"], id="load-raised"),
+        pytest.param({"summary": {}, "haiku_load": {"skipped": {"reason": "empty"}}}, [], id="empty-skip"),
+        pytest.param({"summary": {}, "haiku_load": {"returncode": 0, "timed_out": False}}, [], id="load-ok"),
+        pytest.param(
+            {"summary": {}, "haiku_load": {"returncode": None, "timed_out": True}},
+            ["haiku load: timed out"],
+            id="load-timeout",
+        ),
+        pytest.param(
+            {"summary": {}, "haiku_load": {"returncode": 2, "timed_out": False}}, ["haiku load: rc=2"], id="load-rc"
+        ),
+        pytest.param(
+            {"summary": {}, "haiku_load": {"returncode": 0, "timed_out": False, "post_process_error": "pp"}},
+            ["pp"],
+            id="post-process",
+        ),
+    ],
+)
+def test_failures(result, expected):
+    assert runner.failures(result) == expected

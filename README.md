@@ -285,6 +285,75 @@ The file covers this process only. The `haiku-ingester` and `haiku-rag`
 subprocesses configure their own logging; their output reaches this process's
 log through the `soliplex.agents.manifest.haiku_process` logger.
 
+### Operator alerts
+
+The `soliplex.agents.alerts` logger carries one record per manifest run, so
+an operator can be told when a manifest needs attention without routing every
+error line to them. Each run ends in exactly one of:
+
+- **`manifest_failed`** (ERROR):
+  `Manifest '<id>' (<path>) needs attention: <stage>: <reason>; <reason>`.
+  The path is the manifest file, made absolute. `stage` is where the first
+  failure happened, and the reasons list every failure in the run:
+
+  | `stage` | Raised when |
+  |---|---|
+  | `manifest_file` | a manifest file is invalid, or shares its id with another file |
+  | `run` | the run raised (a pre-run step failing under `on_error: fail`, ...) |
+  | `components` | a component failed, or files failed to download; failing URIs are sampled |
+  | `haiku_load` | the load raised, exited non-zero, was killed, or timed out |
+  | `post_process` | a post-process step raised |
+  | `migrate` / `vacuum` | `manifest migrate` / `manifest vacuum` failed on the manifest's database |
+
+- **`manifest_completed`** (INFO):
+  `Manifest '<id>' (<path>) completed: 239 ingested, 4 deleted, load ok`.
+  `outcome` is `ok`, `no_load` (no load requested), `skipped` (a pre-run step
+  returned SKIP) or `load_skipped_empty` (the download location was empty),
+  and `note` says why a run stopped short.
+
+Under the server, a run whose load is queued is reported when the load (and
+its post-process steps) finishes. The one exception is a run with errors whose
+load `HAIKU_LOAD_ON_ERROR` lets through: the run's failure is reported
+straight away, and a load that then fails as well is reported separately.
+An invalid manifest file, or a duplicate id, is reported once per change, not
+on every reconcile tick. `manifest migrate` and `manifest vacuum` report each
+failed database once the verb has finished; `--dry-run` reports nothing.
+
+Neither record carries a traceback, since that is logged by the module that
+caught the error. The fields are also set on the record (`alert`,
+`manifest_id`, `manifest_path`, `manifest_source`, `stage` / `reasons` or
+`outcome` / `counts` / `note`), so `LOG_FORMAT=json` writes them out as
+fields.
+
+Route the logger in the `LOG_CONFIG_FILE`. The records also propagate to the
+root handlers (console, Logfire) unless `propagate: false` is set:
+
+```yaml
+version: 1
+handlers:
+  alerts:
+    class: logging.handlers.QueueHandler
+    listener: logging.handlers.QueueListener
+    handlers: [alerts_mail]
+    queue: {(): queue.Queue, maxsize: 1000}
+  alerts_mail:
+    class: logging.handlers.SMTPHandler
+    mailhost: [smtp.example.com, 587]
+    fromaddr: ingester@example.com
+    toaddrs: [oncall@example.com]
+    subject: "Ingester: manifest needs attention"
+    level: ERROR                       # failures only; INFO adds completions
+loggers:
+  soliplex.agents.alerts:
+    level: INFO
+    handlers: [alerts]
+```
+
+Prefer a handler of its own, as above, to the built-in `SMTP_*` settings: the
+built-in handler is on the root logger, and it drops every record that arrives
+within `SMTP_COOLDOWN` of the last one, so an alert can be lost behind a burst
+of errors.
+
 ### Tracing with Logfire
 
 With a Logfire token (`LOGFIRE_TOKEN`, or the `logfire_token` secret at
@@ -818,6 +887,27 @@ Output results as JSON:
 ```bash
 si-agent manifest run /path/to/manifest.yml --json
 ```
+
+The text report has a line per step, in the order the steps ran: pre-run
+steps, components, stale removal, pre-process, the haiku load, then each
+post-process step (`ok`, `FAILED - <error>`, or `not run` after an earlier
+failure):
+
+```text
+Manifest: Docs (docs)
+  pre-run: soliplex.agents.manifest.pre_run_steps:check_free_space continue
+  docs: 239 ingested, 0 errors
+  deleted (stale): 4
+  pre-process: 39 checked, 0 skipped, 5 modified, 0 errors
+  haiku load: ok -> /data/lancedb/docs.lancedb
+  post-process: mypkg.steps:tag FAILED - AttributeError: 'NoneType' object has no attribute 'splitlines'
+  post-process: soliplex.agents.manifest.post_processors:vacuum not run
+```
+
+`manifest run` exits 1 when any manifest failed: the run raised, a
+component or file failed, the load raised, exited non-zero or timed out, or
+a post-process step raised. A manifest a pre-run step skipped, or a load
+skipped over an empty download location, is not a failure.
 
 Maintain the databases those manifests load into (see
 [Database Maintenance](#database-maintenance)):
@@ -1671,11 +1761,14 @@ config:
   `pre_run` and `pre_process` outcomes. Under the server, loads are queued, so
   a later run of the same manifest may already have started by the time a
   load's callbacks fire.
-- **Terminate on error:** a step that raises is logged and the exception
-  propagates — the remaining steps do **not** run. The per-step outcomes are
-  returned under the load result's `post_process` key only when every step
-  succeeds. In a batch/directory run the failure is isolated to that manifest
-  (recorded as `haiku_load_error` on its result); the other manifests still run.
+- **Terminate on error:** a step that raises is logged (with its traceback)
+  and the remaining steps do **not** run. The load result's `post_process` key
+  always holds one outcome per configured step -- `{"method", "status", "ok",
+  "error", "duration_s"}` with `status` `ok`, `error` or `not_run` -- and a
+  failure also sets `post_process_error` on the load result, which keeps the
+  load's own `returncode` / `db`. The manifest's span is failed and
+  `manifest run` exits 1; in a batch/directory run the other manifests still
+  run.
 - **Requires a load:** post-process only runs when a load runs — it is skipped
   with `--no-load`.
 
@@ -2467,6 +2560,7 @@ soliplex.agents/
 │   ├── local_store.py      # Writes downloaded documents + .meta.json sidecars
 │   ├── local_state.py      # Per-source SQLite sync state (hashes + commit SHA)
 │   ├── config.py           # Configuration, settings, and manifest models
+│   ├── alerts.py           # Operator alert logger (one record per manifest run)
 │   ├── haiku_metadata.py   # haiku-rag metadata providers (sidecar, PDF, combined)
 │   ├── haiku_backfill.py   # Re-runs metadata providers over indexed documents
 │   ├── server/             # FastAPI server

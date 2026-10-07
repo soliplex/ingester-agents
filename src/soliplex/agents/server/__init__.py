@@ -16,6 +16,7 @@ from fastapi import APIRouter
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from soliplex.agents import alerts
 from soliplex.agents import telemetry
 from soliplex.agents.config import configure_logging
 from soliplex.agents.config import settings
@@ -81,6 +82,12 @@ def _report_invalid(invalid: dict[str, str]) -> None:
             entry.manifest_id if entry else "unknown",
             error,
         )
+        alerts.manifest_failed(
+            manifest_id=entry.manifest_id if entry else None,
+            path=path,
+            stage=alerts.Stage.MANIFEST_FILE,
+            reasons=[f"invalid manifest: {error}"],
+        )
     for path in [p for p in reported if p not in invalid]:
         del reported[path]
         if Path(path).exists():
@@ -129,6 +136,7 @@ async def reconcile_manifest_schedules() -> None:
                 "Duplicate manifest IDs found: %s; skipping reconcile until resolved",
                 scan.duplicates,
             )
+            manifest_runner.alert_duplicates(scan.pairs, scan.duplicates)
             _reconcile_log.duplicates = scan.duplicates
         return
     if _reconcile_log.duplicates:

@@ -650,6 +650,8 @@ class Manifest(_ManifestModel):
     config: ManifestConfig | None = None
     components: list[Component]
     manifest_dir: str | None = Field(default=None, exclude=True)
+    # The file it was loaded from, for operator alerts (see soliplex.agents.alerts).
+    manifest_path: str | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def validate_unique_component_names(self):

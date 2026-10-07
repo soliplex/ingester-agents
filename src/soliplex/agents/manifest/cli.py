@@ -60,41 +60,92 @@ def run(
         print(json.dumps(results, indent=2, default=str))
     else:
         for manifest_result in results:
-            print(f"\nManifest: {manifest_result['manifest_name']} ({manifest_result['manifest_id']})")
-            skipped = manifest_result.get("skipped")
-            if skipped:
-                reason = f": {skipped['message']}" if skipped.get("message") else ""
-                print(f"  SKIPPED by {skipped['method']}{reason}")
-                continue
-            for comp in manifest_result.get("results", []):
-                name = comp["component"]
-                if "error" in comp:
-                    print(f"  {name}: ERROR - {comp['error']}")
-                else:
-                    result = comp.get("result", {})
-                    ingested = len(result.get("ingested", []))
-                    errors = len(result.get("errors", []))
-                    print(f"  {name}: {ingested} ingested, {errors} errors")
-            # Stale removal is reconciled once per manifest (over all
-            # components); report the count when delete_stale ran.
-            deleted = manifest_result.get("delete_stale_result")
-            if deleted is not None:
-                print(f"  deleted (stale): {len(deleted)}")
-            pre = manifest_result.get("pre_process")
-            if pre and pre["checked"]:
-                print(
-                    f"  pre-process: {pre['checked']} checked, {len(pre['skipped'])} skipped, "
-                    f"{len(pre['modified'])} modified, {len(pre['errors'])} errors"
-                )
-                for item in pre["skipped"]:
-                    reason = f": {item['message']}" if item.get("message") else ""
-                    print(f"    skipped {item['uri']}{reason}")
-            load_skipped = manifest_result.get("haiku_load_skipped")
-            if load_skipped:
-                print(f"  haiku load: SKIPPED ({runner.describe_blockers(load_skipped['errors'])})")
-            empty_skip = (manifest_result.get("haiku_load") or {}).get("skipped")
-            if empty_skip:
-                print(f"  haiku load: SKIPPED ({empty_skip['reason']})")
+            print()
+            for line in _report_manifest(manifest_result):
+                print(line)
+    if any(runner.failures(result) for result in results):
+        raise SystemExit(1)
+
+
+def _report_manifest(result: dict) -> list[str]:
+    """The text report for one manifest run: a line per step, in run order."""
+    lines = [f"Manifest: {result['manifest_name']} ({result['manifest_id']})"]
+    if "error" in result:
+        lines.append(f"  ERROR - {result['error']}")
+        return lines
+    for step in result.get("pre_run") or []:
+        if step["status"] == "error":
+            lines.append(f"  pre-run: {step['method']} ERROR - {step['message']}")
+        else:
+            message = f" ({step['message']})" if step.get("message") else ""
+            lines.append(f"  pre-run: {step['method']} {step['status']}{message}")
+    skipped = result.get("skipped")
+    if skipped:
+        reason = f": {skipped['message']}" if skipped.get("message") else ""
+        lines.append(f"  SKIPPED by {skipped['method']}{reason}")
+        return lines
+    for comp in result.get("results", []):
+        name = comp["component"]
+        if "error" in comp:
+            lines.append(f"  {name}: ERROR - {comp['error']}")
+        else:
+            comp_result = comp.get("result", {})
+            ingested = len(comp_result.get("ingested", []))
+            errors = len(comp_result.get("errors", []))
+            lines.append(f"  {name}: {ingested} ingested, {errors} errors")
+    # Stale removal is reconciled once per manifest (over all components);
+    # report the count when delete_stale ran, and say so when errors stopped it.
+    deleted = result.get("delete_stale_result")
+    if deleted is not None:
+        lines.append(f"  deleted (stale): {len(deleted)}")
+    elif (result.get("summary") or {}).get("delete_stale_skipped"):
+        lines.append("  deleted (stale): SKIPPED (component errors)")
+    pre = result.get("pre_process")
+    if pre and pre["checked"]:
+        lines.append(
+            f"  pre-process: {pre['checked']} checked, {len(pre['skipped'])} skipped, "
+            f"{len(pre['modified'])} modified, {len(pre['errors'])} errors"
+        )
+        for item in pre["skipped"]:
+            reason = f": {item['message']}" if item.get("message") else ""
+            lines.append(f"    skipped {item['uri']}{reason}")
+        for item in pre["errors"]:
+            lines.append(f"    error {item['uri']}: {item['message']}")
+    lines.extend(_report_load(result))
+    return lines
+
+
+def _report_load(result: dict) -> list[str]:
+    """The haiku load line, then a line per post-process step.
+
+    A requested load always leaves one of ``haiku_load_skipped``,
+    ``haiku_load_error`` or ``haiku_load`` on the result; none means no load
+    was asked for.
+    """
+    load_skipped = result.get("haiku_load_skipped")
+    if load_skipped:
+        return [f"  haiku load: SKIPPED ({runner.describe_blockers(load_skipped['errors'])})"]
+    if result.get("haiku_load_error"):
+        return [f"  haiku load: ERROR - {result['haiku_load_error']}"]
+    haiku_load = result.get("haiku_load")
+    if haiku_load is None:
+        return ["  haiku load: not run (--no-load)"]
+    if haiku_load.get("skipped"):
+        return [f"  haiku load: SKIPPED ({haiku_load['skipped']['reason']})"]
+    if haiku_load["timed_out"]:
+        lines = [f"  haiku load: TIMED OUT -> {haiku_load['db']}"]
+    elif haiku_load["returncode"] == 0:
+        lines = [f"  haiku load: ok -> {haiku_load['db']}"]
+    else:
+        lines = [f"  haiku load: FAILED (rc={haiku_load['returncode']}) -> {haiku_load['db']}"]
+    for step in haiku_load.get("post_process") or []:
+        if step["status"] == "error":
+            lines.append(f"  post-process: {step['method']} FAILED - {step['error']}")
+        elif step["status"] == "not_run":
+            lines.append(f"  post-process: {step['method']} not run")
+        else:
+            lines.append(f"  post-process: {step['method']} ok")
+    return lines
 
 
 _PATH_HELP = "Manifest YAML file, directory of manifests, or 'all' for every manifest in MANIFEST_DIR"
