@@ -353,6 +353,7 @@ class TestManifestRunSpan:
             loaded["span"] = trace.get_current_span().get_span_context()
             loaded["queue_wait_s"] = queue_wait_s
             loaded["run_result"] = run_result
+            return {}
 
         manifest_queue.start_worker()
         haiku_queue.start_worker()
@@ -384,3 +385,28 @@ class TestManifestRunSpan:
         assert loaded["queue_wait_s"] >= 0
         # So is the run that queued it, for post-process callbacks.
         assert loaded["run_result"] == {"results": [], "summary": {}}
+
+
+class TestHaikuQueue:
+    @pytest.mark.asyncio
+    async def test_a_failed_post_process_is_logged_once(self, caplog):
+        from soliplex.agents.config import Manifest
+
+        manifest = Manifest(id="m", name="M", source="src", components=[{"type": "fs", "name": "c", "path": "/data"}])
+        haiku_queue.start_worker()
+        try:
+            with (
+                patch(
+                    "soliplex.agents.manifest.haiku_loader.run_load",
+                    new_callable=AsyncMock,
+                    return_value={"returncode": 0, "timed_out": False, "post_process_error": "post-process x failed"},
+                ),
+                caplog.at_level(logging.INFO, logger="soliplex.agents.server.haiku_queue"),
+            ):
+                await haiku_queue.enqueue_load(manifest)
+                await asyncio.wait_for(haiku_queue._queue.join(), timeout=5)
+        finally:
+            await haiku_queue.stop_worker()
+        (record,) = [r for r in caplog.records if r.levelno == logging.ERROR and r.name == haiku_queue.__name__]
+        assert record.getMessage() == "Post-process failed for 'src': post-process x failed"
+        assert record.exc_info is None

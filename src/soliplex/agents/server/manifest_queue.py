@@ -20,8 +20,10 @@ import time
 
 from opentelemetry import trace
 
+from soliplex.agents import alerts
 from soliplex.agents import telemetry
 from soliplex.agents.config import settings
+from soliplex.agents.manifest.callables import describe_error
 
 from .haiku_queue import enqueue_load
 
@@ -91,7 +93,12 @@ async def run_manifest_now(manifest_id: str, path: str) -> None:
     :func:`~soliplex.agents.manifest.runner.load_blockers`), unless
     ``settings.haiku_load_on_error`` says otherwise.
 
-    Raises on failure; the worker owns the logging and recovery. Runs inside
+    Each run ends in an operator alert (see :mod:`soliplex.agents.alerts`):
+    a failure as soon as it is known, a completion here when nothing more is
+    to come -- a pre-run SKIP, or loading disabled -- and otherwise from
+    :mod:`.haiku_queue` once the queued load has finished.
+
+    Raises on failure, having alerted; the worker owns the logging and recovery. Runs inside
     the worker's manifest span, which it describes once the file has loaded
     and finishes with the run's outcome counts. The haiku load is queued from
     inside that span, so the load's spans join the same trace.
@@ -103,19 +110,44 @@ async def run_manifest_now(manifest_id: str, path: str) -> None:
     from soliplex.agents.manifest import runner as manifest_runner
 
     span = trace.get_current_span()
-    loaded = manifest_runner.load_manifest(path)
+    try:
+        loaded = manifest_runner.load_manifest(path)
+    except Exception as e:
+        # The file broke after the scan that queued it.
+        alerts.manifest_failed(
+            manifest_id=manifest_id,
+            path=path,
+            stage=alerts.Stage.MANIFEST_FILE,
+            reasons=[f"invalid manifest: {describe_error(e)}"],
+        )
+        raise
     telemetry.describe_manifest(span, loaded)
-    result = await manifest_runner.run_manifest(loaded)
+    try:
+        result = await manifest_runner.run_manifest(loaded)
+    except Exception as e:
+        alerts.manifest_failed(
+            manifest_id=manifest_id,
+            path=path,
+            stage=alerts.Stage.RUN,
+            reasons=[describe_error(e)],
+            source=loaded.source,
+        )
+        raise
     telemetry.record_summary(span, result["summary"])
     if result.get("skipped"):
         # A pre-run step called the run off: nothing ran, so nothing to load.
         logger.info("Manifest '%s' skipped by pre-run; no haiku load queued", manifest_id)
+        manifest_runner.report_outcome(loaded, result)
         return
     logger.info(
         "Manifest '%s' completed: %d components",
         manifest_id,
         len(result.get("results", [])),
     )
+    _, run_reasons = manifest_runner.run_failures(result)
+    if run_reasons or not settings.haiku_load_enabled:
+        # A failure, or a completion with no load to wait for.
+        manifest_runner.report_outcome(loaded, result)
     if settings.haiku_load_enabled:
         blockers = manifest_runner.load_blockers(result)
         if blockers and not settings.haiku_load_on_error:

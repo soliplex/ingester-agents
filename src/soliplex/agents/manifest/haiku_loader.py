@@ -201,7 +201,9 @@ async def run_load(
     Returns:
         Dict with ``source``, ``db``, ``returncode`` (``None`` on timeout or
         when skipped), ``timed_out``, the captured ``stdout``/``stderr``,
-        ``post_process`` and, when the load did not start, ``skipped``.
+        ``post_process`` (one outcome per step), ``post_process_error`` when
+        a post-process step raised, and, when the load did not start,
+        ``skipped``.
     """
     source = manifest.source
     haiku_cfg = resolve_haiku_cfg(manifest)
@@ -252,12 +254,22 @@ async def run_load(
             "haiku.queue_wait_s": queue_wait_s,
         },
     )
-    return {
+    result = {
         "source": source,
         "db": db,
         "returncode": run.returncode,
         "stdout": run.stdout,
         "stderr": run.stderr,
         "timed_out": run.timed_out,
-        "post_process": await _run_post_process(manifest, run, run_result),
+        "post_process": [],
     }
+    from soliplex.agents.manifest.post_process import PostProcessFailed  # circular import
+
+    try:
+        result["post_process"] = await _run_post_process(manifest, run, run_result)
+    except PostProcessFailed as e:
+        # Already logged, with its traceback, where it was raised; keep the
+        # load's own outcome and every step's alongside the error.
+        result["post_process"] = e.steps
+        result["post_process_error"] = str(e)
+    return result
