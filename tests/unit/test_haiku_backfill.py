@@ -746,16 +746,33 @@ async def _seed_attachments(config_path: Path) -> None:
             rows.append((nested.uri, nested.content_type, nested.content_hash, attachment.uri))
     async with HaikuRAG(config=config) as client:
         ids = []
+        children = []
         for uri, content_type, md5, parent in rows:
-            metadata = {"content_type": content_type, "md5": md5} | ({"parent_uri": parent} if parent else {})
             doc = await client.import_document(
                 DoclingDocument(name=uri),
                 [Chunk(content=uri, embedding=[0.1, 0.2, 0.3, 0.4])],
                 uri=uri,
-                metadata=metadata,
+                metadata={"content_type": content_type, "md5": md5},
             )
             ids.append(doc.id)
+            if parent:
+                doc.metadata = {**(doc.metadata or {}), "parent_uri": parent}
+                children.append(doc)
         await client.set_document_source(ids[:1], "demo")
+        await _link_attachments(client, children)
+
+
+async def _link_attachments(client, children: list) -> None:
+    """Store each child's ``parent_uri`` as haiku-rag's ingestion does.
+
+    Since haiku-rag 0.94 ``parent_uri`` is ingestion-owned: every public write
+    path (``import_document`` included) drops it from the caller's metadata,
+    and only attachment extraction sets it. This writes it the way
+    ``set_document_source`` writes ``source_id``, below the public API.
+    """
+    session = client._single_session("link attachments")
+    async with session.store._write_lock:
+        await session.document_repository.update_meta_all(children)
 
 
 def test_main_fills_attachments(database, capsys):
