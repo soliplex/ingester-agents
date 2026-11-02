@@ -2118,11 +2118,14 @@ documents of their own; [back-fill](#pdf-attachments) them.
 Both example configs in `example-haiku-configs/` name `soliplex-metadata`:
 
 ```yaml
-  sources:
-    - type: fs
-      id: ${SOURCE}
-      root: ${DOWNLOAD_DIR}/${SOURCE}
-      metadata_provider: soliplex-metadata
+ingester:
+  databases:
+    db:
+      sources:
+        - type: fs
+          id: ${SOURCE}
+          root: ${DOWNLOAD_DIR}/${SOURCE}
+          metadata_provider: soliplex-metadata
 ```
 
 #### Sidecar metadata
