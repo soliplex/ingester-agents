@@ -1,6 +1,6 @@
 [project]
 name = "soliplex.agents"
-version = "0.11.1"
+version = "0.12.0"
 description = "Agents for use with haiku-ingester and soliplex"
 authors = [{ name = "Enfold Systems", email = "info@enfoldsystems.net" }]
 readme = "README.md"
@@ -33,11 +33,21 @@ dependencies = [
     "typer>=0.21.1",
     "uvicorn[standard]>=0.34.0",
     "pyyaml>=6.0",
-    "haiku-rag[ingester]>=0.82.0",
+    "haiku-rag-slim[ingester]>=0.105.0",
     "pypdfium2>=4.0",
     "puremagic>=2.2.0",
     "obstore>=0.9.5",
     "opentelemetry-api>=1.44.0",
+]
+
+[project.optional-dependencies]
+# Everything the full haiku-rag adds over haiku-rag-slim: local docling
+# conversion and chunking, the cohere / zeroentropy / jina / cross-encoder
+# rerankers, voyageai embeddings, and the chat / inspect TUI.  Only needed
+# when the haiku config uses one of those instead of docling-serve and a
+# remote (e.g. vllm or OpenAI-compatible) embedder and reranker.
+full = [
+    "haiku-rag[ingester]>=0.82.0",
 ]
 
 

@@ -560,7 +560,12 @@ async def _run(args: argparse.Namespace) -> Summary:
         raise SystemExit("no haiku-rag config found; pass --config")
     config = AppConfig.model_validate(load_yaml_config(config_path))
     database = _database_name(config, args.db_name)
-    configs = config.ingester.sources
+    # The sources ingested into *database*: their ids are the source_ids
+    # stamped on its documents, and each names that source's provider.
+    ingested = config.ingester.databases.get(database)
+    if ingested is None:
+        raise SystemExit(f"ingester.databases names no sources for {database!r}")
+    configs = ingested.sources
     sources = [build_source(cfg) for cfg in configs]
     try:
         providers = build_providers(
