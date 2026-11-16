@@ -105,21 +105,25 @@ ingester:
       max_delay_s: 300.0
       jitter: 0.25
 
-  sources:
-    - type: fs
-      # Keep `id` pinned to ${SOURCE}: haiku derives it from the root
-      # otherwise, and a derived id changes when the path does.
-      id: ${SOURCE}
-      # ${DOWNLOAD_DIR} arrives resolved (absolute), so it names the folder the
-      # agent wrote to whatever HAIKU_LOAD_CWD is. Not ${DOWNLOAD_URI}: `root`
-      # is a plain path, and a file:// URI would be read as a relative path
-      # that doesn't exist -- which haiku walks as empty.
-      root: ${DOWNLOAD_DIR}/${SOURCE}
-      poll_interval_s: 300
-      delete_orphans: true
-      # Adds each document's .meta.json sidecar (source_uri, source_url,
-      # manifest metadata, ...) and, for a PDF, its page_count and own
-      # title/author/dates/... to its metadata (soliplex.agents.haiku_metadata).
-      metadata_provider: soliplex-metadata
-      include_patterns: ["*.md", "*.pdf", "*.adoc", "*.pptx", "*.puml", "*.plantuml", "*.asciidoc", "*.docx", "*.xlsx", "*.ppsx", "*.txt", "*.csv"]
-      ignore_patterns: ["*.json", "*.meta.json"]
+  databases:
+    # The database the sources are ingested into: the same name as in
+    # lancedb.databases.
+    db:
+      sources:
+        - type: fs
+          # Keep `id` pinned to ${SOURCE}: haiku derives it from the root
+          # otherwise, and a derived id changes when the path does.
+          id: ${SOURCE}
+          # ${DOWNLOAD_DIR} arrives resolved (absolute), so it names the folder the
+          # agent wrote to whatever HAIKU_LOAD_CWD is. Not ${DOWNLOAD_URI}: `root`
+          # is a plain path, and a file:// URI would be read as a relative path
+          # that doesn't exist -- which haiku walks as empty.
+          root: ${DOWNLOAD_DIR}/${SOURCE}
+          poll_interval_s: 300
+          delete_orphans: true
+          # Adds each document's .meta.json sidecar (source_uri, source_url,
+          # manifest metadata, ...) and, for a PDF, its page_count and own
+          # title/author/dates/... to its metadata (soliplex.agents.haiku_metadata).
+          metadata_provider: soliplex-metadata
+          include_patterns: ["*.md", "*.pdf", "*.adoc", "*.pptx", "*.puml", "*.plantuml", "*.asciidoc", "*.docx", "*.xlsx", "*.ppsx", "*.txt", "*.csv"]
+          ignore_patterns: ["*.json", "*.meta.json"]

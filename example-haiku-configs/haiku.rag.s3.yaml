@@ -112,23 +112,27 @@ ingester:
       max_delay_s: 300.0
       jitter: 0.25
 
-  sources:
-    - type: s3
-      id: ${SOURCE}
-      # ${DOWNLOAD_URI} is the agent's own resolved location for this source
-      # (s3://<bucket>/<prefix>/<source>), so this reads exactly what the
-      # manifest run just produced. Don't rebuild it from
-      # ${DOWNLOAD_S3_BUCKET}${DOWNLOAD_DIR}/${SOURCE}: that joins raw text,
-      # while the agent normalizes the slashes, and a spelling such as
-      # s3://bucket/prefix/ or a DOWNLOAD_DIR without a leading slash makes
-      # this list an empty prefix -- and delete_orphans then removes every
-      # document of the source.
-      uri: ${DOWNLOAD_URI}
-      poll_interval_s: 300
-      delete_orphans: true
-      # Adds each document's .meta.json sidecar (source_uri, source_url,
-      # manifest metadata, ...) and, for a PDF, its page_count and own
-      # title/author/dates/... to its metadata (soliplex.agents.haiku_metadata).
-      metadata_provider: soliplex-metadata
-      include_patterns: ["*.md", "*.pdf", "*.adoc", "*.pptx", "*.puml", "*.plantuml", "*.asciidoc", "*.docx", "*.xlsx", "*.ppsx", "*.txt", "*.csv"]
-      ignore_patterns: ["*.json", "*.meta.json"]
+  databases:
+    # The database the sources are ingested into: the same name as in
+    # lancedb.databases.
+    db:
+      sources:
+        - type: s3
+          id: ${SOURCE}
+          # ${DOWNLOAD_URI} is the agent's own resolved location for this source
+          # (s3://<bucket>/<prefix>/<source>), so this reads exactly what the
+          # manifest run just produced. Don't rebuild it from
+          # ${DOWNLOAD_S3_BUCKET}${DOWNLOAD_DIR}/${SOURCE}: that joins raw text,
+          # while the agent normalizes the slashes, and a spelling such as
+          # s3://bucket/prefix/ or a DOWNLOAD_DIR without a leading slash makes
+          # this list an empty prefix -- and delete_orphans then removes every
+          # document of the source.
+          uri: ${DOWNLOAD_URI}
+          poll_interval_s: 300
+          delete_orphans: true
+          # Adds each document's .meta.json sidecar (source_uri, source_url,
+          # manifest metadata, ...) and, for a PDF, its page_count and own
+          # title/author/dates/... to its metadata (soliplex.agents.haiku_metadata).
+          metadata_provider: soliplex-metadata
+          include_patterns: ["*.md", "*.pdf", "*.adoc", "*.pptx", "*.puml", "*.plantuml", "*.asciidoc", "*.docx", "*.xlsx", "*.ppsx", "*.txt", "*.csv"]
+          ignore_patterns: ["*.json", "*.meta.json"]

@@ -91,6 +91,30 @@ cd ingester-agents
 uv sync
 ```
 
+### Local models and the TUI: the `full` extra
+
+soliplex.agents depends on `haiku-rag-slim[ingester]`. That covers a haiku
+config which converts and chunks with `docling-serve`, and uses a remote,
+OpenAI-compatible embedder and reranker (vLLM, Ollama, OpenAI, ...). It
+leaves out local docling, transformers and torch.
+
+Install the `full` extra, which pulls in the full `haiku-rag`, if the haiku
+config uses any of these:
+
+- `converter: docling-local` or `chunker: docling-local`;
+- a local or SDK reranker: `cross-encoder`, `jina`, `cohere` or
+  `zeroentropy`;
+- `voyageai` embeddings;
+- `haiku-rag chat` / `haiku-rag inspect` (the TUI).
+
+```bash
+uv add "soliplex.agents[full]"
+# or
+pip install "soliplex.agents[full]"
+# or, from source
+uv sync --extra full
+```
+
 ## Configuration
 
 The agents use environment variables for configuration. Create a `.env` file or export these variables:
@@ -1098,6 +1122,7 @@ When `delete_stale: true` is set in a manifest's `config` block, the runner remo
 - For a WebDAV `urls_file` / `urls` component, a URL that fails to be **probed** (resolving its validator and type before download, beyond the tolerated `info` / `HEAD` failures) is left out of the inventory, so it counts as a per-file error (`stage: "probe"` in the component's `errors`) rather than a removal.
 - The same errors also skip the run's **haiku load**, which would otherwise delete from the database whatever is missing from the folder; so does a download location left empty. See [haiku-rag Loading](#haiku-rag-loading).
 - A component that returns **no items** counts as a success unless it sets `error_on_empty: true` (see below), so an empty listing would otherwise delete every document the source holds.
+- A source's **local state** that cannot be read (a locked or corrupt state database) raises `StateReadError` instead of reading as empty: the component fails, so `delete_stale` and the load are skipped, rather than the sweep taking "nothing is known" to mean "delete everything". An unreadable SCM sync marker likewise fails the component instead of starting a full sync.
 
 **Empty-result protection:**
 
@@ -2093,11 +2118,14 @@ documents of their own; [back-fill](#pdf-attachments) them.
 Both example configs in `example-haiku-configs/` name `soliplex-metadata`:
 
 ```yaml
-  sources:
-    - type: fs
-      id: ${SOURCE}
-      root: ${DOWNLOAD_DIR}/${SOURCE}
-      metadata_provider: soliplex-metadata
+ingester:
+  databases:
+    db:
+      sources:
+        - type: fs
+          id: ${SOURCE}
+          root: ${DOWNLOAD_DIR}/${SOURCE}
+          metadata_provider: soliplex-metadata
 ```
 
 #### Sidecar metadata

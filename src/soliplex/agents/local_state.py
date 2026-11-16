@@ -43,6 +43,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
+from soliplex.agents import StateReadError
 from soliplex.agents import local_store
 from soliplex.agents.common import mime
 from soliplex.agents.config import settings
@@ -195,13 +196,17 @@ def load_file_state(source: str) -> dict[str, dict]:
 
     Returns:
         Dict mapping URI to ``{"sha256", "etag", "size", "mime_type"}``.
+
+    Raises:
+        StateReadError: The state database could not be read. Never an
+            empty result instead: the stale sweep would take an empty
+            state to mean "nothing is known" and delete every document.
     """
     try:
         with _get_connection(source) as conn:
             rows = conn.execute("SELECT uri, sha256, etag, size, mime_type FROM files").fetchall()
     except (sqlite3.Error, OSError) as exc:
-        logger.warning("Cannot read state for %s: %s", source, exc)
-        return {}
+        raise StateReadError("state", source, exc) from exc
     return {r[0]: {"sha256": r[1], "etag": r[2], "size": r[3], "mime_type": r[4]} for r in rows}
 
 
@@ -467,13 +472,17 @@ def get_sync_meta(source: str) -> dict:
         Dict with ``source_id``, ``last_commit_sha``, ``last_sync_date``
         (a :class:`datetime.datetime` or ``None``), ``branch`` and
         ``metadata``.
+
+    Raises:
+        StateReadError: The state database could not be read. Never the
+            "no marker" default instead, which would turn an incremental
+            sync into a full one.
     """
     try:
         with _get_connection(source) as conn:
             row = conn.execute("SELECT last_commit_sha, branch, last_sync_date, metadata FROM sync WHERE id = 1").fetchone()
     except (sqlite3.Error, OSError) as exc:
-        logger.warning("Cannot read sync meta for %s: %s", source, exc)
-        row = None
+        raise StateReadError("sync meta", source, exc) from exc
 
     if row is None:
         return {

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from soliplex.agents import StateReadError
 from soliplex.agents import local_state
 from soliplex.agents import local_store
 from soliplex.agents import store as agent_store
@@ -83,20 +84,42 @@ def test_prune_files_nothing_removed(state_env):
     assert local_state.prune_files("s", {"a", "b"}) == []
 
 
-def test_load_file_state_db_error_returns_empty(state_env, monkeypatch):
+def test_load_file_state_db_error_raises(state_env, monkeypatch):
+    """An unreadable state is never "no state": the stale sweep would delete everything."""
+
     def boom(_source):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(local_state, "_get_connection", boom)
-    assert local_state.load_file_state("s") == {}
+    with pytest.raises(StateReadError, match="Cannot read state for s: database is locked") as raised:
+        local_state.load_file_state("s")
+    assert raised.value.source == "s"
+    assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
 
 
-def test_get_sync_meta_db_error_returns_default(state_env, monkeypatch):
+def test_get_sync_meta_db_error_raises(state_env, monkeypatch):
+    """An unreadable marker is never "no marker": that would force a full SCM sync."""
+
+    def boom(_source):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(local_state, "_get_connection", boom)
+    with pytest.raises(StateReadError, match="Cannot read sync meta for s: disk gone"):
+        local_state.get_sync_meta("s")
+
+
+@pytest.mark.asyncio
+async def test_reconcile_documents_unreadable_state_deletes_nothing(state_env, monkeypatch):
+    await local_store.write_document("s", "a.md", b"a", "text/markdown", {})
+    local_state.upsert_file("s", "a.md", "1", mime_type="text/markdown")
+
     def boom(_source):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(local_state, "_get_connection", boom)
-    assert local_state.get_sync_meta("s")["last_commit_sha"] is None
+    with pytest.raises(StateReadError):
+        await local_state.reconcile_documents("s", set())
+    assert (local_store.source_dir("s") / "a.md").exists()
 
 
 def test_get_sync_meta_tolerates_corrupt_fields(state_env):

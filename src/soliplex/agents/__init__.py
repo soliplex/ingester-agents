@@ -21,6 +21,20 @@ class WebDAVListingError(Exception):
         super().__init__(f"WebDAV listing of {path} incomplete: {len(errors)} subtree(s) failed: {failed}")
 
 
+class StateReadError(RuntimeError):
+    """A source's local state database could not be read.
+
+    Raised rather than treating the state as empty: an empty file state
+    makes the stale-document sweep delete every stored document, and an
+    empty sync marker turns an incremental SCM sync into a full one. Failing
+    the component skips the sweep (and, by default, the load) instead.
+    """
+
+    def __init__(self, what: str, source: str, cause: Exception):
+        self.source = source
+        super().__init__(f"Cannot read {what} for {source}: {cause}")
+
+
 class EmptyComponentError(Exception):
     """A component with ``error_on_empty`` set found nothing to ingest.
 

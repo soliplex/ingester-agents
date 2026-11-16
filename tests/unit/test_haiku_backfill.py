@@ -597,14 +597,16 @@ embeddings:
     name: unused
     vector_dim: 4
 ingester:
-  sources:
-    - type: fs
-      id: demo
-      root: {root}
-      metadata_provider: soliplex-pdf-metadata
-    - type: fs
-      id: other
-      root: {root}
+  databases:
+    db:
+      sources:
+        - type: fs
+          id: demo
+          root: {root}
+          metadata_provider: soliplex-pdf-metadata
+        - type: fs
+          id: other
+          root: {root}
 """
 
 
@@ -616,9 +618,9 @@ async def _seed(config_path: Path, files: dict[str, str]) -> None:
     from haiku.rag.store.models.chunk import Chunk
 
     config = AppConfig.model_validate(load_yaml_config(config_path))
-    root = Path(config.ingester.sources[0].root)
+    root = Path(config.ingester.databases["db"].sources[0].root)
     async with HaikuRAG(config=config, create=True) as client:
-        ids = []
+        docs = []
         for name, content_type in files.items():
             path = root / name
             doc = await client.import_document(
@@ -626,10 +628,11 @@ async def _seed(config_path: Path, files: dict[str, str]) -> None:
                 [Chunk(content=name, embedding=[0.1, 0.2, 0.3, 0.4])],
                 uri=path.resolve().as_uri(),
                 title=name,
-                metadata={"content_type": content_type, "md5": _md5(path.read_bytes())},
             )
-            ids.append(doc.id)
-        await client.set_document_source(ids, "demo")
+            doc.metadata = {**(doc.metadata or {}), "content_type": content_type, "md5": _md5(path.read_bytes())}
+            docs.append(doc)
+        await _store_ingestion_keys(client, docs)
+        await client.set_document_source([doc.id for doc in docs], "demo")
 
 
 async def _metadata(config_path: Path) -> dict[str, dict]:
@@ -727,6 +730,13 @@ def test_main_requires_a_config():
         haiku_backfill.main([])
 
 
+def test_main_requires_the_database_to_be_ingested(tmp_path):
+    config = tmp_path / "haiku.rag.yaml"
+    config.write_text(f"lancedb:\n  databases:\n    db: {(tmp_path / 'demo.lancedb').as_posix()}\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="ingester.databases names no sources for 'db'"):
+        haiku_backfill.main([f"--config={config}"])
+
+
 async def _seed_attachments(config_path: Path) -> None:
     """Index ``bundle.pdf`` and its attachments the way haiku-rag stores them."""
     from docling_core.types.doc.document import DoclingDocument
@@ -736,7 +746,7 @@ async def _seed_attachments(config_path: Path) -> None:
     from haiku.rag.store.models.chunk import Chunk
 
     config = AppConfig.model_validate(load_yaml_config(config_path))
-    path = Path(config.ingester.sources[0].root) / "bundle.pdf"
+    path = Path(config.ingester.databases["db"].sources[0].root) / "bundle.pdf"
     root_uri = path.resolve().as_uri()
     body = path.read_bytes()
     rows = [(root_uri, "application/pdf", _md5(body), None)]
@@ -745,34 +755,33 @@ async def _seed_attachments(config_path: Path) -> None:
         for nested in (extract_attachments(attachment.data, attachment.uri) or {}).values():
             rows.append((nested.uri, nested.content_type, nested.content_hash, attachment.uri))
     async with HaikuRAG(config=config) as client:
-        ids = []
-        children = []
+        docs = []
         for uri, content_type, md5, parent in rows:
             doc = await client.import_document(
                 DoclingDocument(name=uri),
                 [Chunk(content=uri, embedding=[0.1, 0.2, 0.3, 0.4])],
                 uri=uri,
-                metadata={"content_type": content_type, "md5": md5},
             )
-            ids.append(doc.id)
+            doc.metadata = {**(doc.metadata or {}), "content_type": content_type, "md5": md5}
             if parent:
-                doc.metadata = {**(doc.metadata or {}), "parent_uri": parent}
-                children.append(doc)
-        await client.set_document_source(ids[:1], "demo")
-        await _link_attachments(client, children)
+                doc.metadata["parent_uri"] = parent
+            docs.append(doc)
+        await _store_ingestion_keys(client, docs)
+        await client.set_document_source([docs[0].id], "demo")
 
 
-async def _link_attachments(client, children: list) -> None:
-    """Store each child's ``parent_uri`` as haiku-rag's ingestion does.
+async def _store_ingestion_keys(client, docs: list) -> None:
+    """Store each document's metadata as haiku-rag's ingestion does.
 
-    Since haiku-rag 0.94 ``parent_uri`` is ingestion-owned: every public write
-    path (``import_document`` included) drops it from the caller's metadata,
-    and only attachment extraction sets it. This writes it the way
-    ``set_document_source`` writes ``source_id``, below the public API.
+    ``content_type``, ``md5`` and ``parent_uri`` are ingestion-owned: every
+    public write path (``import_document`` included) drops them from the
+    caller's metadata, and only the source pipeline sets them. This writes them the way ``set_document_source`` writes
+    ``source_id``, below the public API; call it before that, which merges
+    onto the stored metadata.
     """
-    session = client._single_session("link attachments")
+    session = client._single_session("store ingestion keys")
     async with session.store._write_lock:
-        await session.document_repository.update_meta_all(children)
+        await session.document_repository.update_meta_all(docs)
 
 
 def test_main_fills_attachments(database, capsys):
