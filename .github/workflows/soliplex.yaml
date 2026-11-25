@@ -97,7 +97,7 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Notify Slack on failure
-        uses: slackapi/slack-github-action@v4.0.0
+        uses: slackapi/slack-github-action@v4.1.0
         with:
           webhook: ${{ secrets.SLACK_NOTIFY_URL }}
           webhook-type: incoming-webhook
